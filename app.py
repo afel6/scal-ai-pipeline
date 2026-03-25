@@ -60,7 +60,7 @@ async def batch_process(files: List[UploadFile] = File(...)):
         ai_insights = llm_writer.generate_report_insights(archie_params, endpoints)
         
         # 4. Automate Microsoft Word Generation
-        exporter = SCALReportBuilder(well_name=well_name)
+        exporter = SCALReportBuilder(well_name=well_name, raw_df=df)
         exporter.build_title_page()
         exporter.add_archies_table(archie_params)
         exporter.add_saturation_endpoints(endpoints)

@@ -1,48 +1,84 @@
 import pandas as pd
 import glob
 import os
-import zipfile
 
 class SCALBatchIngestion:
     """
-    Designed to ingest massive folders or ZIP files containing dozens of individual 
-    CSV lab exports (e.g., 55 disjointed files for a single well).
+    Ingests massive folders or ZIP files containing highly complex, dirty 
+    Excel (.xlsx) or CSV lab exports. Extremely resilient fuzzy logic mapping.
     """
     def __init__(self, target_path: str):
         self.target_path = target_path
 
     def compile_well_dataframe(self) -> pd.DataFrame:
         """
-        Dynamically loops through all extracted CSV files, identifies internal
-        Headers (Porosity, MICP, RI, FF), and cleanly merges them.
+        Dynamically loops through all extracted files, aggressively hunts for
+        complex variations of Petrophysical headers, and cleanly merges them.
         """
-        csv_files = glob.glob(os.path.join(self.target_path, '**', '*.csv'), recursive=True)
+        all_files = glob.glob(os.path.join(self.target_path, '**', '*'), recursive=True)
+        # Capture strictly Data files
+        data_files = [f for f in all_files if f.endswith('.csv') or f.endswith('.xlsx') or f.endswith('.xls')]
+        
         master_data = []
         
-        for file in csv_files:
+        for file in data_files:
             try:
-                df = pd.read_csv(file)
-            except Exception:
+                if file.endswith('.csv'):
+                    df = pd.read_csv(file)
+                else:
+                    df = pd.read_excel(file)
+            except Exception as e:
+                print(f"Skipping unreadable file block {os.path.basename(file)}: {e}")
                 continue
                 
-            df.columns = [str(c).strip().lower() for c in df.columns]
-            for _, row in df.iterrows():
+            # Aggressive Fuzzy matching logic for arbitrary oilfield spreadsheet designs
+            cols = [str(c).strip().lower() for c in df.columns]
+            df.columns = cols
+
+            def get_col_data(options):
+                for col in df.columns:
+                    for opt in options:
+                        if opt in col:
+                            return df[col]
+                return pd.Series([None] * len(df))
+
+            depth_s = get_col_data(['depth', 'ft', 'm md'])
+            poro_s = get_col_data(['porosity', 'poro', 'phi', 'ϕ'])
+            perm_s = get_col_data(['permeability', 'perm', 'k ', 'klinkenberg', 'kair'])
+            ff_s = get_col_data(['ff', 'f.f.', 'formation factor'])
+            sw_s = get_col_data(['sw', 'water saturation', 'brine sat'])
+            ri_s = get_col_data(['ri', 'r.i.', 'resistivity index'])
+
+            for i in range(len(df)):
                 extracted = {
-                    "Depth": row.get('depth', 8500.0),
-                    "Porosity": row.get('porosity', row.get('phi', None)),
-                    "Permeability": row.get('permeability', row.get('k', None)),
-                    "Formation_Factor": row.get('ff', row.get('formation_factor', None)),
-                    "Brine_Saturation": row.get('sw', row.get('saturation', None)),
-                    "Resistivity_Index": row.get('ri', row.get('resistivity', None))
+                    "Depth": depth_s.iloc[i] if pd.notna(depth_s.iloc[i]) else 8500.0,
+                    "Porosity": poro_s.iloc[i] if pd.notna(poro_s.iloc[i]) else None,
+                    "Permeability": perm_s.iloc[i] if pd.notna(perm_s.iloc[i]) else None,
+                    "Formation_Factor": ff_s.iloc[i] if pd.notna(ff_s.iloc[i]) else None,
+                    "Brine_Saturation": sw_s.iloc[i] if pd.notna(sw_s.iloc[i]) else None,
+                    "Resistivity_Index": ri_s.iloc[i] if pd.notna(ri_s.iloc[i]) else None
                 }
-                if any(v is not None for k, v in extracted.items() if k != "Depth"):
+                
+                # Check if it has any valid oilfield numbers
+                metric_values = [v for k, v in extracted.items() if k != "Depth" and v is not None]
+                if metric_values and not all(pd.isna(v) for v in metric_values):
+                    # Force data sanitization explicitly to standard Floats
+                    for k in extracted:
+                        if pd.isna(extracted[k]): 
+                            extracted[k] = None
+                        elif extracted[k] is not None:
+                            try:
+                                extracted[k] = float(extracted[k])
+                                # Standardize porosity to fraction if it was uploaded as percentage (e.g. 22%)
+                                if k == "Porosity" and extracted[k] > 1.0:
+                                    extracted[k] = extracted[k] / 100.0
+                            except:
+                                extracted[k] = None
+                                
                     master_data.append(extracted)
 
-        # Fallback to dummy data if no valid CSVs exist (Mock testing mode)
         if not master_data:
-            master_data = [
-                {"Depth": 8500, "Porosity": 0.22, "Permeability": 150, "Formation_Factor": 18.5, "Brine_Saturation": 1.0, "Resistivity_Index": 1.0},
-                {"Depth": 8500, "Porosity": 0.22, "Permeability": 150, "Formation_Factor": 18.5, "Brine_Saturation": 0.3, "Resistivity_Index": 8.4}
-            ]
-
+            # We actively crash and report error rather than secretly faking a report
+            raise ValueError("Zero matching numerical samples were identified across your spreadsheets! Ensure your columns remotely resemble: Porosity, Permeability, FF, Sw, RI.")
+            
         return pd.DataFrame(master_data).dropna(how='all')
