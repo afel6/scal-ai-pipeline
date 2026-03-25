@@ -1,18 +1,18 @@
-from fastapi import FastAPI, UploadFile, File
+from fastapi import FastAPI, UploadFile, File, Form
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
-from typing import List
-import shutil
+from typing import Optional
+import json
 import os
-import zipfile
+import re
 import time
+import pandas as pd
 
-from scal_ingestion import SCALBatchIngestion
+from conversational_core import PRCChatAssistant
 from petrophysics_engine import ArchieCalculator
-from llm_insight_generator import LLMInsightGenerator
 from report_builder import SCALReportBuilder
 
-app = FastAPI(title="PRC Enterprise Pipeline - Archie's Parameters")
+app = FastAPI(title="PRC Conversational Intelligence Hub")
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -21,74 +21,82 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# Centralize the API environment directly into memory
 api_key = os.environ.get('GEMINI_API_KEY', 'DUMMY_KEY')
-llm_writer = LLMInsightGenerator(api_key=api_key)
-physics_calc = ArchieCalculator()
+chat_ai = PRCChatAssistant(api_key=api_key)
 
-@app.post("/api/batch_process")
-async def batch_process(files: List[UploadFile] = File(...)):
-    # Unique dynamically generated ID for batch execution runs
-    well_name = f"PRC_Batch_Study_{int(time.time())}"
-    temp_dir = f"temp_extraction_{well_name}"
-    
+@app.post("/api/chat")
+async def process_chat(
+    history: str = Form(...), 
+    message: str = Form(""), 
+    file: Optional[UploadFile] = None
+):
+    """
+    Primary ingestion node mapping live conversational interactions and processing
+    the autonomous structural execution triggers initiated by the LLM.
+    """
     try:
-        os.makedirs(temp_dir, exist_ok=True)
+        chat_history = json.loads(history)
         
-        # Sequentially buffer every file the user selected into the engine
-        for file in files:
-            file_path = os.path.join(temp_dir, file.filename)
-            with open(file_path, "wb") as buffer:
-                shutil.copyfileobj(file.file, buffer)
-                
-            # If any selected file happens to be a Zip, extract its payload simultaneously
-            if file.filename.endswith('.zip'):
-                with zipfile.ZipFile(file_path, 'r') as zip_ref:
-                    zip_ref.extractall(temp_dir)
-                
-        # 1. Ingest Massive Framework (Will swallow all 55 CSV files natively)
-        ingestion = SCALBatchIngestion(temp_dir)
-        df = ingestion.compile_well_dataframe()
-        
-        if df.empty:
-            return {"status": "error", "message": "Failed to extract valid tabular data from the uploaded files."}
+        file_bytes = None
+        mime_type = None
+        if file:
+            file_bytes = await file.read()
+            mime_type = file.content_type
             
-        # 2. Mathematical Archie's & Physics Computations
-        archie_params = physics_calc.compute_archie_parameters(df)
-        endpoints = physics_calc.compute_saturation_endpoints(df)
+        # 1. Talk strictly to the Multimodal Gemini Co-Author
+        ai_response = chat_ai.process_chat(chat_history, message, file_bytes, mime_type)
         
-        # 3. Conversational AI Natural Language Writer
-        ai_insights = llm_writer.generate_report_insights(archie_params, endpoints)
+        # 2. Stealth Surveillance: Actively intercept JSON triggers hiding inside the response text stream
+        match = re.search(r'```json\s*(\{.*?__PRC_REPORT__.*?\})\s*```', ai_response, re.DOTALL)
         
-        # 4. Automate Microsoft Word Generation
-        exporter = SCALReportBuilder(well_name=well_name, raw_df=df)
-        exporter.build_title_page()
-        exporter.add_archies_table(archie_params)
-        exporter.add_saturation_endpoints(endpoints)
-        exporter.add_ai_conclusion(ai_insights)
-        
-        docx_path = exporter.export()
+        if match:
+            # The AI successfully deduced the math parameters natively from the conversation!
+            trigger_data = json.loads(match.group(1))
+            
+            df = pd.DataFrame(trigger_data['data'])
+            
+            # Execute backend physics calculations natively seamlessly 
+            physics_calc = ArchieCalculator()
+            archie_params = physics_calc.compute_archie_parameters(df)
+            endpoints = physics_calc.compute_saturation_endpoints(df)
+            
+            # Construct the absolute elite Matplotlib/Docx render
+            well_name = f"Conversational_Study_{int(time.time())}"
+            exporter = SCALReportBuilder(well_name=well_name, raw_df=df)
+            exporter.build_title_page()
+            exporter.add_archies_table(archie_params)
+            exporter.add_saturation_endpoints(endpoints)
+            exporter.add_ai_conclusion(trigger_data['ai_conclusion'])
+            
+            docx_path = exporter.export()
+            
+            # Deliver the generated intercept payload
+            return {
+                "status": "success",
+                "is_report_ready": True,
+                "download_url": f"/api/download/{docx_path}",
+                "reply": "Excellent parameters! I have confidently processed the arrays, executed Archie's mathematical regressions, and synthesized all our visual assessments into the proprietary PRC Word Document format.\n\nClick the module below to instantly securely extract your finalize study!"
+            }
+            
+        # If no trigger was tripped, it's just a normal conversation reply
+        # Strip out any potential isolated formatting artifacts so the user receives a purely clean text stream
+        clean_response = re.sub(r'```json.*?```', '', ai_response, flags=re.DOTALL)
         
         return {
             "status": "success",
-            "message": "Archie's simulation complete.",
-            "download_url": f"/api/download/{docx_path}",
-            "samples_processed": len(df),
-            "ai_conclusion": ai_insights
+            "is_report_ready": False,
+            "reply": clean_response.strip()
         }
         
     except Exception as e:
-        return {"status": "error", "message": f"Archie's Engine Error: {str(e)}"}
-    finally:
-        # Guarantee massive folder caches are perfectly wiped
-        if os.path.exists(temp_dir):
-            shutil.rmtree(temp_dir, ignore_errors=True)
+        return {"status": "error", "reply": f"Deep Learning Inference Failure: {str(e)}"}
 
 @app.get("/api/download/{filename}")
 async def download_file(filename: str):
     if os.path.exists(filename):
         return FileResponse(path=filename, filename=filename, media_type='application/vnd.openxmlformats-officedocument.wordprocessingml.document')
-    return {"error": "File not found."}
+    return {"error": "Target Architecture Not Compiled"}
 
 @app.get("/")
-def read_root():
-    return {"message": "PRC Archie's Parameters API is running."}
+def read_root(): return {"message": "PRC Chat Matrix Array Node Localhost"}

@@ -1,137 +1,171 @@
-import React, { useState, useRef } from 'react';
-import { UploadCloud, CheckCircle, AlertTriangle, Layers, Database, Download } from 'lucide-react';
+import React, { useState, useRef, useEffect } from 'react';
+import { Send, Paperclip, Bot, User, Download, FileText, Database, Circle } from 'lucide-react';
 import axios from 'axios';
 
 function App() {
+  const [messages, setMessages] = useState([
+    { role: 'model', text: 'Welcome directly to the PRC Engineering Hub. \nWe have discontinued batch-processing forms in favor of this dedicated conversational workspace. Please tell me your Well Name, or actively upload your fragmented laboratory photos/CSV sheets to begin our SCAL analysis step-by-step.' }
+  ]);
+  const [input, setInput] = useState('');
+  const [file, setFile] = useState(null);
   const [loading, setLoading] = useState(false);
-  const [result, setResult] = useState(null);
-  const [error, setError] = useState(null);
-  const fileInputRef = useRef(null);
+  const messagesEndRef = useRef(null);
 
-  const handleUpload = async (filesToUpload) => {
-    // Upgraded array-checking payload constraints
-    if (!filesToUpload || filesToUpload.length === 0) return;
-    setLoading(true);
-    setError(null);
-    setResult(null);
+  const scrollToBottom = () => {
+    messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+  };
 
+  useEffect(() => {
+    scrollToBottom();
+  }, [messages]);
+
+  const handleSend = async () => {
+    if (!input.trim() && !file) return;
+
+    const userMessage = { role: 'user', text: input, fileName: file ? file.name : null };
+    setMessages(prev => [...prev, userMessage]);
+    
+    // Package Data organically for backend
     const formData = new FormData();
-    // Intelligently sequence 55-CSV arrays into the payload
-    Array.from(filesToUpload).forEach(file => {
-       formData.append('files', file);
-    });
+    formData.append('history', JSON.stringify(messages)); // We pass prior history natively
+    formData.append('message', input);
+    if (file) formData.append('file', file);
+
+    setInput('');
+    setFile(null);
+    setLoading(true);
 
     try {
       const apiUrl = import.meta.env.VITE_API_URL || 'http://localhost:8000';
-      const response = await axios.post(`${apiUrl}/api/batch_process`, formData, {
-        headers: { 'Content-Type': 'multipart/form-data' },
-        timeout: 60000 
-      });
+      const response = await axios.post(`${apiUrl}/api/chat`, formData);
+      
       if (response.data.status === 'success') {
-        setResult(response.data);
+        const aiMessage = { 
+          role: 'model', 
+          text: response.data.reply,
+          download_url: response.data.is_report_ready ? response.data.download_url : null
+        };
+        setMessages(prev => [...prev, aiMessage]);
       } else {
-        setError(response.data.message || 'Error executing macro-level analysis.');
+        setMessages(prev => [...prev, { role: 'model', text: `ERROR: ${response.data.reply || response.data.message}` }]);
       }
-    } catch (err) {
-      setError(err.message || 'Network Error: Ensure the FASTAPI backend is actively running.');
+    } catch (error) {
+      setMessages(prev => [...prev, { role: 'model', text: `NETWORK ERROR: The Python Core is fully offline or unreachable. Terminate the black terminal and run run_pipeline.bat again.` }]);
     } finally {
       setLoading(false);
     }
   };
 
-  const handleDownload = () => {
-      if(!result || !result.download_url) return;
-      const apiUrl = import.meta.env.VITE_API_URL || 'http://localhost:8000';
-      window.open(`${apiUrl}${result.download_url}`, "_blank");
+  const handleDownload = (url) => {
+    const apiUrl = import.meta.env.VITE_API_URL || 'http://localhost:8000';
+    window.open(`${apiUrl}${url}`, "_blank");
   };
 
   return (
-    <div className="min-h-screen p-8 bg-black text-slate-100 flex flex-col items-center font-sans selection:bg-indigo-500/30">
+    <div className="min-h-screen bg-[#09090b] text-slate-100 flex flex-col font-sans">
       
-      <div className="w-full max-w-7xl flex items-center justify-between mb-16 border-b border-white/5 pb-6 mt-4">
+      {/* Header Block */}
+      <header className="w-full bg-[#050505] border-b border-emerald-900/30 p-5 flex items-center justify-between shadow-2xl z-10 relative">
         <div className="flex items-center gap-4">
-           <Database className="w-10 h-10 text-emerald-500" />
+           <Database className="w-8 h-8 text-emerald-500" />
            <div>
-             <h1 className="text-2xl font-black tracking-widest text-white">PETROLEUM RESEARCH CENTER</h1>
-             <p className="text-xs text-emerald-500 tracking-[0.2em] font-bold">ENTERPRISE SCAL MULTI-FILE ARCHITECTURE</p>
+             <h1 className="text-xl font-black tracking-widest text-emerald-50 text-shadow-sm">PRC CO-AUTHOR</h1>
+             <p className="text-[10px] text-emerald-500/80 tracking-[0.3em] font-bold uppercase">Conversational SCAL Intelligence</p>
            </div>
         </div>
-        <div className="text-right">
-           <p className="text-xs text-slate-500 uppercase tracking-widest">System Status</p>
-           <p className="text-emerald-400 font-mono text-sm shadow-[0_0_15px_rgba(16,185,129,0.2)]">● ONLINE CLUSTER</p>
+        <div className="flex items-center gap-3">
+           <Circle className="w-2 h-2 text-emerald-500 fill-emerald-500 animate-pulse" />
+           <span className="text-xs text-emerald-500/70 font-mono tracking-widest">GEMINI 2.5 PRO ACTIVE</span>
         </div>
-      </div>
+      </header>
 
-      <main className="w-full max-w-4xl flex flex-col gap-6">
-        
-        <div className="bg-[#0a0a0a] border border-white/10 rounded-2xl p-1 shadow-2xl">
-          <div className="bg-[#111] rounded-xl p-16 text-center 
-                          hover:bg-[#151515] transition-all cursor-pointer border border-transparent hover:border-emerald-500/50"
-               onClick={() => fileInputRef.current?.click()}
-          >
-            <input 
-              type="file" 
-              ref={fileInputRef} 
-              className="hidden" 
-              multiple
-              accept=".pdf,.doc,.docx,.xlsx,.xls,.csv,.zip"
-              onChange={(e) => handleUpload(e.target.files)}
-            />
-            <div className="w-24 h-24 rounded-full bg-emerald-500/10 flex items-center justify-center mx-auto mb-8 
-                            shadow-[0_0_30px_rgba(16,185,129,0.15)] ring-1 ring-emerald-500/30">
-               <UploadCloud className="w-10 h-10 text-emerald-400" />
+      {/* Infinite Chat Log */}
+      <main className="flex-1 overflow-y-auto p-4 md:p-8 space-y-6 scroll-smooth bg-[radial-gradient(ellipse_at_top,_var(--tw-gradient-stops))] from-[#0f172a]/20 via-[#09090b] to-[#09090b]">
+        {messages.map((msg, idx) => (
+          <div key={idx} className={`flex gap-4 max-w-4xl mx-auto ${msg.role === 'user' ? 'flex-row-reverse' : ''}`}>
+            
+            <div className={`w-10 h-10 rounded-full flex items-center justify-center shrink-0 shadow-lg border ${
+              msg.role === 'user' ? 'bg-slate-800 border-slate-700' : 'bg-emerald-950 border-emerald-800/50'
+            }`}>
+              {msg.role === 'user' ? <User className="w-5 h-5 text-slate-300" /> : <Bot className="w-5 h-5 text-emerald-400" />}
             </div>
-            <h2 className="text-3xl font-light text-white mb-2">Execute Full Well Archie Study</h2>
-            <p className="text-slate-500 text-sm tracking-widest uppercase">SELECT ALL 55 CSV HIGHLIGHTS, ZIP, OR SPREADSHEETS HERE</p>
-          </div>
-        </div>
 
+            <div className={`space-y-3 ${msg.role === 'user' ? 'items-end' : 'items-start'} flex flex-col`}>
+              <div className={`p-5 rounded-2xl text-sm md:text-[15px] leading-relaxed shadow-2xl max-w-[85%] ${
+                msg.role === 'user' 
+                  ? 'bg-slate-800 text-slate-200 rounded-tr-none border border-slate-700/50' 
+                  : 'bg-[#111116] text-emerald-50/90 rounded-tl-none border border-emerald-900/30'
+              }`}>
+                {/* Attachment Module Node */}
+                {msg.fileName && (
+                  <div className="flex items-center gap-2 mb-3 bg-black/40 p-2 rounded-lg border border-slate-700/50 w-fit">
+                    <FileText className="w-4 h-4 text-emerald-400" />
+                    <span className="text-xs font-mono text-emerald-300">{msg.fileName}</span>
+                  </div>
+                )}
+                
+                {/* Natural Response Container */}
+                <p className="whitespace-pre-wrap font-serif text-[16px] leading-[1.8]">{msg.text}</p>
+
+                {/* Sub-surface File Extract Module (If Trigger Passed) */}
+                {msg.download_url && (
+                  <button 
+                    onClick={() => handleDownload(msg.download_url)}
+                    className="mt-6 w-full bg-emerald-600/20 hover:bg-emerald-600/40 border border-emerald-500/50 text-emerald-300 font-bold tracking-widest uppercase px-6 py-4 rounded-xl flex items-center justify-center gap-3 transition-all hover:scale-[1.02] shadow-[0_0_30px_rgba(16,185,129,0.1)] mb-2"
+                  >
+                    <Download className="w-5 h-5"/> EXPORT PRC REPORT NOW
+                  </button>
+                )}
+              </div>
+            </div>
+            
+          </div>
+        ))}
         {loading && (
-          <div className="bg-indigo-950/20 border border-indigo-500/20 rounded-2xl p-12 flex flex-col items-center justify-center">
-             <Layers className="w-12 h-12 text-indigo-400 mb-6 animate-spin" />
-             <h3 className="text-xl font-light text-white mb-2">Normalizing Array Datasets Natively...</h3>
-             <p className="text-indigo-400/60 text-sm font-mono tracking-wider">Deploying LLM Reservoir Engineering Co-Author & Microsoft Word Generator...</p>
-          </div>
-        )}
-
-        {error && (
-          <div className="bg-red-950/30 border border-red-500/30 rounded-2xl p-8 flex items-start gap-6">
-             <AlertTriangle className="w-10 h-10 text-red-500 shrink-0" />
-             <div>
-               <h3 className="text-xl font-bold text-red-400">CRITICAL SYSTEM ERROR</h3>
-               <p className="text-red-300/70 mt-2 font-mono text-sm leading-relaxed">{error}</p>
+          <div className="flex gap-4 max-w-4xl mx-auto">
+             <div className="w-10 h-10 rounded-full flex items-center justify-center shrink-0 bg-emerald-950 border border-emerald-800/50">
+                <Bot className="w-5 h-5 text-emerald-400" />
+             </div>
+             <div className="bg-[#111116] p-4 rounded-2xl rounded-tl-none border border-emerald-900/30 flex items-center gap-3">
+               <span className="w-2 h-2 bg-emerald-500 rounded-full animate-bounce"></span>
+               <span className="w-2 h-2 bg-emerald-500 rounded-full animate-bounce [animation-delay:0.2s]"></span>
+               <span className="w-2 h-2 bg-emerald-500 rounded-full animate-bounce [animation-delay:0.4s]"></span>
              </div>
           </div>
         )}
-
-        {result && (
-          <div className="bg-emerald-950/20 border border-emerald-500/30 rounded-2xl p-10 overflow-hidden relative">
-            <div className="absolute top-0 right-0 w-64 h-64 bg-emerald-500/10 blur-[80px] rounded-full pointer-events-none"></div>
-            
-            <div className="flex items-center gap-5 mb-8 border-b border-emerald-500/20 pb-8">
-              <CheckCircle className="w-12 h-12 text-emerald-400" />
-              <div>
-                <h2 className="text-3xl font-bold text-white">Batch Multi-File Compilation Online</h2>
-                <p className="text-emerald-400/80 font-mono mt-1">Found ({result.samples_processed}) Valid Sample Arrays across deployed networks.</p>
-              </div>
-            </div>
-
-            <div className="bg-slate-950/80 border border-emerald-500/30 p-8 rounded-2xl mb-8">
-               <h3 className="text-emerald-400 font-bold mb-4 uppercase tracking-widest text-sm">Artificial Intelligence Reservoir Interpretation</h3>
-               <p className="text-slate-300 font-serif leading-loose text-lg whitespace-pre-wrap">{result.ai_conclusion}</p>
-            </div>
-
-            <div className="flex justify-center border-t border-white/5 pt-10">
-               <button 
-                 onClick={handleDownload}
-                 className="bg-emerald-600 hover:bg-emerald-500 text-white font-bold tracking-widest uppercase px-12 py-5 rounded-lg flex items-center justify-center gap-4 transition-all hover:scale-[1.02] shadow-[0_0_40px_rgba(16,185,129,0.3)] ring-1 ring-emerald-400"
-               >
-                 <Download className="w-6 h-6"/> Download Authored MS Word Final Report
-               </button>
-            </div>
-          </div>
-        )}
+        <div ref={messagesEndRef} />
       </main>
+
+      {/* Neural Input Interface */}
+      <footer className="p-4 md:p-6 bg-[#050505] border-t border-slate-800/50 z-10 relative">
+        <div className="max-w-4xl mx-auto relative flex items-center gap-3 bg-[#111116] border border-slate-800 rounded-full p-2 pl-4 focus-within:border-emerald-500/50 focus-within:ring-1 focus-within:ring-emerald-500/20 transition-all shadow-2xl">
+          
+          <label className="cursor-pointer shrink-0 p-2 hover:bg-slate-800 rounded-full transition-colors relative group">
+            <input type="file" className="hidden" onChange={(e) => setFile(e.target.files[0])} />
+            <Paperclip className={`w-5 h-5 ${file ? 'text-emerald-400' : 'text-slate-400'}`} />
+            {file && <span className="absolute -top-1 -right-1 w-3 h-3 bg-emerald-500 rounded-full border-2 border-[#111116]"></span>}
+          </label>
+
+          <input 
+            type="text" 
+            value={input}
+            onChange={(e) => setInput(e.target.value)}
+            onKeyDown={(e) => e.key === 'Enter' && handleSend()}
+            placeholder={file ? `${file.name} attached. Add a message...` : "Talk to the PRC AI (Upload CSVs, core photos, or type data)..."}
+            className="flex-1 bg-transparent border-none outline-none text-emerald-50 placeholder-slate-500 text-[15px] px-2 font-serif"
+          />
+
+          <button 
+            onClick={handleSend}
+            disabled={loading || (!input.trim() && !file)}
+            className="bg-emerald-600 hover:bg-emerald-500 text-white p-3 rounded-full shrink-0 transition-transform hover:scale-105 disabled:opacity-50 disabled:hover:scale-100 disabled:cursor-not-allowed shadow-[0_0_15px_rgba(16,185,129,0.3)]"
+          >
+            <Send className="w-5 h-5 -ml-0.5 mt-0.5" />
+          </button>
+          
+        </div>
+        <p className="text-center text-[10px] text-emerald-500/30 mt-4 font-mono tracking-widest uppercase">Proprietary Petroleum Research Center Core Interface</p>
+      </footer>
     </div>
   );
 }
