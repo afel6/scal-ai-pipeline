@@ -18,6 +18,7 @@ function App() {
   const [input, setInput] = useState('');
   const [file, setFile] = useState(null);
   const [loading, setLoading] = useState(false);
+  const [uploadStatus, setUploadStatus] = useState(''); // 'uploading' | 'thinking' | ''
   const [sessionId, setSessionId] = useState(() => localStorage.getItem('prc_session_id') || '');
   const [sessions, setSessions] = useState([]);
   const [sidebarOpen, setSidebarOpen] = useState(true);
@@ -108,9 +109,17 @@ function App() {
     setInput('');
     setFile(null);
     setLoading(true);
+    setUploadStatus(file ? 'uploading' : 'thinking');
 
     try {
-      const response = await axios.post(`${API_URL}/api/chat`, formData, { timeout: 120000 });
+      // Small delay to allow 'uploading' state to render before heavy processing
+      const response = await axios.post(`${API_URL}/api/chat`, formData, {
+        timeout: 120000,
+        onUploadProgress: (e) => {
+          if (e.progress >= 1) setUploadStatus('thinking');
+        }
+      });
+
       if (response.data.session_id) setSessionId(response.data.session_id);
       setServerStatus('online');
 
@@ -129,6 +138,7 @@ function App() {
       setServerStatus('offline');
     } finally {
       setLoading(false);
+      setUploadStatus('');
     }
   };
 
@@ -232,10 +242,19 @@ function App() {
               <div className="w-8 h-8 rounded-full flex items-center justify-center shrink-0 bg-emerald-950 border border-emerald-800/50">
                 <Bot className="w-3.5 h-3.5 text-emerald-400" />
               </div>
-              <div className="bg-[#111116] p-4 rounded-2xl rounded-tl-none border border-emerald-900/30 flex items-center gap-2">
-                <span className="w-2 h-2 bg-emerald-500 rounded-full animate-bounce" />
-                <span className="w-2 h-2 bg-emerald-500 rounded-full animate-bounce [animation-delay:0.15s]" />
-                <span className="w-2 h-2 bg-emerald-500 rounded-full animate-bounce [animation-delay:0.3s]" />
+              <div className="bg-[#111116] p-4 rounded-2xl rounded-tl-none border border-emerald-900/30 flex items-center gap-3">
+                {uploadStatus === 'uploading' ? (
+                  <>
+                    <Loader className="w-4 h-4 text-yellow-400 animate-spin shrink-0" />
+                    <span className="text-sm text-yellow-300/80 font-serif">Uploading &amp; parsing file — please wait…</span>
+                  </>
+                ) : (
+                  <>
+                    <span className="w-2 h-2 bg-emerald-500 rounded-full animate-bounce" />
+                    <span className="w-2 h-2 bg-emerald-500 rounded-full animate-bounce [animation-delay:0.15s]" />
+                    <span className="w-2 h-2 bg-emerald-500 rounded-full animate-bounce [animation-delay:0.3s]" />
+                  </>
+                )}
               </div>
             </div>
           )}
