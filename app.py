@@ -6,6 +6,7 @@ import json
 import os
 import re
 import time
+import uuid
 import pandas as pd
 
 from conversational_core import PRCChatAssistant
@@ -21,14 +22,20 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+from dotenv import load_dotenv
+
 # Centralize the API environment directly into memory
+load_dotenv()
 api_key = os.environ.get('GEMINI_API_KEY', 'DUMMY_KEY')
 chat_ai = PRCChatAssistant(api_key=api_key)
 
+# Server-side session memory store — persists entire conversation per browser session
+SESSION_STORE: dict = {}
+
 @app.post("/api/chat")
 async def process_chat(
-    history: str = Form(...), 
-    message: str = Form(""), 
+    message: str = Form(""),
+    session_id: str = Form(""),
     file: Optional[UploadFile] = None
 ):
     """
@@ -36,13 +43,29 @@ async def process_chat(
     the autonomous structural execution triggers initiated by the LLM.
     """
     try:
-        chat_history = json.loads(history)
+        # Resolve or create server-side session memory
+        if not session_id or session_id not in SESSION_STORE:
+            session_id = session_id or str(uuid.uuid4())
+            SESSION_STORE[session_id] = []
+        chat_history = SESSION_STORE[session_id]
         
         file_bytes = None
         mime_type = None
         if file:
-            file_bytes = await file.read()
-            mime_type = file.content_type
+            raw_bytes = await file.read()
+            m_type = file.content_type
+            
+            # Gemini fundamentally rejects raw Excel binaries. We must aggressively intercept and parse them.
+            if m_type in ['application/vnd.ms-excel', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet']:
+                import io
+                excel_df = pd.read_excel(io.BytesIO(raw_bytes))
+                csv_extract = excel_df.to_csv(index=False)
+                # Inject the parsed matrix directly into the LLM's cognitive context stream
+                message += f"\n\n[USER ATTACHED SPREADSHEET '{file.filename}' TRANSLATED TO ARRAY]:\n{csv_extract}"
+            else:
+                # If it's a photo or PDF, Gemini handles it natively.
+                file_bytes = raw_bytes
+                mime_type = m_type
             
         # 1. Talk strictly to the Multimodal Gemini Co-Author
         ai_response = chat_ai.process_chat(chat_history, message, file_bytes, mime_type)
@@ -83,14 +106,25 @@ async def process_chat(
         # Strip out any potential isolated formatting artifacts so the user receives a purely clean text stream
         clean_response = re.sub(r'```json.*?```', '', ai_response, flags=re.DOTALL)
         
+        # Append both turns to server memory before returning
+        chat_history.append({"role": "user", "text": message})
+        chat_history.append({"role": "model", "text": clean_response.strip()})
+        
         return {
             "status": "success",
             "is_report_ready": False,
+            "session_id": session_id,
             "reply": clean_response.strip()
         }
         
     except Exception as e:
-        return {"status": "error", "reply": f"Deep Learning Inference Failure: {str(e)}"}
+        return {"status": "error", "session_id": session_id, "reply": f"Deep Learning Inference Failure: {str(e)}"}
+
+@app.delete("/api/session/{session_id}")
+async def clear_session(session_id: str):
+    """Wipe a session from the server store (when user clicks New Chat)."""
+    SESSION_STORE.pop(session_id, None)
+    return {"status": "cleared"}
 
 @app.get("/api/download/{filename}")
 async def download_file(filename: str):

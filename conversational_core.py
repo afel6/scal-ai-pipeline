@@ -63,9 +63,9 @@ class PRCChatAssistant:
         if active_parts:
             contents.append(types.Content(role='user', parts=active_parts))
             
-        # Model 'Pro' inherently possesses advanced logical sequencing needed to force secure JSON trigger mapping 
+        # Switching to 'Flash' architecture to bypass zero-quota limits on newly generated Free API Keys
         response = self.client.models.generate_content(
-            model='gemini-2.5-pro', 
+            model='gemini-2.5-flash', 
             contents=contents,
             config=types.GenerateContentConfig(
                 system_instruction=self.system_instruction,
