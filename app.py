@@ -127,8 +127,17 @@ async def process_chat(
             if m_type in ['application/vnd.ms-excel', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet']:
                 import io
                 excel_df = pd.read_excel(io.BytesIO(raw_bytes))
+                total_rows = len(excel_df)
+                MAX_ROWS = 300
+                # Prepend statistical summary so AI understands the full dataset even if truncated
+                summary = excel_df.describe(include='all').to_string()
+                if total_rows > MAX_ROWS:
+                    excel_df = excel_df.head(MAX_ROWS)
+                    truncation_note = f"[NOTE: File has {total_rows} rows. Showing first {MAX_ROWS} rows. Full statistical summary included below.]\n"
+                else:
+                    truncation_note = f"[File has {total_rows} rows — full data included.]\n"
                 csv_extract = excel_df.to_csv(index=False)
-                message += f"\n\n[USER ATTACHED SPREADSHEET '{file.filename}']:\n{csv_extract}"
+                message += f"\n\n[USER ATTACHED SPREADSHEET '{file.filename}']:\n{truncation_note}\n=== STATISTICAL SUMMARY ===\n{summary}\n\n=== RAW DATA (first {min(total_rows, MAX_ROWS)} rows) ===\n{csv_extract}"
             else:
                 file_bytes = raw_bytes
                 mime_type = m_type
