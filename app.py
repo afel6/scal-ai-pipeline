@@ -173,7 +173,17 @@ async def process_chat(
         return {"status": "success", "is_report_ready": False, "session_id": session_id, "reply": clean_response}
 
     except Exception as e:
-        return {"status": "error", "session_id": session_id, "reply": f"Deep Learning Inference Failure: {str(e)}"}
+        err = str(e)
+        # Classify errors into professional, user-facing messages
+        if 'RESOURCE_EXHAUSTED' in err or '429' in err:
+            friendly = "The AI service is currently at capacity due to high usage. Please wait 60 seconds and try again."
+        elif 'API_KEY_INVALID' in err or 'PERMISSION_DENIED' in err or '403' in err:
+            friendly = "The AI service is temporarily unavailable. Please contact your system administrator."
+        elif 'INVALID_ARGUMENT' in err or '400' in err:
+            friendly = "I was unable to process your request. Please try rephrasing your question or re-uploading the file."
+        else:
+            friendly = "The AI service encountered a temporary issue. Please try again in a moment."
+        return {"status": "error", "session_id": session_id, "reply": friendly}
 
 @app.get("/api/sessions")
 async def list_sessions():
