@@ -9,9 +9,10 @@ import os
 import pandas as pd
 from datetime import datetime
 
-# Official PRC Brand Colors (Extracted from Logo)
+# Official PRC Brand Colors
 PRC_RED    = RGBColor(227, 30, 36)   # #E31E24
 PRC_BLUE   = RGBColor(45, 53, 142)   # #2D358E
+PRC_YELLOW = RGBColor(251, 191, 36) # #fbbf24 (Gold Accent)
 PRC_BLACK  = RGBColor(0, 0, 0)       # #000000
 PRC_DARK   = RGBColor(40, 40, 40)    # Sub-text
 PRC_LIGHT  = RGBColor(245, 245, 245)  # Bg
@@ -141,11 +142,11 @@ class SCALReportBuilder:
             x_trend = np.linspace(min(ff_df['Porosity']), max(ff_df['Porosity']), 100)
             a_val, m_val = float(params.get('a_tortuosity', 1.0)), float(params.get('m_cementation', 2.0))
             y_trend = a_val / (x_trend ** m_val)
-            ax.plot(x_trend, y_trend, color='#2D358E', linewidth=2.5, linestyle='--', label=f'AI Fit (m = {m_val:.3f})')
+            ax.plot(x_trend, y_trend, color='#fbbf24', linewidth=3, linestyle='-', label=f'AI Fit (m = {m_val:.3f})')
             ax.set_xscale('log'); ax.set_yscale('log')
             ax.set_xlabel('Porosity (Fraction)', fontweight='bold')
             ax.set_ylabel('Formation Factor (FF)', fontweight='bold')
-            ax.set_title("PRC Analysis: Formation Factor vs Porosity", fontweight='bold', color='#2D358E')
+            ax.set_title("PRC Analysis: Formation Factor vs Porosity", fontweight='bold', color='#fbbf24')
             ax.grid(True, which='both', ls='--', alpha=0.3)
             ax.legend()
             p1 = 'temp_ff_plot.png'
@@ -188,9 +189,9 @@ class SCALReportBuilder:
         hdrs = ['Tortuosity (a)', 'Cementation (m)', 'Saturation (n)']
         vals = [str(archie_dict['a_tortuosity']), str(archie_dict['m_cementation']), str(archie_dict['n_saturation'])]
         for i, (h, v) in enumerate(zip(hdrs, vals)):
-            _set_cell_background(table.rows[0].cells[i], '2D358E')
+            _set_cell_background(table.rows[0].cells[i], 'fbbf24') # Yellow Accent
             r1 = table.rows[0].cells[i].paragraphs[0].add_run(h)
-            r1.bold = True; r1.font.color.rgb = RGBColor(255, 255, 255)
+            r1.bold = True; r1.font.color.rgb = PRC_BLACK
             r2 = table.rows[1].cells[i].paragraphs[0].add_run(v)
             r2.bold = True; r2.font.color.rgb = PRC_BLACK
 
@@ -201,9 +202,9 @@ class SCALReportBuilder:
         hdrs = ['Irreducible Water (Swi)', 'Residual Oil (Sor)']
         vals = [str(endpoints['Swi']), str(endpoints['Sor'])]
         for i, (h, v) in enumerate(zip(hdrs, vals)):
-            _set_cell_background(table.rows[0].cells[i], '2D358E')
+            _set_cell_background(table.rows[0].cells[i], 'fbbf24')
             r1 = table.rows[0].cells[i].paragraphs[0].add_run(h)
-            r1.bold = True; r1.font.color.rgb = RGBColor(255, 255, 255)
+            r1.bold = True; r1.font.color.rgb = PRC_BLACK
             r2 = table.rows[1].cells[i].paragraphs[0].add_run(v)
             r2.bold = True; r2.font.color.rgb = PRC_BLACK
 
