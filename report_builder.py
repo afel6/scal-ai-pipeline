@@ -1,163 +1,287 @@
 from docx import Document
-from docx.shared import Inches, Pt, RGBColor
+from docx.shared import Inches, Pt, RGBColor, Cm
 from docx.enum.text import WD_ALIGN_PARAGRAPH
+from docx.oxml.ns import qn
+from docx.oxml import OxmlElement
 import matplotlib.pyplot as plt
+import matplotlib.patches as mpatches
 import numpy as np
 import os
 import pandas as pd
+from datetime import datetime
+
+# PRC Brand Colors
+PRC_GREEN  = RGBColor(0, 102, 51)      # Deep institutional green
+PRC_GOLD   = RGBColor(201, 168, 76)    # Gold accent
+PRC_NAVY   = RGBColor(0, 51, 102)      # Section blue
+PRC_DARK   = RGBColor(30, 30, 30)      # Body text
+PRC_LIGHT  = RGBColor(245, 245, 245)   # Light grey bg
+
+LOGO_PATH = os.path.join(os.path.dirname(__file__), 'prc_logo.png')
+
+
+def _set_cell_background(cell, hex_color: str):
+    """Set a table cell's background colour via XML."""
+    tc = cell._tc
+    tcPr = tc.get_or_add_tcPr()
+    shd = OxmlElement('w:shd')
+    shd.set(qn('w:val'), 'clear')
+    shd.set(qn('w:color'), 'auto')
+    shd.set(qn('w:fill'), hex_color)
+    tcPr.append(shd)
+
 
 class SCALReportBuilder:
     """
     Automated Elite Microsoft Word (.docx) Generator for the PRC.
-    Constructs highly visual, fully styled engineering deliverables.
+    Produces fully branded, professionally styled engineering deliverables.
     """
-    def __init__(self, well_name: str, raw_df: pd.DataFrame):
+    def __init__(self, well_name: str, raw_df: pd.DataFrame, engineer_name: str = ""):
         self.doc = Document()
         self.well_name = well_name
         self.raw_df = raw_df
+        self.engineer_name = engineer_name
+        self.generated_date = datetime.now().strftime("%B %d, %Y")
+        self._setup_page_margins()
         self._setup_enterprise_formatting()
 
+    def _setup_page_margins(self):
+        for section in self.doc.sections:
+            section.top_margin    = Cm(2.0)
+            section.bottom_margin = Cm(2.0)
+            section.left_margin   = Cm(2.5)
+            section.right_margin  = Cm(2.5)
+
     def _setup_enterprise_formatting(self):
-        # Master Style overrides
         style = self.doc.styles['Normal']
         style.font.name = 'Arial'
         style.font.size = Pt(11)
-        style.font.color.rgb = RGBColor(40, 40, 40)
-        
-        # Heading 1
+        style.font.color.rgb = PRC_DARK
+
         h1 = self.doc.styles['Heading 1']
         h1.font.name = 'Arial'
-        h1.font.size = Pt(24)
+        h1.font.size = Pt(22)
         h1.font.bold = True
-        h1.font.color.rgb = RGBColor(0, 102, 51) # Emerald Green for PRC
+        h1.font.color.rgb = PRC_GREEN
 
-        # Heading 2
         h2 = self.doc.styles['Heading 2']
         h2.font.name = 'Arial'
-        h2.font.size = Pt(14)
+        h2.font.size = Pt(13)
         h2.font.bold = True
-        h2.font.color.rgb = RGBColor(0, 51, 102) # Deep Professional Navy
+        h2.font.color.rgb = PRC_NAVY
 
+    # ── Title Page ─────────────────────────────────────────────────────────────
     def build_title_page(self):
-        self.doc.add_paragraph('\n\n\n\n\n')
-        title = self.doc.add_heading('PETROLEUM RESEARCH CENTER', level=0)
-        title.alignment = WD_ALIGN_PARAGRAPH.CENTER
-        
-        self.doc.add_paragraph('\n\n')
-        subtitle = self.doc.add_heading(f'ENTERPRISE FINAL REPORT\nSPECIAL CORE ANALYSIS (SCAL)\n\nWELL: {self.well_name}', level=1)
-        subtitle.alignment = WD_ALIGN_PARAGRAPH.CENTER
+        # ── Logo ──
+        if os.path.exists(LOGO_PATH):
+            logo_para = self.doc.add_paragraph()
+            logo_para.alignment = WD_ALIGN_PARAGRAPH.CENTER
+            run = logo_para.add_run()
+            run.add_picture(LOGO_PATH, width=Inches(2.2))
+
+        self.doc.add_paragraph()
+
+        # ── Green header bar (table trick) ──
+        header_tbl = self.doc.add_table(rows=1, cols=1)
+        header_tbl.style = 'Table Grid'
+        cell = header_tbl.rows[0].cells[0]
+        _set_cell_background(cell, '006633')
+        cell.width = Inches(6.0)
+        p = cell.paragraphs[0]
+        p.alignment = WD_ALIGN_PARAGRAPH.CENTER
+        run = p.add_run('PETROLEUM RESEARCH CENTER')
+        run.bold = True
+        run.font.name = 'Arial'
+        run.font.size = Pt(18)
+        run.font.color.rgb = RGBColor(255, 255, 255)
+
+        self.doc.add_paragraph()
+
+        # ── Gold sub-bar ──
+        sub_tbl = self.doc.add_table(rows=1, cols=1)
+        sub_tbl.style = 'Table Grid'
+        sub_cell = sub_tbl.rows[0].cells[0]
+        _set_cell_background(sub_cell, 'C9A84C')
+        p2 = sub_cell.paragraphs[0]
+        p2.alignment = WD_ALIGN_PARAGRAPH.CENTER
+        run2 = p2.add_run('SPECIAL CORE ANALYSIS (SCAL) — FINAL TECHNICAL REPORT')
+        run2.bold = True
+        run2.font.name = 'Arial'
+        run2.font.size = Pt(12)
+        run2.font.color.rgb = RGBColor(255, 255, 255)
+
+        self.doc.add_paragraph('\n')
+
+        # ── Well metadata block ──
+        meta = self.doc.add_table(rows=4, cols=2)
+        meta.style = 'Table Grid'
+        labels = ['Well Name', 'Report Date', 'Prepared By', 'Report Type']
+        values = [
+            self.well_name,
+            self.generated_date,
+            self.engineer_name or 'PRC Engineering Department',
+            'Confidential — Internal Use Only'
+        ]
+        for i, (lbl, val) in enumerate(zip(labels, values)):
+            lc = meta.rows[i].cells[0]
+            vc = meta.rows[i].cells[1]
+            _set_cell_background(lc, 'F0F0F0')
+            lp = lc.paragraphs[0]
+            lr = lp.add_run(lbl)
+            lr.bold = True
+            lr.font.name = 'Arial'
+            lr.font.size = Pt(11)
+            lr.font.color.rgb = PRC_NAVY
+            vp = vc.paragraphs[0]
+            vr = vp.add_run(val)
+            vr.font.name = 'Arial'
+            vr.font.size = Pt(11)
+            vr.font.color.rgb = PRC_DARK
+
+        self.doc.add_paragraph()
+        disclaimer = self.doc.add_paragraph('This report was generated by the PRC AI Co-Author System. All parameters have been derived through automated regression analysis of submitted core laboratory data.')
+        disclaimer.alignment = WD_ALIGN_PARAGRAPH.CENTER
+        disclaimer.runs[0].font.size = Pt(9)
+        disclaimer.runs[0].font.italic = True
+        disclaimer.runs[0].font.color.rgb = RGBColor(120, 120, 120)
+
         self.doc.add_page_break()
 
+    # ── Graph Generation ───────────────────────────────────────────────────────
     def generate_archie_matplotlib(self, params: dict):
-        """Builds breathtaking Log-Log Plots proving the AI derived parameters."""
-        # Check if we have valid Electrical data
         ff_df = self.raw_df.dropna(subset=['Porosity', 'Formation_Factor'])
         ri_df = self.raw_df.dropna(subset=['Brine_Saturation', 'Resistivity_Index'])
-        
         img_paths = []
-        
-        # 1. Formation Factor Plot (m)
+
         if len(ff_df) > 1:
-            plt.figure(figsize=(6, 4), dpi=150)
-            plt.style.use('ggplot')
-            plt.scatter(ff_df['Porosity'], ff_df['Formation_Factor'], color='#0f766e', edgecolor='black', s=80, alpha=0.9, label='Core Samples')
-            
-            # Trendline
+            fig, ax = plt.subplots(figsize=(7, 4.5), dpi=150)
+            fig.patch.set_facecolor('#fafafa')
+            ax.scatter(ff_df['Porosity'], ff_df['Formation_Factor'],
+                       color='#006633', edgecolor='black', s=90, alpha=0.9, label='Core Samples')
             x_trend = np.linspace(min(ff_df['Porosity']), max(ff_df['Porosity']), 100)
             a_val = float(params.get('a_tortuosity', 1.0))
             m_val = float(params.get('m_cementation', 2.0))
             y_trend = a_val / (x_trend ** m_val)
-            plt.plot(x_trend, y_trend, color='#e11d48', linewidth=2.5, linestyle='--', label=f'AI Fit (m={m_val})')
-            
-            plt.xscale('log')
-            plt.yscale('log')
-            plt.xlabel('Porosity (Fraction)', fontweight='bold')
-            plt.ylabel('Formation Factor (FF)', fontweight='bold')
-            plt.title("Formation Factor vs Porosity\nArchie's Cementation Exponent", fontweight='bold')
-            plt.grid(True, which="both", ls="--", alpha=0.5)
-            plt.legend()
-            plt.tight_layout()
-            
+            ax.plot(x_trend, y_trend, color='#C9A84C', linewidth=2.5, linestyle='--',
+                    label=f'AI Regression (m = {m_val:.4f})')
+            ax.set_xscale('log'); ax.set_yscale('log')
+            ax.set_xlabel('Porosity (Fraction)', fontweight='bold', fontsize=11)
+            ax.set_ylabel('Formation Factor (FF)', fontweight='bold', fontsize=11)
+            ax.set_title("Formation Factor vs Porosity\nArchie's Cementation Exponent (m)",
+                         fontweight='bold', fontsize=12, color='#003366')
+            ax.grid(True, which='both', ls='--', alpha=0.4)
+            ax.legend(framealpha=0.9)
+            fig.tight_layout()
             p1 = 'temp_ff_plot.png'
-            plt.savefig(p1)
+            plt.savefig(p1, bbox_inches='tight')
             img_paths.append(p1)
             plt.close()
-            
-        # 2. Resistivity plot (n)
+
         if len(ri_df) > 1:
-            plt.figure(figsize=(6, 4), dpi=150)
-            plt.style.use('ggplot')
-            plt.scatter(ri_df['Brine_Saturation'], ri_df['Resistivity_Index'], color='#4338ca', edgecolor='black', s=80, alpha=0.9, label='Core Samples')
-            
+            fig, ax = plt.subplots(figsize=(7, 4.5), dpi=150)
+            fig.patch.set_facecolor('#fafafa')
+            ax.scatter(ri_df['Brine_Saturation'], ri_df['Resistivity_Index'],
+                       color='#003366', edgecolor='black', s=90, alpha=0.9, label='Core Samples')
             x_trend = np.linspace(min(ri_df['Brine_Saturation']), max(ri_df['Brine_Saturation']), 100)
             n_val = float(params.get('n_saturation', 2.0))
             y_trend = x_trend ** -n_val
-            plt.plot(x_trend, y_trend, color='#e11d48', linewidth=2.5, linestyle='--', label=f'AI Fit (n={n_val})')
-            
-            plt.xscale('log')
-            plt.yscale('log')
-            plt.xlabel('Brine Saturation (Sw)', fontweight='bold')
-            plt.ylabel('Resistivity Index (RI)', fontweight='bold')
-            plt.title("Resistivity Index vs Sw\nArchie's Saturation Exponent", fontweight='bold')
-            plt.grid(True, which="both", ls="--", alpha=0.5)
-            plt.legend()
-            plt.tight_layout()
-            
+            ax.plot(x_trend, y_trend, color='#C9A84C', linewidth=2.5, linestyle='--',
+                    label=f'AI Regression (n = {n_val:.4f})')
+            ax.set_xscale('log'); ax.set_yscale('log')
+            ax.set_xlabel('Brine Saturation (Sw)', fontweight='bold', fontsize=11)
+            ax.set_ylabel('Resistivity Index (RI)', fontweight='bold', fontsize=11)
+            ax.set_title("Resistivity Index vs Brine Saturation\nArchie's Saturation Exponent (n)",
+                         fontweight='bold', fontsize=12, color='#003366')
+            ax.grid(True, which='both', ls='--', alpha=0.4)
+            ax.legend(framealpha=0.9)
+            fig.tight_layout()
             p2 = 'temp_ri_plot.png'
-            plt.savefig(p2)
+            plt.savefig(p2, bbox_inches='tight')
             img_paths.append(p2)
             plt.close()
-            
+
         return img_paths
 
+    def _section_header(self, title: str):
+        """Adds a green-tinted section divider."""
+        tbl = self.doc.add_table(rows=1, cols=1)
+        tbl.style = 'Table Grid'
+        cell = tbl.rows[0].cells[0]
+        _set_cell_background(cell, 'E8F5EE')
+        p = cell.paragraphs[0]
+        run = p.add_run(title)
+        run.bold = True
+        run.font.name = 'Arial'
+        run.font.size = Pt(12)
+        run.font.color.rgb = PRC_GREEN
+        self.doc.add_paragraph()
+
     def add_archies_table(self, archie_dict: dict):
-        self.doc.add_heading('1. Electrical Properties (Archie\'s Analysis)', level=2)
-        
-        # Inject the breathtaking graphs!
+        self._section_header('① Electrical Properties — Archie\'s Parameter Analysis')
         img_paths = self.generate_archie_matplotlib(archie_dict)
         if img_paths:
-            self.doc.add_paragraph('Figure 1: Mathematical regressions for Archie\'s coefficients derived from valid core data.')
+            cap = self.doc.add_paragraph('Figure 1: Mathematical regressions for Archie\'s coefficients derived from core laboratory data.')
+            cap.runs[0].font.size = Pt(9)
+            cap.runs[0].font.italic = True
+            cap.runs[0].font.color.rgb = RGBColor(100, 100, 100)
             for img in img_paths:
-                self.doc.add_picture(img, width=Inches(5.0))
-                # Delete temp image explicitly to prevent IO Lock issues later
-                try:
-                    os.remove(img)
-                except:
-                    pass
-        
-        self.doc.add_paragraph('\nCalculated Results:')
+                p = self.doc.add_paragraph()
+                p.alignment = WD_ALIGN_PARAGRAPH.CENTER
+                run = p.add_run()
+                run.add_picture(img, width=Inches(5.5))
+                try: os.remove(img)
+                except: pass
+
+        self.doc.add_paragraph('Derived Archie Parameters:')
         table = self.doc.add_table(rows=2, cols=3)
-        table.style = 'Light Shading Accent 1' 
-        
-        hdr = table.rows[0].cells
-        hdr[0].text = 'Tortuosity Factor (a)'
-        hdr[1].text = 'Cementation Exponent (m)'
-        hdr[2].text = 'Saturation Exponent (n)'
-        
-        row = table.rows[1].cells
-        row[0].text = str(archie_dict['a_tortuosity'])
-        row[1].text = str(archie_dict['m_cementation'])
-        row[2].text = str(archie_dict['n_saturation'])
-        self.doc.add_paragraph('\n')
+        table.style = 'Light Shading Accent 1'
+        headers = ['Tortuosity Factor (a)', 'Cementation Exponent (m)', 'Saturation Exponent (n)']
+        values  = [str(archie_dict['a_tortuosity']), str(archie_dict['m_cementation']), str(archie_dict['n_saturation'])]
+        for i, (h, v) in enumerate(zip(headers, values)):
+            hc = table.rows[0].cells[i]
+            _set_cell_background(hc, '006633')
+            hr = hc.paragraphs[0].add_run(h)
+            hr.bold = True; hr.font.color.rgb = RGBColor(255, 255, 255); hr.font.size = Pt(10)
+            vc = table.rows[1].cells[i]
+            vr = vc.paragraphs[0].add_run(v)
+            vr.bold = True; vr.font.size = Pt(12); vr.font.color.rgb = PRC_NAVY
+        self.doc.add_paragraph()
 
     def add_saturation_endpoints(self, endpoints: dict):
-        self.doc.add_heading('2. Capillary Pressure Saturation Limits', level=2)
+        self._section_header('② Capillary Pressure — Saturation Endpoints')
         table = self.doc.add_table(rows=2, cols=2)
         table.style = 'Light Shading Accent 1'
-        
-        table.rows[0].cells[0].text = 'Irreducible Water Saturation (Swi)'
-        table.rows[0].cells[1].text = 'Residual Oil Saturation (Sor)'
-        
-        table.rows[1].cells[0].text = str(endpoints['Swi'])
-        table.rows[1].cells[1].text = str(endpoints['Sor'])
-        self.doc.add_paragraph('\n')
+        hdrs  = ['Irreducible Water Saturation (Swi)', 'Residual Oil Saturation (Sor)']
+        vals  = [str(endpoints['Swi']), str(endpoints['Sor'])]
+        for i, (h, v) in enumerate(zip(hdrs, vals)):
+            hc = table.rows[0].cells[i]
+            _set_cell_background(hc, '006633')
+            hr = hc.paragraphs[0].add_run(h)
+            hr.bold = True; hr.font.color.rgb = RGBColor(255, 255, 255); hr.font.size = Pt(10)
+            vc = table.rows[1].cells[i]
+            vr = vc.paragraphs[0].add_run(v)
+            vr.bold = True; vr.font.size = Pt(12); vr.font.color.rgb = PRC_NAVY
+        self.doc.add_paragraph()
 
     def add_ai_conclusion(self, insight_text: str):
-        self.doc.add_heading('3. Artificial Intelligence Reservoir Interpretation', level=2)
+        self._section_header('③ Artificial Intelligence Reservoir Interpretation')
         p = self.doc.add_paragraph(insight_text)
         p.alignment = WD_ALIGN_PARAGRAPH.JUSTIFY
+        p.runs[0].font.size = Pt(11)
+
+        self.doc.add_paragraph()
+        # Footer signature block
+        sig_tbl = self.doc.add_table(rows=1, cols=1)
+        sig_tbl.style = 'Table Grid'
+        sig_cell = sig_tbl.rows[0].cells[0]
+        _set_cell_background(sig_cell, '006633')
+        sp = sig_cell.paragraphs[0]
+        sp.alignment = WD_ALIGN_PARAGRAPH.CENTER
+        sr = sp.add_run(f'Generated by PRC AI Co-Author System  ·  {self.generated_date}  ·  CONFIDENTIAL')
+        sr.font.name = 'Arial'; sr.font.size = Pt(9)
+        sr.font.color.rgb = RGBColor(255, 255, 255)
 
     def export(self) -> str:
-        file_name = f"{self.well_name}_SCAL_Final_Report.docx"
+        file_name = f"{self.well_name}_PRC_SCAL_Report.docx"
         self.doc.save(file_name)
         return file_name
