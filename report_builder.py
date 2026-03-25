@@ -95,13 +95,20 @@ class SCALReportBuilder:
         self.doc.add_paragraph()
 
         # ── Report Metadata Block ──
-        meta = self.doc.add_table(rows=4, cols=2)
+        meta = self.doc.add_table(rows=5, cols=2)
         meta.alignment = WD_ALIGN_PARAGRAPH.CENTER
-        labels = ['Well / Project Name:', 'Submission Date:', 'Authorizing Engineer:', 'Classification Status:']
+        labels = [
+            'Well / Project Name:', 
+            'Submission Date:', 
+            'Authorizing Engineer:', 
+            'System Developer:',
+            'Classification Status:'
+        ]
         values = [
             self.well_name.upper(),
             self.generated_date,
             self.engineer_name,
+            'Raouf Elkabir',
             'CONFIDENTIAL — LIBYAN NOC INTERNAL'
         ]
         for i, (lbl, val) in enumerate(zip(labels, values)):
@@ -204,6 +211,18 @@ class SCALReportBuilder:
         self.doc.add_heading('3. EXECUTIVE CORE EXEGESIS & SUMMARY', level=2)
         p = self.doc.add_paragraph(insight_text)
         p.alignment = WD_ALIGN_PARAGRAPH.JUSTIFY
+
+        self.doc.add_paragraph()
+        # Footer signature block
+        sig_tbl = self.doc.add_table(rows=1, cols=1)
+        sig_tbl.style = 'Table Grid'
+        sig_cell = sig_tbl.rows[0].cells[0]
+        _set_cell_background(sig_cell, '2D358E')
+        sp = sig_cell.paragraphs[0]
+        sp.alignment = WD_ALIGN_PARAGRAPH.CENTER
+        sr = sp.add_run(f'PRC AI Hub v2.5  ·  Developed by Raouf Elkabir  ·  CONFIDENTIAL')
+        sr.font.name = 'Arial'; sr.font.size = Pt(8)
+        sr.font.color.rgb = RGBColor(255, 255, 255)
 
     def export(self) -> str:
         f = f"{self.well_name}_PRC_Technical_Report.docx"

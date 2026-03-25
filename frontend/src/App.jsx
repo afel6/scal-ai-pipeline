@@ -312,6 +312,16 @@ function App() {
 function Login({ onLogin }) {
   const [id, setId] = useState('');
   const [name, setName] = useState('');
+  const [error, setError] = useState('');
+
+  const handleAuth = () => {
+    if (id === '1509') {
+      onLogin({ name, id });
+    } else {
+      setError('Invalid MFA Credentials. Access Denied.');
+      setId('');
+    }
+  };
 
   return (
     <div className="min-h-screen bg-[#050505] flex items-center justify-center p-6 relative overflow-hidden">
@@ -338,17 +348,22 @@ function Login({ onLogin }) {
             </div>
             <div className="space-y-2">
               <label className="text-[10px] font-bold text-slate-400 uppercase tracking-widest ml-4">PRC MFA Identification</label>
-              <input type="text" value={id} onChange={(e) => setId(e.target.value)} placeholder="Enter NOC/PRC ID" className="auth-input" />
+              <input type="password" value={id} onChange={(e) => { setId(e.target.value); setError(''); }} 
+                onKeyDown={(e) => e.key === 'Enter' && name && id && handleAuth()}
+                placeholder="Enter Access Code" className="auth-input" />
             </div>
           </div>
           
-          <button onClick={() => name && id && onLogin({ name, id })} disabled={!name || !id} className="auth-button">
+          {error && <p className="text-red-500 text-[10px] text-center font-bold tracking-widest uppercase animate-bounce">{error}</p>}
+          
+          <button onClick={handleAuth} disabled={!name || !id} className="auth-button">
             Authenticate Session
           </button>
           
-          <p className="text-[10px] text-slate-600 text-center uppercase tracking-tighter px-4">
-            Authorized Personnel Only. Access to Libyan National Petro-Data is monitored for security compliance.
-          </p>
+          <div className="pt-4 border-t border-white/5 text-center">
+            <p className="text-[10px] text-slate-500 font-bold uppercase tracking-widest">System Architect</p>
+            <p className="text-xs text-emerald-400 font-serif italic mt-1">Raouf Elkabir</p>
+          </div>
         </div>
       </div>
     </div>
