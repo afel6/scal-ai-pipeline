@@ -1,18 +1,53 @@
 import React, { useState, useRef } from 'react';
-import { UploadCloud, Activity, CheckCircle, AlertTriangle, Layers, Combine } from 'lucide-react';
+import { UploadCloud, Activity, CheckCircle, AlertTriangle, Layers, Combine, Edit3, FileText, ChevronRight } from 'lucide-react';
 import axios from 'axios';
 import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer } from 'recharts';
 
 function App() {
-  const [file, setFile] = useState(null);
   const [loading, setLoading] = useState(false);
   const [result, setResult] = useState(null);
   const [error, setError] = useState(null);
+  
+  const [inputMode, setInputMode] = useState('manual'); // 'upload' or 'manual'
   const fileInputRef = useRef(null);
+
+  const [manualData, setManualData] = useState({
+    Porosity: '0.22',
+    Permeability: '150',
+    Swi: '0.15',
+    Sor: '0.25'
+  });
+
+  const handleInputChange = (e) => {
+    setManualData({ ...manualData, [e.target.name]: e.target.value });
+  };
+
+  const handleManualSubmit = async () => {
+    setLoading(true);
+    setError(null);
+    setResult(null);
+    try {
+      const apiUrl = import.meta.env.VITE_API_URL || 'http://localhost:8000';
+      const response = await axios.post(`${apiUrl}/api/simulate`, {
+        Porosity: parseFloat(manualData.Porosity),
+        Permeability: parseFloat(manualData.Permeability),
+        Swi: parseFloat(manualData.Swi),
+        Sor: parseFloat(manualData.Sor)
+      });
+      if (response.data.status === 'success') {
+        setResult(response.data);
+      } else {
+        setError(response.data.message || 'Error executing mathematical physics validation');
+      }
+    } catch (err) {
+      setError(err.message || 'Server connection failed. Restart run_pipeline.bat.');
+    } finally {
+      setLoading(false);
+    }
+  };
 
   const handleUpload = async (fileToUpload) => {
     if (!fileToUpload) return;
-    setFile(fileToUpload);
     setLoading(true);
     setError(null);
     setResult(null);
@@ -25,14 +60,13 @@ function App() {
       const response = await axios.post(`${apiUrl}/api/analyze`, formData, {
         headers: { 'Content-Type': 'multipart/form-data' }
       });
-
       if (response.data.status === 'success') {
         setResult(response.data);
       } else {
-        setError(response.data.message || 'Error processing report');
+        setError(response.data.message || 'Error parsing the document using Vision LLM.');
       }
     } catch (err) {
-      setError(err.message || 'Server connection failed. Is FastAPI running?');
+      setError(err.message || 'Server connection failed. Restart run_pipeline.bat.');
     } finally {
       setLoading(false);
     }
@@ -40,35 +74,119 @@ function App() {
 
   return (
     <div className="min-h-screen p-8 bg-slate-950 text-slate-100 flex flex-col items-center">
-      <header className="mb-10 text-center mt-6">
+      <header className="mb-8 text-center mt-6">
         <h1 className="text-5xl font-extrabold text-transparent bg-clip-text bg-gradient-to-r from-blue-400 via-indigo-400 to-emerald-400 mb-3 flex items-center justify-center gap-4 drop-shadow-lg">
           <Combine className="w-12 h-12 text-blue-400" />
           Expert SCAL AI Platform
         </h1>
-        <p className="text-slate-400 max-w-2xl mx-auto text-lg mt-4">Upload standard Core Analysis PDFs and our <span className="text-blue-300 font-semibold">Physics-Informed Neural Network (PINN)</span> will automatically predict full multi-phase fluid displacement curves perfectly rivaling Sendra software.</p>
+        <p className="text-slate-400 max-w-2xl mx-auto text-lg mt-4">
+          Automates multi-phase fluid displacement analysis perfectly rivaling Sendra software. Select an input mode below to begin.
+        </p>
       </header>
 
       <main className="w-full max-w-5xl flex flex-col gap-6">
-        <div 
-          className={`border-2 border-dashed border-slate-700 bg-slate-900/60 rounded-3xl p-16 text-center cursor-pointer transition-all hover:bg-slate-800/80 hover:border-blue-500 shadow-2xl backdrop-blur-sm`}
-          onClick={() => fileInputRef.current?.click()}
-        >
-          <input 
-            type="file" 
-            ref={fileInputRef} 
-            className="hidden" 
-            accept=".pdf,.doc,.docx"
-            onChange={(e) => handleUpload(e.target.files[0])}
-          />
-          <UploadCloud className="w-20 h-20 mx-auto text-blue-500 mb-6 animate-pulse" />
-          <p className="text-2xl font-bold mb-2">Engage Core Extractor (Click & Drop)</p>
-          <p className="text-slate-400">Our computer vision system parses thousands of tables instantly.</p>
+        
+        <div className="flex justify-center mb-4">
+          <div className="bg-slate-900 border border-slate-700 p-1 rounded-xl inline-flex shadow-inner">
+            <button 
+              onClick={() => setInputMode('manual')}
+              className={`px-8 py-3 rounded-lg font-bold flex items-center gap-2 transition-all ${inputMode === 'manual' ? 'bg-indigo-600 text-white shadow-lg' : 'text-slate-400 hover:text-slate-200'}`}
+            >
+              <Edit3 className="w-5 h-5"/> Manual Entry
+            </button>
+            <button 
+              onClick={() => setInputMode('upload')}
+              className={`px-8 py-3 rounded-lg font-bold flex items-center gap-2 transition-all ${inputMode === 'upload' ? 'bg-indigo-600 text-white shadow-lg' : 'text-slate-400 hover:text-slate-200'}`}
+            >
+              <FileText className="w-5 h-5"/> PDF Extraction
+            </button>
+          </div>
         </div>
 
+        {inputMode === 'upload' ? (
+          <div 
+            className="border-2 border-dashed border-slate-700 bg-slate-900/60 rounded-3xl p-12 text-center cursor-pointer transition-all hover:bg-slate-800/80 hover:border-blue-500 shadow-2xl backdrop-blur-sm"
+            onClick={() => fileInputRef.current?.click()}
+          >
+            <input 
+              type="file" 
+              ref={fileInputRef} 
+              className="hidden" 
+              accept=".pdf,.doc,.docx"
+              onChange={(e) => handleUpload(e.target.files[0])}
+            />
+            <UploadCloud className="w-16 h-16 mx-auto text-blue-500 mb-4 animate-pulse" />
+            <p className="text-xl font-bold mb-2">Automated PDF Parsing (Gemini Vision)</p>
+            <p className="text-slate-400">Our computer vision system parses thousands of tables instantly.</p>
+          </div>
+        ) : (
+          <div className="bg-slate-900/60 rounded-3xl border border-slate-700 p-10 shadow-2xl backdrop-blur-sm relative overflow-hidden">
+            <div className="absolute top-0 right-0 w-32 h-32 bg-indigo-500/10 blur-3xl rounded-full"></div>
+            <h2 className="text-2xl font-bold text-slate-100 flex items-center gap-3 mb-8">
+               <Edit3 className="text-indigo-400 w-7 h-7" /> Direct Engineering Override
+            </h2>
+            
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-8 mb-8">
+              <div className="space-y-3">
+                <label className="text-sm font-bold text-slate-400 uppercase tracking-widest">Porosity (Φ) Fraction</label>
+                <input 
+                  type="number" 
+                  step="0.01"
+                  name="Porosity"
+                  value={manualData.Porosity}
+                  onChange={handleInputChange}
+                  className="w-full bg-slate-950 border-b-2 border-slate-700 focus:border-indigo-500 px-4 py-3 text-2xl font-mono text-white outline-none transition-colors"
+                />
+              </div>
+              <div className="space-y-3">
+                <label className="text-sm font-bold text-slate-400 uppercase tracking-widest">Permeability (k) mD</label>
+                <input 
+                  type="number" 
+                  name="Permeability"
+                  value={manualData.Permeability}
+                  onChange={handleInputChange}
+                  className="w-full bg-slate-950 border-b-2 border-slate-700 focus:border-indigo-500 px-4 py-3 text-2xl font-mono text-white outline-none transition-colors"
+                />
+              </div>
+              <div className="space-y-3">
+                <label className="text-sm font-bold text-slate-400 uppercase tracking-widest">Irreducible Water (Swi)</label>
+                <input 
+                  type="number" 
+                  step="0.01"
+                  name="Swi"
+                  value={manualData.Swi}
+                  onChange={handleInputChange}
+                  className="w-full bg-slate-950 border-b-2 border-slate-700 focus:border-indigo-500 px-4 py-3 text-2xl font-mono text-white outline-none transition-colors"
+                />
+              </div>
+              <div className="space-y-3">
+                <label className="text-sm font-bold text-slate-400 uppercase tracking-widest">Residual Oil (Sor)</label>
+                <input 
+                  type="number" 
+                  step="0.01"
+                  name="Sor"
+                  value={manualData.Sor}
+                  onChange={handleInputChange}
+                  className="w-full bg-slate-950 border-b-2 border-slate-700 focus:border-indigo-500 px-4 py-3 text-2xl font-mono text-white outline-none transition-colors"
+                />
+              </div>
+            </div>
+            
+            <div className="flex justify-end pt-4 border-t border-slate-800">
+               <button 
+                 onClick={handleManualSubmit}
+                 className="bg-emerald-600 hover:bg-emerald-500 text-white font-extrabold px-10 py-4 rounded-xl flex items-center gap-3 transition-all hover:scale-105 active:scale-95 shadow-xl shadow-emerald-900/30"
+               >
+                 Launch PINN Simulation <ChevronRight className="w-5 h-5"/>
+               </button>
+            </div>
+          </div>
+        )}
+
         {loading && (
-          <div className="bg-blue-900/20 border border-blue-500/30 rounded-2xl p-10 flex flex-col items-center justify-center animate-pulse mt-4">
-             <Layers className="w-16 h-16 text-blue-400 mb-4 animate-spin" />
-             <p className="text-xl font-medium text-blue-300">Simulating Fluid Displacement via Deep Neural Network...</p>
+          <div className="bg-indigo-900/20 border border-indigo-500/30 rounded-2xl p-10 flex flex-col items-center justify-center animate-pulse mt-4">
+             <Layers className="w-16 h-16 text-indigo-400 mb-4 animate-spin" />
+             <p className="text-xl font-medium text-indigo-300">Searching RAG Memory & Simulating Fluid Displacement...</p>
           </div>
         )}
 
@@ -76,8 +194,8 @@ function App() {
           <div className="bg-red-900/20 border border-red-500/30 rounded-2xl p-6 flex items-start gap-4 shadow-lg mt-4">
              <AlertTriangle className="w-10 h-10 text-red-500 shrink-0" />
              <div>
-               <h3 className="text-xl font-bold text-red-400">Analysis Halted</h3>
-               <p className="text-red-300/80 mt-2">{error}</p>
+               <h3 className="text-xl font-bold text-red-400">Simulation Error</h3>
+               <p className="text-red-300/80 mt-2 font-mono text-sm">{error}</p>
              </div>
           </div>
         )}
@@ -86,7 +204,7 @@ function App() {
           <div className="bg-slate-900 border border-emerald-500/30 rounded-3xl p-8 shadow-[0_0_80px_rgba(16,185,129,0.1)] mt-4">
             <div className="flex items-center gap-4 mb-6 border-b border-slate-800 pb-5">
               <CheckCircle className="w-10 h-10 text-emerald-400" />
-              <h2 className="text-3xl font-extrabold text-emerald-400">AI Simulation Complete</h2>
+              <h2 className="text-3xl font-extrabold text-emerald-400">Simulation Successfully Compiled</h2>
             </div>
             
             <div className="grid grid-cols-4 gap-4 mb-8">
