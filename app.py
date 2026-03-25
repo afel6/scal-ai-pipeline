@@ -108,6 +108,7 @@ def list_all_sessions() -> list:
 async def process_chat(
     message: str = Form(""),
     session_id: str = Form(""),
+    engineer_name: str = Form("PRC Engineering Staff"),
     file: Optional[UploadFile] = None
 ):
     try:
@@ -153,7 +154,7 @@ async def process_chat(
             archie_params = physics_calc.compute_archie_parameters(df)
             endpoints = physics_calc.compute_saturation_endpoints(df)
             well_name = f"Conversational_Study_{int(time.time())}"
-            exporter = SCALReportBuilder(well_name=well_name, raw_df=df)
+            exporter = SCALReportBuilder(well_name=well_name, raw_df=df, engineer_name=engineer_name)
             exporter.build_title_page()
             exporter.add_archies_table(archie_params)
             exporter.add_saturation_endpoints(endpoints)

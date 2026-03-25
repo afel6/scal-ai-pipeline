@@ -14,6 +14,10 @@ function timeAgo(ts) {
 }
 
 function App() {
+  const [user, setUser] = useState(() => {
+    const saved = localStorage.getItem('prc_user');
+    return saved ? JSON.parse(saved) : null;
+  });
   const [messages, setMessages] = useState([WELCOME_MSG]);
   const [input, setInput] = useState('');
   const [file, setFile] = useState(null);
@@ -105,6 +109,7 @@ function App() {
     const formData = new FormData();
     formData.append('message', input);
     formData.append('session_id', sessionId);
+    formData.append('engineer_name', user?.name || 'PRC Engineering Staff');
     if (file) formData.append('file', file);
     setInput('');
     setFile(null);
@@ -148,6 +153,13 @@ function App() {
     offline: { icon: <WifiOff className="w-2.5 h-2.5" />,             text: 'RECONNECTING', color: 'text-red-400' },
   };
   const status = statusConfig[serverStatus];
+
+  if (!user) {
+    return <Login onLogin={(u) => {
+      localStorage.setItem('prc_user', JSON.stringify(u));
+      setUser(u);
+    }} />;
+  }
 
   return (
     <div className="min-h-screen bg-[#09090b] text-slate-100 flex font-sans overflow-hidden h-screen">
@@ -199,9 +211,21 @@ function App() {
               {sessions.find(s => s.id === sessionId)?.title || 'New Study'}
             </span>
           </div>
-          <div className={`flex items-center gap-2 ${status.color}`}>
-            {status.icon}
-            <span className="text-xs font-mono tracking-widest">{status.text}</span>
+          <div className="flex items-center gap-6">
+            <div className={`flex items-center gap-2 ${status.color}`}>
+              {status.icon}
+              <span className="text-xs font-mono tracking-widest">{status.text}</span>
+            </div>
+            <div className="h-4 w-px bg-slate-800" />
+            <div className="flex items-center gap-3">
+               <div className="text-right hidden sm:block">
+                 <p className="text-[10px] text-slate-500 font-bold uppercase tracking-tighter leading-none">Authenticated Engineer</p>
+                 <p className="text-xs text-white font-serif italic">{user.name}</p>
+               </div>
+               <button onClick={() => { localStorage.removeItem('prc_user'); setUser(null); }} className="p-2 hover:bg-red-950/30 text-slate-500 hover:text-red-400 rounded-lg transition-colors group">
+                 <Trash2 className="w-4 h-4" />
+               </button>
+            </div>
           </div>
         </header>
 
@@ -280,6 +304,52 @@ function App() {
             </button>
           </div>
         </footer>
+      </div>
+    </div>
+  );
+}
+
+function Login({ onLogin }) {
+  const [id, setId] = useState('');
+  const [name, setName] = useState('');
+
+  return (
+    <div className="min-h-screen bg-[#050505] flex items-center justify-center p-6 relative overflow-hidden">
+      {/* Background Ambience */}
+      <div className="absolute top-0 left-0 w-full h-full pointer-events-none overflow-hidden opacity-20">
+        <div className="absolute -top-40 -left-60 w-[600px] h-[600px] bg-red-900/30 rounded-full blur-[140px]" />
+        <div className="absolute -bottom-40 -right-60 w-[500px] h-[500px] bg-blue-900/20 rounded-full blur-[120px]" />
+      </div>
+
+      <div className="w-full max-w-md space-y-8 animate-fade-in relative z-10">
+        <div className="flex flex-col items-center">
+          <div className="bg-white/95 p-6 rounded-3xl shadow-2xl shadow-red-900/10 mb-8 border border-white/10 group hover:scale-[1.02] transition-transform duration-500">
+            <img src="/prc_logo.jpg" alt="PRC Logo" className="w-48 h-auto object-contain" />
+          </div>
+          <h1 className="text-2xl font-black tracking-widest text-white uppercase italic text-center">Petroleum Research Hub</h1>
+          <p className="text-slate-500 text-sm mt-3 font-mono tracking-widest uppercase text-center animate-pulse-slow">AI-Assisted SCAL Engineering Deliverables</p>
+        </div>
+
+        <div className="p-8 bg-gloss rounded-[2.5rem] border border-white/5 space-y-6 shadow-2xl backdrop-blur-3xl shadow-black/80">
+          <div className="space-y-4">
+            <div className="space-y-2">
+              <label className="text-[10px] font-bold text-slate-400 uppercase tracking-widest ml-4">Full Name & Profession</label>
+              <input type="text" value={name} onChange={(e) => setName(e.target.value)} placeholder="e.g. Eng. Ahmed Al-Lafi" className="auth-input" />
+            </div>
+            <div className="space-y-2">
+              <label className="text-[10px] font-bold text-slate-400 uppercase tracking-widest ml-4">PRC MFA Identification</label>
+              <input type="text" value={id} onChange={(e) => setId(e.target.value)} placeholder="Enter NOC/PRC ID" className="auth-input" />
+            </div>
+          </div>
+          
+          <button onClick={() => name && id && onLogin({ name, id })} disabled={!name || !id} className="auth-button">
+            Authenticate Session
+          </button>
+          
+          <p className="text-[10px] text-slate-600 text-center uppercase tracking-tighter px-4">
+            Authorized Personnel Only. Access to Libyan National Petro-Data is monitored for security compliance.
+          </p>
+        </div>
       </div>
     </div>
   );
