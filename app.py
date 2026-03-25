@@ -1,9 +1,11 @@
 from fastapi import FastAPI, UploadFile, File
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
+from typing import List
 import shutil
 import os
 import zipfile
+import time
 
 from scal_ingestion import SCALBatchIngestion
 from petrophysics_engine import ArchieCalculator
@@ -24,25 +26,32 @@ llm_writer = LLMInsightGenerator(api_key=api_key)
 physics_calc = ArchieCalculator()
 
 @app.post("/api/batch_process")
-async def batch_process(file: UploadFile = File(...)):
-    well_name = file.filename.split('.')[0]
+async def batch_process(files: List[UploadFile] = File(...)):
+    # Unique dynamically generated ID for batch execution runs
+    well_name = f"PRC_Batch_Study_{int(time.time())}"
     temp_dir = f"temp_extraction_{well_name}"
     
     try:
         os.makedirs(temp_dir, exist_ok=True)
-        file_path = os.path.join(temp_dir, file.filename)
         
-        with open(file_path, "wb") as buffer:
-            shutil.copyfileobj(file.file, buffer)
-            
-        if file.filename.endswith('.zip'):
-            with zipfile.ZipFile(file_path, 'r') as zip_ref:
-                zip_ref.extractall(temp_dir)
+        # Sequentially buffer every file the user selected into the engine
+        for file in files:
+            file_path = os.path.join(temp_dir, file.filename)
+            with open(file_path, "wb") as buffer:
+                shutil.copyfileobj(file.file, buffer)
                 
-        # 1. Ingest Massive Framework (ZIP of 55 CSVs or singular)
+            # If any selected file happens to be a Zip, extract its payload simultaneously
+            if file.filename.endswith('.zip'):
+                with zipfile.ZipFile(file_path, 'r') as zip_ref:
+                    zip_ref.extractall(temp_dir)
+                
+        # 1. Ingest Massive Framework (Will swallow all 55 CSV files natively)
         ingestion = SCALBatchIngestion(temp_dir)
         df = ingestion.compile_well_dataframe()
         
+        if df.empty:
+            return {"status": "error", "message": "Failed to extract valid tabular data from the uploaded files."}
+            
         # 2. Mathematical Archie's & Physics Computations
         archie_params = physics_calc.compute_archie_parameters(df)
         endpoints = physics_calc.compute_saturation_endpoints(df)
@@ -70,6 +79,7 @@ async def batch_process(file: UploadFile = File(...)):
     except Exception as e:
         return {"status": "error", "message": f"Archie's Engine Error: {str(e)}"}
     finally:
+        # Guarantee massive folder caches are perfectly wiped
         if os.path.exists(temp_dir):
             shutil.rmtree(temp_dir, ignore_errors=True)
 

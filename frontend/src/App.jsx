@@ -8,14 +8,18 @@ function App() {
   const [error, setError] = useState(null);
   const fileInputRef = useRef(null);
 
-  const handleUpload = async (fileToUpload) => {
-    if (!fileToUpload) return;
+  const handleUpload = async (filesToUpload) => {
+    // Upgraded array-checking payload constraints
+    if (!filesToUpload || filesToUpload.length === 0) return;
     setLoading(true);
     setError(null);
     setResult(null);
 
     const formData = new FormData();
-    formData.append('file', fileToUpload);
+    // Intelligently sequence 55-CSV arrays into the payload
+    Array.from(filesToUpload).forEach(file => {
+       formData.append('files', file);
+    });
 
     try {
       const apiUrl = import.meta.env.VITE_API_URL || 'http://localhost:8000';
@@ -49,7 +53,7 @@ function App() {
            <Database className="w-10 h-10 text-emerald-500" />
            <div>
              <h1 className="text-2xl font-black tracking-widest text-white">PETROLEUM RESEARCH CENTER</h1>
-             <p className="text-xs text-emerald-500 tracking-[0.2em] font-bold">ENTERPRISE SCAL AI FRAMEWORK</p>
+             <p className="text-xs text-emerald-500 tracking-[0.2em] font-bold">ENTERPRISE SCAL MULTI-FILE ARCHITECTURE</p>
            </div>
         </div>
         <div className="text-right">
@@ -69,22 +73,23 @@ function App() {
               type="file" 
               ref={fileInputRef} 
               className="hidden" 
+              multiple
               accept=".pdf,.doc,.docx,.xlsx,.xls,.csv,.zip"
-              onChange={(e) => handleUpload(e.target.files[0])}
+              onChange={(e) => handleUpload(e.target.files)}
             />
             <div className="w-24 h-24 rounded-full bg-emerald-500/10 flex items-center justify-center mx-auto mb-8 
                             shadow-[0_0_30px_rgba(16,185,129,0.15)] ring-1 ring-emerald-500/30">
                <UploadCloud className="w-10 h-10 text-emerald-400" />
             </div>
             <h2 className="text-3xl font-light text-white mb-2">Execute Full Well Archie Study</h2>
-            <p className="text-slate-500 text-sm tracking-widest uppercase">DROP 55-FILE CSV BATCH FOLDER (.ZIP) OR SPREADSHEET HERE</p>
+            <p className="text-slate-500 text-sm tracking-widest uppercase">SELECT ALL 55 CSV HIGHLIGHTS, ZIP, OR SPREADSHEETS HERE</p>
           </div>
         </div>
 
         {loading && (
           <div className="bg-indigo-950/20 border border-indigo-500/20 rounded-2xl p-12 flex flex-col items-center justify-center">
              <Layers className="w-12 h-12 text-indigo-400 mb-6 animate-spin" />
-             <h3 className="text-xl font-light text-white mb-2">Normalizing Continuous Array Datasets...</h3>
+             <h3 className="text-xl font-light text-white mb-2">Normalizing Array Datasets Natively...</h3>
              <p className="text-indigo-400/60 text-sm font-mono tracking-wider">Deploying LLM Reservoir Engineering Co-Author & Microsoft Word Generator...</p>
           </div>
         )}
@@ -106,8 +111,8 @@ function App() {
             <div className="flex items-center gap-5 mb-8 border-b border-emerald-500/20 pb-8">
               <CheckCircle className="w-12 h-12 text-emerald-400" />
               <div>
-                <h2 className="text-3xl font-bold text-white">Batch Simulation Completed</h2>
-                <p className="text-emerald-400/80 font-mono mt-1">Found ({result.samples_processed}) Valid Sample Arrays. Compiled MS Word Deliverable.</p>
+                <h2 className="text-3xl font-bold text-white">Batch Multi-File Compilation Online</h2>
+                <p className="text-emerald-400/80 font-mono mt-1">Found ({result.samples_processed}) Valid Sample Arrays across deployed networks.</p>
               </div>
             </div>
 
