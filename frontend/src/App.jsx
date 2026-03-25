@@ -29,7 +29,7 @@ function App() {
         setError(response.data.message || 'Error executing macro-level analysis.');
       }
     } catch (err) {
-      setError(err.message || 'Server connection failed. Ensure FastAPI is running on Port 8000.');
+      setError(err.message || 'Network Error: Ensure the FASTAPI backend is actively running.');
     } finally {
       setLoading(false);
     }
@@ -69,23 +69,23 @@ function App() {
               type="file" 
               ref={fileInputRef} 
               className="hidden" 
-              accept=".pdf,.doc,.docx,.xlsx,.xls,.csv"
+              accept=".pdf,.doc,.docx,.xlsx,.xls,.csv,.zip"
               onChange={(e) => handleUpload(e.target.files[0])}
             />
             <div className="w-24 h-24 rounded-full bg-emerald-500/10 flex items-center justify-center mx-auto mb-8 
                             shadow-[0_0_30px_rgba(16,185,129,0.15)] ring-1 ring-emerald-500/30">
                <UploadCloud className="w-10 h-10 text-emerald-400" />
             </div>
-            <h2 className="text-3xl font-light text-white mb-2">Execute Batch Reservoir Study</h2>
-            <p className="text-slate-500 text-sm tracking-widest">DROP MASSIVE EXCEL, CSV, OR LAB PDF HERE</p>
+            <h2 className="text-3xl font-light text-white mb-2">Execute Full Well Archie Study</h2>
+            <p className="text-slate-500 text-sm tracking-widest uppercase">DROP 55-FILE CSV BATCH FOLDER (.ZIP) OR SPREADSHEET HERE</p>
           </div>
         </div>
 
         {loading && (
           <div className="bg-indigo-950/20 border border-indigo-500/20 rounded-2xl p-12 flex flex-col items-center justify-center">
              <Layers className="w-12 h-12 text-indigo-400 mb-6 animate-spin" />
-             <h3 className="text-xl font-light text-white mb-2">Processing Unified Batch Extraction...</h3>
-             <p className="text-indigo-400/60 text-sm font-mono tracking-wider">Deploying Deep Learning Cluster & Formatting Word Export...</p>
+             <h3 className="text-xl font-light text-white mb-2">Normalizing Continuous Array Datasets...</h3>
+             <p className="text-indigo-400/60 text-sm font-mono tracking-wider">Deploying LLM Reservoir Engineering Co-Author & Microsoft Word Generator...</p>
           </div>
         )}
 
@@ -107,19 +107,13 @@ function App() {
               <CheckCircle className="w-12 h-12 text-emerald-400" />
               <div>
                 <h2 className="text-3xl font-bold text-white">Batch Simulation Completed</h2>
-                <p className="text-emerald-400/80 font-mono mt-1">Successfully deployed Neural Networks & Compiled MS Word Deliverable.</p>
+                <p className="text-emerald-400/80 font-mono mt-1">Found ({result.samples_processed}) Valid Sample Arrays. Compiled MS Word Deliverable.</p>
               </div>
             </div>
-            
-            <div className="grid grid-cols-2 gap-6 mb-10">
-              <div className="bg-black/50 p-6 rounded-xl border border-white/5">
-                <p className="text-slate-500 text-xs font-bold uppercase tracking-widest mb-3">Core Samples Validated</p>
-                <p className="text-5xl font-light text-white">{result.samples_processed}</p>
-              </div>
-              <div className="bg-black/50 p-6 rounded-xl border border-white/5">
-                 <p className="text-slate-500 text-xs font-bold uppercase tracking-widest mb-3">Thermodynamic Models Generated</p>
-                 <p className="text-5xl font-light text-white">{result.samples_processed}</p>
-              </div>
+
+            <div className="bg-slate-950/80 border border-emerald-500/30 p-8 rounded-2xl mb-8">
+               <h3 className="text-emerald-400 font-bold mb-4 uppercase tracking-widest text-sm">Artificial Intelligence Reservoir Interpretation</h3>
+               <p className="text-slate-300 font-serif leading-loose text-lg whitespace-pre-wrap">{result.ai_conclusion}</p>
             </div>
 
             <div className="flex justify-center border-t border-white/5 pt-10">
@@ -127,7 +121,7 @@ function App() {
                  onClick={handleDownload}
                  className="bg-emerald-600 hover:bg-emerald-500 text-white font-bold tracking-widest uppercase px-12 py-5 rounded-lg flex items-center justify-center gap-4 transition-all hover:scale-[1.02] shadow-[0_0_40px_rgba(16,185,129,0.3)] ring-1 ring-emerald-400"
                >
-                 <Download className="w-6 h-6"/> Download MS Word Final Report
+                 <Download className="w-6 h-6"/> Download Authored MS Word Final Report
                </button>
             </div>
           </div>

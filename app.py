@@ -3,13 +3,14 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 import shutil
 import os
+import zipfile
 
-from enterprise_ingestion import EnterpriseIngestion
-from prc_thermodynamics import PRCThermodynamics
-from reservoir_batch_predictor import ReservoirBatchPredictor
-from prc_word_exporter import PRCWordExporter
+from scal_ingestion import SCALBatchIngestion
+from petrophysics_engine import ArchieCalculator
+from llm_insight_generator import LLMInsightGenerator
+from report_builder import SCALReportBuilder
 
-app = FastAPI(title="PRC Enterprise AI Pipeline")
+app = FastAPI(title="PRC Enterprise Pipeline - Archie's Parameters")
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -18,63 +19,59 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-ingestion_engine = EnterpriseIngestion()
-batch_predictor = ReservoirBatchPredictor()
+api_key = os.environ.get('GEMINI_API_KEY', 'DUMMY_KEY')
+llm_writer = LLMInsightGenerator(api_key=api_key)
+physics_calc = ArchieCalculator()
 
 @app.post("/api/batch_process")
 async def batch_process(file: UploadFile = File(...)):
-    file_location = f"temp_{file.filename}"
-    with open(file_location, "wb") as buffer:
-        shutil.copyfileobj(file.file, buffer)
-        
+    well_name = file.filename.split('.')[0]
+    temp_dir = f"temp_extraction_{well_name}"
+    
     try:
-        # 1. Macro-Ingestion
-        df = ingestion_engine.parse_tabular_data(file_location)
-        if df.empty:
-            return {"status": "error", "message": "Failed to extract valid tabular data from the report."}
+        os.makedirs(temp_dir, exist_ok=True)
+        file_path = os.path.join(temp_dir, file.filename)
+        
+        with open(file_path, "wb") as buffer:
+            shutil.copyfileobj(file.file, buffer)
             
-        # 2. Physics & Prediction Batch Processing
-        batch_results = batch_predictor.process_entire_well(df)
+        if file.filename.endswith('.zip'):
+            with zipfile.ZipFile(file_path, 'r') as zip_ref:
+                zip_ref.extractall(temp_dir)
+                
+        # 1. Ingest Massive Framework (ZIP of 55 CSVs or singular)
+        ingestion = SCALBatchIngestion(temp_dir)
+        df = ingestion.compile_well_dataframe()
         
-        # 3. Microsoft Word Export
-        well_name = file.filename.split('.')[0]
-        exporter = PRCWordExporter(well_name=well_name)
-        exporter.generate_title_page()
+        # 2. Mathematical Archie's & Physics Computations
+        archie_params = physics_calc.compute_archie_parameters(df)
+        endpoints = physics_calc.compute_saturation_endpoints(df)
         
-        # Extract rows for the CCA table
-        cca_rows = []
-        for i, res in enumerate(batch_results):
-            raw = res['raw_data']
-            cca_rows.append({
-                'id': raw.get('id', f'Sample_{i}'),
-                'depth': raw.get('depth', 0.0),
-                'porosity': raw.get('porosity', 0.0),
-                'permeability': raw.get('permeability', 0.0),
-                'grain_density': raw.get('grain_density', 0.0)
-            })
-        exporter.add_cca_table(cca_rows)
+        # 3. Conversational AI Natural Language Writer
+        ai_insights = llm_writer.generate_report_insights(archie_params, endpoints)
         
-        # Add physics plots for the samples
-        for res in batch_results[:3]: # Limiting to 3 to prevent extreme MS Word page counts
-            sw = res['ai_insights']['sw_array']
-            krw = res['ai_insights']['krw_array']
-            kro = res['ai_insights']['kro_array']
-            exporter.add_scal_physics_plot(sw, krw, kro, res['depth'])
-            
+        # 4. Automate Microsoft Word Generation
+        exporter = SCALReportBuilder(well_name=well_name)
+        exporter.build_title_page()
+        exporter.add_archies_table(archie_params)
+        exporter.add_saturation_endpoints(endpoints)
+        exporter.add_ai_conclusion(ai_insights)
+        
         docx_path = exporter.export()
         
         return {
             "status": "success",
-            "message": "Batch processing complete.",
+            "message": "Archie's simulation complete.",
             "download_url": f"/api/download/{docx_path}",
-            "samples_processed": len(batch_results)
+            "samples_processed": len(df),
+            "ai_conclusion": ai_insights
         }
         
     except Exception as e:
-        return {"status": "error", "message": str(e)}
+        return {"status": "error", "message": f"Archie's Engine Error: {str(e)}"}
     finally:
-        if os.path.exists(file_location):
-            os.remove(file_location)
+        if os.path.exists(temp_dir):
+            shutil.rmtree(temp_dir, ignore_errors=True)
 
 @app.get("/api/download/{filename}")
 async def download_file(filename: str):
@@ -84,4 +81,4 @@ async def download_file(filename: str):
 
 @app.get("/")
 def read_root():
-    return {"message": "PRC Enterprise Pipeline Online."}
+    return {"message": "PRC Archie's Parameters API is running."}
