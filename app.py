@@ -2,16 +2,13 @@ from fastapi import FastAPI, UploadFile, File
 from fastapi.middleware.cors import CORSMiddleware
 import shutil
 import os
-import sys
 
-from extractor import ReportExtractor
-from physics_engine import PhysicsEngine
-from neural_network import SCALNeuralNetwork
-from report_generator import ReportGenerator
+from universal_extractor import UniversalExtractor
+from physics_validator import PhysicsValidator
+from rag_database import RAGDatabase
+from predictive_model import PredictiveModel
 
-import numpy as np
-
-app = FastAPI(title="SCAL AI Pipeline")
+app = FastAPI(title="SCAL AI Pipeline - Web Edition")
 
 app.add_middleware(
     CORSMiddleware,
@@ -21,12 +18,11 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-print("Initializing Neural Network...")
-nn = SCALNeuralNetwork()
-# Placeholder dummy training for demo purposes
-X_hist = np.random.rand(10, 4)
-y_hist = np.random.rand(10)
-nn.train(X_hist, y_hist, epochs=10)
+print("Initializing Advanced Web Architecture (RAG, PINN, Multimodal Vision)...")
+api_key = os.environ.get('GEMINI_API_KEY', 'DUMMY_KEY')
+extractor = UniversalExtractor(api_key=api_key)
+rag_db = RAGDatabase(persist_directory="./chroma_db")
+pinn_model = PredictiveModel()
 
 @app.post("/api/analyze")
 async def analyze_report(file: UploadFile = File(...)):
@@ -35,35 +31,49 @@ async def analyze_report(file: UploadFile = File(...)):
         shutil.copyfileobj(file.file, buffer)
         
     try:
-        extractor = ReportExtractor(file_location)
-        extractor.extract_text()
-        raw_data = extractor.parse_scal_data()
+        raw_data = extractor.extract_petrophysics(file_location)
+        clean_data = PhysicsValidator.validate_core_physics(raw_data)
         
-        scal_data = {k: PhysicsEngine.format_precision(v) for k, v in raw_data.items()}
+        analog_wells = rag_db.query_analog_wells(
+            current_porosity=clean_data['Porosity'], 
+            current_perm=clean_data['Permeability']
+        )
         
-        # Validation
-        PhysicsEngine.validate_saturations(scal_data['Swi'], scal_data['Sor'])
+        pinn_model.train_on_rag_history(analog_wells)
+        ai_results = pinn_model.simulate_displacement_curve(
+            swi=clean_data['Swi'], 
+            sor=clean_data['Sor']
+        )
         
-        # Neural Net Prediction
-        predicted_val = nn.predict_endpoint(scal_data)
+        rag_db.ingest_report(
+            well_id=file.filename.split('.')[0], 
+            scal_data=clean_data, 
+            report_text="Processed core analysis metric sample."
+        )
         
-        # Report Generation
-        report_name = f"report_{file.filename}.md"
-        report_gen = ReportGenerator(scal_data, predicted_val)
-        report_gen.generate_markdown(report_name)
-        
+        curve_data = []
+        for i in range(len(ai_results['sw_array'])):
+            curve_data.append({
+                "Sw": float(f"{ai_results['sw_array'][i]:.4f}"),
+                "krw": float(f"{ai_results['krw_array'][i]:.4f}"),
+                "kro": float(f"{ai_results['kro_array'][i]:.4f}")
+            })
+            
         return {
             "status": "success",
-            "data": scal_data,
-            "predictions": {"krw_at_sor": float(f"{predicted_val:.4f}")},
-            "report_generated": report_name
+            "data": clean_data,
+            "ai_insights": {
+                "Corey_Exponents": ai_results['exponents'],
+                "Endpoints": ai_results['endpoints'],
+                "Curve_Data": curve_data
+            }
         }
     except Exception as e:
-        return {"status": "error", "message": str(e)}
+        return {"status": "error", "message": f"Pipeline Error: {str(e)}"}
     finally:
         if os.path.exists(file_location):
             os.remove(file_location)
 
 @app.get("/")
 def read_root():
-    return {"message": "SCAL AI Pipeline API is running."}
+    return {"message": "Expert Multimodal SCAL API is running."}

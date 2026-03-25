@@ -1,4 +1,6 @@
-pdfplumber
+google-generativeai
+pydantic
+chromadb
 PyMuPDF
 pandas
 numpy
