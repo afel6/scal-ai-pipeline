@@ -1,16 +1,15 @@
 from fastapi import FastAPI, UploadFile, File
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel
+from fastapi.responses import FileResponse
 import shutil
 import os
 
-from universal_extractor import UniversalExtractor
-from physics_validator import PhysicsValidator
-from rag_database import RAGDatabase
-from predictive_model import PredictiveModel
+from enterprise_ingestion import EnterpriseIngestion
+from prc_thermodynamics import PRCThermodynamics
+from reservoir_batch_predictor import ReservoirBatchPredictor
+from prc_word_exporter import PRCWordExporter
 
-app = FastAPI(title="SCAL AI Pipeline - Web Edition")
-
+app = FastAPI(title="PRC Enterprise AI Pipeline")
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -19,111 +18,70 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-print("Initializing Advanced Architecture (RAG, PINN, Multimodal Vision)...")
-api_key = os.environ.get('GEMINI_API_KEY', 'DUMMY_KEY')
-extractor = UniversalExtractor(api_key=api_key)
-rag_db = RAGDatabase(persist_directory="./chroma_db")
-pinn_model = PredictiveModel()
+ingestion_engine = EnterpriseIngestion()
+batch_predictor = ReservoirBatchPredictor()
 
-class ManualData(BaseModel):
-    Porosity: float
-    Permeability: float
-    Swi: float
-    Sor: float
-
-@app.post("/api/simulate")
-async def simulate_manual_data(data: ManualData):
-    try:
-        raw_data = data.dict()
-        clean_data = PhysicsValidator.validate_core_physics(raw_data)
-        
-        analog_wells = rag_db.query_analog_wells(
-            current_porosity=clean_data['Porosity'], 
-            current_perm=clean_data['Permeability']
-        )
-        
-        pinn_model.train_on_rag_history(analog_wells)
-        ai_results = pinn_model.simulate_displacement_curve(
-            swi=clean_data['Swi'], 
-            sor=clean_data['Sor']
-        )
-        
-        rag_db.ingest_report(
-            well_id="manual_entry", 
-            scal_data=clean_data, 
-            report_text="Manual petroleum engineer data entry for simulation."
-        )
-        
-        curve_data = []
-        for i in range(len(ai_results['sw_array'])):
-            curve_data.append({
-                "Sw": float(f"{ai_results['sw_array'][i]:.4f}"),
-                "krw": float(f"{ai_results['krw_array'][i]:.4f}"),
-                "kro": float(f"{ai_results['kro_array'][i]:.4f}")
-            })
-            
-        return {
-            "status": "success",
-            "data": clean_data,
-            "ai_insights": {
-                "Corey_Exponents": ai_results['exponents'],
-                "Endpoints": ai_results['endpoints'],
-                "Curve_Data": curve_data
-            }
-        }
-    except Exception as e:
-        return {"status": "error", "message": f"Simulation Error: {str(e)}"}
-
-@app.post("/api/analyze")
-async def analyze_report(file: UploadFile = File(...)):
+@app.post("/api/batch_process")
+async def batch_process(file: UploadFile = File(...)):
     file_location = f"temp_{file.filename}"
     with open(file_location, "wb") as buffer:
         shutil.copyfileobj(file.file, buffer)
         
     try:
-        raw_data = extractor.extract_petrophysics(file_location)
-        clean_data = PhysicsValidator.validate_core_physics(raw_data)
-        
-        analog_wells = rag_db.query_analog_wells(
-            current_porosity=clean_data['Porosity'], 
-            current_perm=clean_data['Permeability']
-        )
-        
-        pinn_model.train_on_rag_history(analog_wells)
-        ai_results = pinn_model.simulate_displacement_curve(
-            swi=clean_data['Swi'], 
-            sor=clean_data['Sor']
-        )
-        
-        rag_db.ingest_report(
-            well_id=file.filename.split('.')[0], 
-            scal_data=clean_data, 
-            report_text="Processed core analysis metric sample."
-        )
-        
-        curve_data = []
-        for i in range(len(ai_results['sw_array'])):
-            curve_data.append({
-                "Sw": float(f"{ai_results['sw_array'][i]:.4f}"),
-                "krw": float(f"{ai_results['krw_array'][i]:.4f}"),
-                "kro": float(f"{ai_results['kro_array'][i]:.4f}")
-            })
+        # 1. Macro-Ingestion
+        df = ingestion_engine.parse_tabular_data(file_location)
+        if df.empty:
+            return {"status": "error", "message": "Failed to extract valid tabular data from the report."}
             
+        # 2. Physics & Prediction Batch Processing
+        batch_results = batch_predictor.process_entire_well(df)
+        
+        # 3. Microsoft Word Export
+        well_name = file.filename.split('.')[0]
+        exporter = PRCWordExporter(well_name=well_name)
+        exporter.generate_title_page()
+        
+        # Extract rows for the CCA table
+        cca_rows = []
+        for i, res in enumerate(batch_results):
+            raw = res['raw_data']
+            cca_rows.append({
+                'id': raw.get('id', f'Sample_{i}'),
+                'depth': raw.get('depth', 0.0),
+                'porosity': raw.get('porosity', 0.0),
+                'permeability': raw.get('permeability', 0.0),
+                'grain_density': raw.get('grain_density', 0.0)
+            })
+        exporter.add_cca_table(cca_rows)
+        
+        # Add physics plots for the samples
+        for res in batch_results[:3]: # Limiting to 3 to prevent extreme MS Word page counts
+            sw = res['ai_insights']['sw_array']
+            krw = res['ai_insights']['krw_array']
+            kro = res['ai_insights']['kro_array']
+            exporter.add_scal_physics_plot(sw, krw, kro, res['depth'])
+            
+        docx_path = exporter.export()
+        
         return {
             "status": "success",
-            "data": clean_data,
-            "ai_insights": {
-                "Corey_Exponents": ai_results['exponents'],
-                "Endpoints": ai_results['endpoints'],
-                "Curve_Data": curve_data
-            }
+            "message": "Batch processing complete.",
+            "download_url": f"/api/download/{docx_path}",
+            "samples_processed": len(batch_results)
         }
+        
     except Exception as e:
-        return {"status": "error", "message": f"Pipeline Error: {str(e)}"}
+        return {"status": "error", "message": str(e)}
     finally:
         if os.path.exists(file_location):
             os.remove(file_location)
 
+@app.get("/api/download/{filename}")
+async def download_file(filename: str):
+    if os.path.exists(filename):
+        return FileResponse(path=filename, filename=filename, media_type='application/vnd.openxmlformats-officedocument.wordprocessingml.document')
+    return {"error": "File not found."}
+
 @app.get("/")
 def read_root():
-    return {"message": "Expert Multimodal SCAL API is running."}
+    return {"message": "PRC Enterprise Pipeline Online."}

@@ -9,3 +9,6 @@ scikit-learn
 fastapi
 uvicorn[standard]
 python-multipart
+python-docx
+matplotlib
+openpyxl
