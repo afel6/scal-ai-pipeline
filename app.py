@@ -30,6 +30,7 @@ api_key = os.environ.get('GEMINI_API_KEY', 'DUMMY_KEY')
 chat_ai = PRCChatAssistant(api_key=api_key)
 
 # Server-side session memory store — persists entire conversation per browser session
+# Structure: { session_id: { "title": str, "created_at": float, "messages": list } }
 SESSION_STORE: dict = {}
 
 @app.post("/api/chat")
@@ -46,8 +47,14 @@ async def process_chat(
         # Resolve or create server-side session memory
         if not session_id or session_id not in SESSION_STORE:
             session_id = session_id or str(uuid.uuid4())
-            SESSION_STORE[session_id] = []
-        chat_history = SESSION_STORE[session_id]
+            # Auto-title from first user message (truncated to 40 chars)
+            title = (message[:40] + '...') if len(message) > 40 else (message or 'New Study')
+            SESSION_STORE[session_id] = {
+                "title": title,
+                "created_at": time.time(),
+                "messages": []
+            }
+        chat_history = SESSION_STORE[session_id]["messages"]
         
         file_bytes = None
         mime_type = None
@@ -109,6 +116,7 @@ async def process_chat(
         # Append both turns to server memory before returning
         chat_history.append({"role": "user", "text": message})
         chat_history.append({"role": "model", "text": clean_response.strip()})
+        SESSION_STORE[session_id]["messages"] = chat_history
         
         return {
             "status": "success",
@@ -122,9 +130,25 @@ async def process_chat(
 
 @app.delete("/api/session/{session_id}")
 async def clear_session(session_id: str):
-    """Wipe a session from the server store (when user clicks New Chat)."""
+    """Wipe a session from the server store (when user clicks delete)."""
     SESSION_STORE.pop(session_id, None)
     return {"status": "cleared"}
+
+@app.get("/api/sessions")
+async def list_sessions():
+    """Return all sessions sorted newest-first for the sidebar."""
+    sessions = [
+        {"id": sid, "title": data["title"], "created_at": data["created_at"]}
+        for sid, data in SESSION_STORE.items()
+    ]
+    return sorted(sessions, key=lambda x: x["created_at"], reverse=True)
+
+@app.get("/api/session/{session_id}")
+async def load_session(session_id: str):
+    """Load full message history for a session (used when clicking sidebar entry)."""
+    if session_id not in SESSION_STORE:
+        return {"status": "not_found", "messages": []}
+    return {"status": "ok", "messages": SESSION_STORE[session_id]["messages"]}
 
 @app.get("/api/download/{filename}")
 async def download_file(filename: str):
