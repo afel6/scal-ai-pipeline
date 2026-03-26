@@ -34,7 +34,7 @@ class PRCChatAssistant:
             except: pass
             self.model = genai.GenerativeModel(self.model_name)
 
-    def chat(self, history, msg, kb_context="", f=None, m=None):
+    def chat(self, history, msg, kb_context="", f_parts=[]):
         # Build system + context enriched message
         enriched = SYSTEM_PROMPT
         if kb_context:
@@ -44,8 +44,9 @@ class PRCChatAssistant:
         h = [{"role":'user' if x['role']=='user' else 'model', "parts":[x['text']]} for x in history]
         c = [enriched]
         SUPPORTED = ['application/pdf', 'image/jpeg', 'image/png', 'image/gif', 'image/webp']
-        if f and m in SUPPORTED:
-            c.append({'mime_type': m, 'data': f})
+        for data, mime in f_parts:
+            if mime in SUPPORTED:
+                c.append({'mime_type': mime, 'data': data})
         return self.model.start_chat(history=h).send_message(c).text
 
 # ── RAG ──
@@ -67,27 +68,21 @@ class KnowledgeBase:
         try:
             conn = sqlite3.connect(DB_PATH)
             c = conn.cursor()
-            # Score each chunk by how many query words appear in it
             keywords = [w.lower() for w in re.split(r'\W+', query) if len(w) > 3]
-            if not keywords:
-                conn.close()
-                return ""
+            if not keywords: return ""
             results = c.execute("SELECT source, chunk FROM kb").fetchall()
             conn.close()
             scored = []
             for source, chunk in results:
                 cl = chunk.lower()
                 score = sum(1 for kw in keywords if kw in cl)
-                if score > 0:
-                    scored.append((score, source, chunk))
+                if score > 0: scored.append((score, source, chunk))
             scored.sort(key=lambda x: -x[0])
             top = scored[:top_k]
-            if not top:
-                return ""
+            if not top: return ""
             parts = [f"[From: {s}]\n{ch}" for _, s, ch in top]
             return "\n\n".join(parts)
-        except Exception as e:
-            return ""
+        except Exception as e: return ""
 
 # ── REPORTING ──
 class Reporter:
@@ -135,11 +130,8 @@ def get_session(sid: str): return {"status": "ok", "messages": []}
 def kb_status():
     try:
         rows = db("SELECT source, COUNT(*) FROM kb GROUP BY source")
-        books = [{"name": r[0], "chunks": r[1]} for r in rows]
-        total = db("SELECT COUNT(*) FROM kb")[0][0]
-        return {"total_chunks": total, "books": books}
-    except Exception as e:
-        return {"error": str(e)}
+        return {"total_chunks": db("SELECT COUNT(*) FROM kb")[0][0], "books": [{"name": r[0], "chunks": r[1]} for r in rows]}
+    except Exception as e: return {"error": str(e)}
 
 # ── ROUTE: INGEST BOOK ──
 @app.post("/api/kb/ingest")
@@ -147,37 +139,21 @@ async def ingest_book(file: UploadFile = File(...)):
     try:
         content = await file.read()
         name = file.filename or "Unknown Book"
-        
-        # Parse HTML books
         if name.endswith(('.html', '.htm')) or 'text/html' in (file.content_type or ''):
             soup = BeautifulSoup(content, 'lxml')
-            # Remove scripts/styles
-            for tag in soup(['script', 'style', 'nav', 'footer', 'header']):
-                tag.decompose()
+            for tag in soup(['script', 'style', 'nav', 'footer', 'header']): tag.decompose()
             text = soup.get_text(separator=' ', strip=True)
-        elif name.endswith('.txt'):
-            text = content.decode('utf-8', errors='ignore')
         else:
             text = content.decode('utf-8', errors='ignore')
-
-        # Clean up whitespace
         text = re.sub(r'\s+', ' ', text).strip()
-        if len(text) < 100:
-            return {"status": "error", "message": "File too short or unreadable"}
-
-        # Chunk and store
+        if len(text) < 100: return {"status": "error", "message": "File too short or unreadable"}
         chunks = KnowledgeBase.chunk_text(text, name)
-        # Delete old chunks for this book if re-ingesting
         db("DELETE FROM kb WHERE source = ?", (name,))
         conn = sqlite3.connect(DB_PATH)
-        c = conn.cursor()
-        c.executemany("INSERT INTO kb (source, chunk) VALUES (?, ?)", chunks)
-        conn.commit()
-        conn.close()
-
-        return {"status": "success", "book": name, "chunks_stored": len(chunks), "words": len(text.split())}
-    except Exception as e:
-        return {"status": "error", "message": str(e)[:100]}
+        conn.executemany("INSERT INTO kb (source, chunk) VALUES (?, ?)", chunks)
+        conn.commit(); conn.close()
+        return {"status: “success”, "book": name, "chunks_stored": len(chunks), "words": len(text.split())}
+    except Exception as e: return {"status": "error", "message": str(e)[:100]}
 
 # ── ROUTE: CHAT ──
 @app.post("/api/chat")
@@ -191,27 +167,38 @@ async def handle(
         sid = session_id if (session_id and session_id != "undefined") else str(uuid.uuid4())
         history = [{"role": r, "text": t} for r, t, u in db("SELECT role, text, url FROM m WHERE sid = ? ORDER BY id", (sid,))]
 
-        f_b, m_t = None, None  # binary attachment for AI vision
+        f_parts = []
         for file in files:
             f_bytes = await file.read()
             fname = file.filename or ""
             mime = file.content_type or ""
+            
+            # --- STRUCTURED DATA ---
             if fname.endswith(('.xlsx', '.xls')) or "sheet" in mime:
                 df = pd.read_excel(pd.io.common.BytesIO(f_bytes))
                 message += f"\n[EXCEL — {fname}]:\n{df.head(10).to_string()}"
             elif fname.endswith('.csv'):
                 df = pd.read_csv(pd.io.common.BytesIO(f_bytes))
                 message += f"\n[CSV — {fname}]:\n{df.head(10).to_string()}"
+            
+            # --- TEXT DOCUMENTS ---
+            elif fname.endswith('.docx'):
+                doc = Document(pd.io.common.BytesIO(f_bytes))
+                doc_text = "\n".join([p.text for p in doc.paragraphs if p.text.strip()])
+                message += f"\n[WORD DOC — {fname}]:\n{doc_text[:15000]}"
+            elif fname.endswith('.txt'):
+                message += f"\n[TEXT FILE — {fname}]:\n{f_bytes.decode('utf-8', errors='ignore')[:15000]}"
+            
+            # --- BINARY (VISION / NATIVE PDF) ---
             else:
-                # Pass first binary file (PDF/image) to the AI
                 SUPPORTED = ['application/pdf', 'image/jpeg', 'image/png', 'image/gif', 'image/webp']
-                if f_b is None and mime in SUPPORTED:
-                    f_b, m_t = f_bytes, mime
+                if mime in SUPPORTED:
+                    f_parts.append((f_bytes, mime))
 
         # Retrieve relevant knowledge base context
         kb_context = KnowledgeBase.search(message)
 
-        resp = assistant.chat(history, message, kb_context=kb_context, f=f_b, m=m_t)
+        resp = assistant.chat(history, message, kb_context=kb_context, f_parts=f_parts)
 
         if '__PRC_REPORT__' in resp:
             path = Reporter.build(f"Study_{int(time.time())}", engineer_name, resp)
