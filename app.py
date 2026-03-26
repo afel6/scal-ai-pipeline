@@ -41,13 +41,32 @@ class PRCChatAssistant:
             enriched += f"\n\n--- KNOWLEDGE BASE CONTEXT ---\n{kb_context}\n--- END CONTEXT ---"
         enriched += f"\n\nUSER QUERY: {msg}"
         
-        h = [{"role":'user' if x['role']=='user' else 'model', "parts":[x['text']]} for x in history]
+        # Enforce strictly alternating history (User -> Model -> User -> Model)
+        valid_history = []
+        for x in history:
+            role = 'user' if x['role'] == 'user' else 'model'
+            if not valid_history:
+                if role == 'user': valid_history.append({"role": role, "parts": [x['text']]})
+            else:
+                if valid_history[-1]['role'] != role:
+                    valid_history.append({"role": role, "parts": [x['text']]})
+                elif role == 'user':
+                    # Drop previous unanswered user prompt to maintain sequence
+                    valid_history[-1] = {"role": role, "parts": [x['text']]}
+                elif role == 'model':
+                    # Merge consecutive model responses
+                    valid_history[-1]['parts'][0] += "\n\n" + x['text']
+        
+        if valid_history and valid_history[-1]['role'] == 'user':
+            valid_history.pop()  # History must end with a model turn before sending a new user message
+
         c = [enriched]
         SUPPORTED = ['application/pdf', 'image/jpeg', 'image/png', 'image/gif', 'image/webp']
         for data, mime in f_parts:
             if mime in SUPPORTED:
                 c.append({'mime_type': mime, 'data': data})
-        return self.model.start_chat(history=h).send_message(c).text
+        return self.model.start_chat(history=valid_history).send_message(c).text
+
 
 # ── RAG ──
 class KnowledgeBase:
