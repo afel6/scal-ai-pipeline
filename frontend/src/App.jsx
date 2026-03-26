@@ -75,16 +75,28 @@ function App() {
   };
 
   const handleLoadSession = async (sid) => {
-    if (sid === sessionId) return;
+    if (sid === sessionId && messages.length > 1) return;
     try {
       const { data } = await axios.get(`${API_URL}/api/session/${sid}`);
       if (data.status === 'ok') {
         setSessionId(sid);
-        const uiMessages = [WELCOME_MSG, ...data.messages.map(m => ({ role: m.role, text: m.text }))];
+        localStorage.setItem('prc_session_id', sid);
+        const uiMessages = [WELCOME_MSG, ...data.messages.map(m => ({ 
+          role: m.role, 
+          text: m.text, 
+          download_url: m.download_url 
+        }))];
         setMessages(uiMessages);
       }
     } catch {}
   };
+
+  // Auto-resume last session on mount
+  useEffect(() => {
+    if (sessionId && user) {
+      handleLoadSession(sessionId);
+    }
+  }, []);
 
   const handleDeleteSession = async (e, sid) => {
     e.stopPropagation();

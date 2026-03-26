@@ -52,6 +52,7 @@ def init_db():
                 session_id TEXT NOT NULL,
                 role TEXT NOT NULL,
                 text TEXT NOT NULL,
+                download_url TEXT,
                 created_at REAL NOT NULL,
                 FOREIGN KEY (session_id) REFERENCES sessions(id)
             )
@@ -77,16 +78,16 @@ def session_exists(session_id: str) -> bool:
 def get_messages(session_id: str) -> list:
     with get_db() as conn:
         rows = conn.execute(
-            "SELECT role, text FROM messages WHERE session_id = ? ORDER BY created_at ASC",
+            "SELECT role, text, download_url FROM messages WHERE session_id = ? ORDER BY created_at ASC",
             (session_id,)
         ).fetchall()
-        return [{"role": r["role"], "text": r["text"]} for r in rows]
+        return [{"role": r["role"], "text": r["text"], "download_url": r["download_url"]} for r in rows]
 
-def save_message(session_id: str, role: str, text: str):
+def save_message(session_id: str, role: str, text: str, download_url: str = None):
     with get_db() as conn:
         conn.execute(
-            "INSERT INTO messages (session_id, role, text, created_at) VALUES (?, ?, ?, ?)",
-            (session_id, role, text, time.time())
+            "INSERT INTO messages (session_id, role, text, download_url, created_at) VALUES (?, ?, ?, ?, ?)",
+            (session_id, role, text, download_url, time.time())
         )
         conn.commit()
 
@@ -162,9 +163,11 @@ async def process_chat(
             docx_path = exporter.export()
 
             reply = "I have processed the parameters and generated your PRC Final Report.\n\nClick below to download."
+            download_url = f"/api/download/{docx_path}"
             save_message(session_id, "user", message)
-            save_message(session_id, "model", reply)
-            return {"status": "success", "is_report_ready": True, "download_url": f"/api/download/{docx_path}", "session_id": session_id, "reply": reply}
+            save_message(session_id, "model", reply, download_url)
+
+            return {"status": "success", "is_report_ready": True, "download_url": download_url, "session_id": session_id, "reply": reply}
 
         clean_response = re.sub(r'```json.*?```', '', ai_response, flags=re.DOTALL).strip()
 
