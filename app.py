@@ -30,7 +30,10 @@ class PRCChatAssistant:
     def chat(self, history, msg, f=None, m=None):
         h = [{"role":'user' if x['role']=='user' else 'model', "parts":[x['text']]} for x in history]
         c = [msg]
-        if f: c.append({'mime_type':m, 'data':f})
+        # ONLY SEND IF MIME IS SUPPORTED BY GOOGLE
+        SUPPORTED = ['application/pdf', 'image/jpeg', 'image/png']
+        if f and m in SUPPORTED: 
+            c.append({'mime_type':m, 'data':f})
         return self.model.start_chat(history=h).send_message(c).text
 
 # ── REPORTING ──
@@ -67,7 +70,7 @@ async def handle(message: str = Form(...), session_id: Optional[str] = Form(None
         if file:
             f_b = await file.read(); m_t = file.content_type
             if "sheet" in m_t or file.filename.endswith(('.xlsx', '.csv')):
-                 df = pd.read_excel(f_b) if not file.filename.endswith('.csv') else pd.read_csv(pd.io.common.BytesIO(f_b))
+                 df = pd.read_excel(pd.io.common.BytesIO(f_b)) if not file.filename.endswith('.csv') else pd.read_csv(pd.io.common.BytesIO(f_b))
                  message += f"\n[DATA]:\n{df.head(5).to_string()}"; f_b = None
         
         resp = assistant.chat(history, message, f_b, m_t)
