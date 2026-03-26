@@ -25,6 +25,7 @@ function App() {
   const [uploadStatus, setUploadStatus] = useState(''); // 'uploading' | 'thinking' | ''
   const [sessionId, setSessionId] = useState(() => localStorage.getItem('prc_session_id') || '');
   const [lastMessage, setLastMessage] = useState(null);
+  const [retryCooldown, setRetryCooldown] = useState(0);
   const [sessions, setSessions] = useState([]);
   const [sidebarOpen, setSidebarOpen] = useState(true);
   // Server status: 'waking' | 'online' | 'offline'
@@ -168,8 +169,18 @@ function App() {
     } finally {
       setLoading(false);
       setUploadStatus('');
+      if (retryObj) {
+        setRetryCooldown(15);
+      }
     }
   };
+
+  useEffect(() => {
+    if (retryCooldown > 0) {
+      const timer = setTimeout(() => setRetryCooldown(retryCooldown - 1), 1000);
+      return () => clearTimeout(timer);
+    }
+  }, [retryCooldown]);
 
   const statusConfig = {
     waking:  { icon: <Loader className="w-2.5 h-2.5 animate-spin" />, text: 'ESTABLISHING SECURE CONNECTION...', color: 'text-yellow-500' },
@@ -283,10 +294,12 @@ function App() {
                   </button>
                 )}
                 {msg.isError && lastMessage && (
-                  <button onClick={() => handleSend(lastMessage)} disabled={loading}
-                    className="mt-4 w-full bg-amber-950/20 hover:bg-amber-950/40 border border-amber-600/50 text-amber-300 font-bold tracking-widest uppercase text-[10px] py-2.5 rounded-lg flex items-center justify-center gap-2 transition-all hover:scale-[1.01] disabled:opacity-50">
+                  <button onClick={() => handleSend(lastMessage)} disabled={loading || retryCooldown > 0}
+                    className="mt-4 w-full bg-amber-950/20 hover:bg-amber-950/40 border border-amber-600/50 text-amber-300 font-bold tracking-widest uppercase text-[10px] py-2.5 rounded-lg flex items-center justify-center gap-2 transition-all hover:scale-[1.01] disabled:opacity-30">
                     {loading ? <Loader className="w-3 h-3 animate-spin" /> : <Wifi className="w-3 h-3 text-yellow-500" />}
-                    {loading ? 'RE-TRIGGERING ANALYSIS...' : 'RE-TRY (Wait 3 Minutes for Quota Reset)'}
+                    {loading ? 'RE-TRIGGERING ANALYSIS...' : 
+                     retryCooldown > 0 ? `COOLING DOWN (${retryCooldown}s)...` : 
+                     'RE-TRY (Wait 3 Minutes for Quota Reset)'}
                   </button>
                 )}
               </div>
