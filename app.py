@@ -189,7 +189,7 @@ async def process_chat(
             friendly = "The AI service encountered a temporary issue. Please try again in a moment."
         friendly += f" (Diag: {err[:100]})"
         return {"status": "error", "session_id": session_id, "reply": friendly, "is_error": True}
- Riverside
+
 @app.get("/api/sessions")
 async def list_sessions():
     return list_all_sessions()
