@@ -180,7 +180,7 @@ async def process_chat(
         err = str(e)
         # Classify errors into professional, user-facing messages
         if 'RESOURCE_EXHAUSTED' in err or '429' in err:
-            friendly = "The AI service is currently at capacity due to high usage. Please wait 60 seconds and try again."
+            friendly = "The AI service is currently at capacity due to high usage. Please wait 3 minutes and try again."
         elif 'API_KEY_INVALID' in err or 'PERMISSION_DENIED' in err or '403' in err:
             friendly = "The AI service is temporarily unavailable. Please contact your system administrator."
         elif 'INVALID_ARGUMENT' in err or '400' in err:
