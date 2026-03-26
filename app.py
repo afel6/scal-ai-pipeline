@@ -16,18 +16,22 @@ DB_PATH = "chat_history.db"
 class PRCChatAssistant:
     def __init__(self, key):
         self.key = key
+        self.model_name = 'gemini-1.5-flash' # Safe default
         if key and key != "DUMMY_KEY":
             genai.configure(api_key=key)
-            self.model = genai.GenerativeModel('gemini-2.5-flash')
+            try:
+                avail = [m.name for m in genai.list_models()]
+                if 'models/gemini-2.5-flash' in avail: self.model_name = 'gemini-2.5-flash'
+                elif 'models/gemini-2.0-flash' in avail: self.model_name = 'gemini-2.0-flash'
+                elif 'models/gemini-1.5-flash' in avail: self.model_name = 'gemini-1.5-flash'
+                elif 'models/gemini-pro' in avail: self.model_name = 'gemini-pro'
+            except: pass
+            self.model = genai.GenerativeModel(self.model_name)
     def chat(self, history, msg, f=None, m=None):
         h = [{"role":'user' if x['role']=='user' else 'model', "parts":[x['text']]} for x in history]
         c = [msg]
         if f: c.append({'mime_type':m, 'data':f})
-        try:
-            return self.model.start_chat(history=h).send_message(c).text
-        except:
-            fallback = genai.GenerativeModel('gemini-2.0-flash')
-            return fallback.start_chat(history=h).send_message(msg).text
+        return self.model.start_chat(history=h).send_message(c).text
 
 # ── REPORTING ──
 class Reporter:
