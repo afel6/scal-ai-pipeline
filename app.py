@@ -45,17 +45,27 @@ def db(q, p=()):
     conn = sqlite3.connect(DB_PATH); c = conn.cursor(); c.execute(q, p); res = c.fetchall(); conn.commit(); conn.close(); return res
 db('CREATE TABLE IF NOT EXISTS m (id INTEGER PRIMARY KEY, sid TEXT, role TEXT, text TEXT, url TEXT, ts REAL)')
 
+@app.get("/api/sessions")
+def get_sessions(): return []
+
+@app.delete("/api/session/{sid}")
+def del_session(sid: str): return {"status":"ok"}
+
+@app.get("/api/session/{sid}")
+def get_session(sid: str): return {"status":"ok", "messages":[]}
+
 @app.post("/api/chat")
 async def handle(message: str = Form(...), session_id: Optional[str] = Form(None), engineer_name: str = Form("PRC Engineer"), file: Optional[UploadFile] = File(None)):
-    sid = session_id if (session_id and session_id != "undefined") else str(uuid.uuid4())
-    history = [{"role":r, "text":t} for r,t,u in db("SELECT role, text, url FROM m WHERE sid = ? ORDER BY id", (sid,))]
-    f_b, m_t = None, None
-    if file:
-        f_b = await file.read(); m_t = file.content_type
-        if "sheet" in m_t or file.filename.endswith(('.xlsx', '.csv')):
-             df = pd.read_excel(f_b) if not file.filename.endswith('.csv') else pd.read_csv(pd.io.common.BytesIO(f_b))
-             message += f"\n[DATA]:\n{df.head(5).to_string()}"; f_b = None
     try:
+        sid = session_id if (session_id and session_id != "undefined") else str(uuid.uuid4())
+        history = [{"role":r, "text":t} for r,t,u in db("SELECT role, text, url FROM m WHERE sid = ? ORDER BY id", (sid,))]
+        f_b, m_t = None, None
+        if file:
+            f_b = await file.read(); m_t = file.content_type
+            if "sheet" in m_t or file.filename.endswith(('.xlsx', '.csv')):
+                 df = pd.read_excel(f_b) if not file.filename.endswith('.csv') else pd.read_csv(pd.io.common.BytesIO(f_b))
+                 message += f"\n[DATA]:\n{df.head(5).to_string()}"; f_b = None
+        
         resp = assistant.chat(history, message, f_b, m_t)
         if '__PRC_REPORT__' in resp:
             path = Reporter.build(f"Study_{int(time.time())}", None, engineer_name, resp)
@@ -65,7 +75,7 @@ async def handle(message: str = Form(...), session_id: Optional[str] = Form(None
         db("INSERT INTO m (sid, role, text, ts) VALUES (?, ?, ?, ?)", (sid, "model", resp, time.time()))
         return {"status":"success", "session_id":sid, "reply":resp}
     except Exception as e:
-        return {"status":"error", "is_error":True, "reply": f"SYSTEM RECOVERY ACTIVE: {str(e)[:50]}"}
+        return {"status":"error", "is_error":True, "reply": f"SYSTEM EXCEPTION: {str(e)[:50]}"}
 
 @app.get("/api/diag")
 def diag():
@@ -80,4 +90,4 @@ def diag():
 async def dl(filename: str): return FileResponse(path=filename, filename=filename)
 
 @app.get("/")
-def root(): return {"v": "PRC-HUB-ULTRA-VER-6-FINAL"}
+def root(): return {"v": "PRC-HUB-ULTRA-VER-7-TRACE"}
