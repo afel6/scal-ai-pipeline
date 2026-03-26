@@ -70,7 +70,7 @@ class PRCChatAssistant:
             
         # Switching to 'Flash' architecture to bypass zero-quota limits on newly generated Free API Keys
         response = self.client.models.generate_content(
-            model='gemini-2.5-flash', 
+            model='gemini-1.5-flash', 
             contents=contents,
             config=types.GenerateContentConfig(
                 system_instruction=self.system_instruction,
