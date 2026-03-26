@@ -117,13 +117,23 @@ db('CREATE TABLE IF NOT EXISTS kb (id INTEGER PRIMARY KEY, source TEXT, chunk TE
 
 # ── ROUTES: SESSIONS ──
 @app.get("/api/sessions")
-def get_sessions(): return []
+def get_sessions():
+    try:
+        rows = db("SELECT sid, MIN(ts), text FROM m WHERE role='user' GROUP BY sid ORDER BY MIN(ts) DESC")
+        return [{"id": r[0], "title": r[2].split('\n')[0][:40] + '...', "created_at": r[1]} for r in rows]
+    except Exception as e: return []
 
 @app.delete("/api/session/{sid}")
-def del_session(sid: str): return {"status": "ok"}
+def del_session(sid: str):
+    db("DELETE FROM m WHERE sid = ?", (sid,))
+    return {"status": "ok"}
 
 @app.get("/api/session/{sid}")
-def get_session(sid: str): return {"status": "ok", "messages": []}
+def get_session(sid: str):
+    try:
+        rows = db("SELECT role, text, url, ts FROM m WHERE sid = ? ORDER BY id", (sid,))
+        return {"status": "ok", "messages": [{"role": r[0], "text": r[1], "url": r[2], "ts": r[3]} for r in rows]}
+    except Exception as e: return {"status": "error"}
 
 # ── ROUTE: KNOWLEDGE BASE STATUS ──
 @app.get("/api/kb/status")
@@ -197,6 +207,9 @@ async def handle(
 
         # Retrieve relevant knowledge base context
         kb_context = KnowledgeBase.search(message)
+
+        # SAVE USER MESSAGE TO DB
+        db("INSERT INTO m (sid, role, text, ts) VALUES (?, ?, ?, ?)", (sid, "user", message, time.time()))
 
         resp = assistant.chat(history, message, kb_context=kb_context, f_parts=f_parts)
 
