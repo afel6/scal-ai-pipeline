@@ -162,7 +162,7 @@ async def ingest_book(file: UploadFile = File(...)):
         conn = sqlite3.connect(DB_PATH)
         conn.executemany("INSERT INTO kb (source, chunk) VALUES (?, ?)", chunks)
         conn.commit(); conn.close()
-        return {"status: “success”, "book": name, "chunks_stored": len(chunks), "words": len(text.split())}
+        return {"status": "success", "book": name, "chunks_stored": len(chunks), "words": len(text.split())}
     except Exception as e: return {"status": "error", "message": str(e)[:100]}
 
 # ── ROUTE: CHAT ──
