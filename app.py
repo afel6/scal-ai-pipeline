@@ -65,7 +65,18 @@ class PRCChatAssistant:
         for data, mime in f_parts:
             if mime in SUPPORTED:
                 c.append({'mime_type': mime, 'data': data})
-        return self.model.start_chat(history=valid_history).send_message(c).text
+        
+        try:
+            return self.model.start_chat(history=valid_history).send_message(c).text
+        except Exception as e:
+            if "404" in str(e) or "not found" in str(e).lower():
+                fallbacks = ['gemini-2.0-flash', 'gemini-1.5-pro', 'gemini-1.5-flash-latest', 'gemini-pro']
+                for fb in fallbacks:
+                    try:
+                        self.model = genai.GenerativeModel(fb)
+                        return self.model.start_chat(history=valid_history).send_message(c).text
+                    except: continue
+            raise e
 
 
 # ── RAG ──
