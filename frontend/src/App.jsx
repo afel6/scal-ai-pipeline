@@ -4,7 +4,7 @@ import axios from 'axios';
 
 const API_URL = import.meta.env.VITE_API_URL || 'http://localhost:8000';
 
-const WELCOME_MSG = { role: 'model', text: 'Welcome to the PRC Engineering Hub.\n\nI am your dedicated SCAL AI Co-Author. Tell me your Well Name, paste lab data, or attach Excel files and core photographs to begin our analysis.' };
+const WELCOME_MSG = { role: 'model', text: 'Hello, I am Hviel, your dedicated PRC SCAL AI Specialist.\n\nI am ready to perform a high-level technical evaluation of your core laboratory data. Please state your Well Name, paste a data array, or attach Excel/image files to begin.' };
 
 function timeAgo(ts) {
   const diff = Date.now() / 1000 - ts;
@@ -348,8 +348,8 @@ function Login({ onLogin }) {
           <div className="bg-white/95 p-6 rounded-3xl shadow-2xl shadow-yellow-900/10 mb-8 border border-white/10 group hover:scale-[1.02] transition-transform duration-500">
             <img src="/prc_logo.jpg" alt="PRC Logo" className="w-48 h-auto object-contain" />
           </div>
-          <h1 className="text-2xl font-black tracking-widest text-white uppercase italic text-center">Petroleum Research Hub</h1>
-          <p className="text-slate-500 text-sm mt-3 font-mono tracking-widest uppercase text-center animate-pulse-slow">AI-Assisted SCAL Engineering Deliverables</p>
+          <h1 className="text-2xl font-black tracking-widest text-white uppercase italic text-center">Hviel | PRC AI Hub</h1>
+          <p className="text-slate-500 text-sm mt-3 font-mono tracking-widest uppercase text-center animate-pulse-slow">Senior AI Petrophysical Specialist</p>
         </div>
 
         <div className="p-8 bg-gloss rounded-[2.5rem] border border-white/5 space-y-6 shadow-2xl backdrop-blur-3xl shadow-black/80">
