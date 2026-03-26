@@ -201,10 +201,11 @@ async def handle(
         resp = assistant.chat(history, message, kb_context=kb_context, f_parts=f_parts)
 
         if '__PRC_REPORT__' in resp:
+            clean_resp = resp.replace('__PRC_REPORT__', '').strip()
             path = Reporter.build(f"Study_{int(time.time())}", engineer_name, resp)
             url = f"/api/download/{path}"
-            db("INSERT INTO m (sid, role, text, url, ts) VALUES (?, ?, ?, ?, ?)", (sid, "model", "Report Ready", url, time.time()))
-            return {"status": "success", "is_report_ready": True, "download_url": url, "session_id": sid, "reply": "Your PRC Report is ready. Click Download below."}
+            db("INSERT INTO m (sid, role, text, url, ts) VALUES (?, ?, ?, ?, ?)", (sid, "model", clean_resp, url, time.time()))
+            return {"status": "success", "is_report_ready": True, "download_url": url, "session_id": sid, "reply": clean_resp}
 
         db("INSERT INTO m (sid, role, text, ts) VALUES (?, ?, ?, ?)", (sid, "model", resp, time.time()))
         return {"status": "success", "session_id": sid, "reply": resp}
