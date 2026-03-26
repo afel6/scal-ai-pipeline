@@ -282,8 +282,8 @@ function App() {
                 )}
                 {msg.isError && lastMessage && (
                   <button onClick={() => handleSend(lastMessage)}
-                    className="mt-4 w-full bg-slate-800 hover:bg-slate-700 border border-slate-700 text-yellow-500 font-bold tracking-widest uppercase text-[10px] py-2 rounded-lg flex items-center justify-center gap-2 transition-all">
-                    <Loader className="w-3 h-3" /> Try Again (Bypass Rate Limit)
+                    className="mt-4 w-full bg-amber-950/20 hover:bg-amber-950/40 border border-amber-600/50 text-amber-300 font-bold tracking-widest uppercase text-[10px] py-2.5 rounded-lg flex items-center justify-center gap-2 transition-all hover:scale-[1.01]">
+                    <Wifi className="w-3 h-3" /> Re-trigger Last Analysis (Hviel Recovery)
                   </button>
                 )}
               </div>
