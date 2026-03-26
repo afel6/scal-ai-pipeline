@@ -73,6 +73,7 @@ function App() {
     setSessionId('');
     localStorage.removeItem('prc_session_id');
     setMessages([WELCOME_MSG]);
+    setLastMessage(null);
   };
 
   const handleLoadSession = async (sid) => {
@@ -88,6 +89,7 @@ function App() {
           download_url: m.download_url 
         }))];
         setMessages(uiMessages);
+        setLastMessage(null);
       }
     } catch {}
   };
