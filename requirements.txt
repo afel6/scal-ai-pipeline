@@ -7,3 +7,6 @@ uvicorn[standard]
 python-multipart
 python-docx
 python-dotenv
+beautifulsoup4
+lxml
+openpyxl

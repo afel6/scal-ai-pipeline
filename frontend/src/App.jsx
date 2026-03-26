@@ -1,10 +1,11 @@
 import React, { useState, useRef, useEffect, useCallback } from 'react';
-import { Send, Paperclip, Bot, User, Download, FileText, Database, Circle, PlusCircle, Trash2, MessageSquare, X, Wifi, WifiOff, Loader, LogOut, Menu } from 'lucide-react';
+import { Send, Paperclip, Bot, User, Download, FileText, Database, Circle, PlusCircle, Trash2, MessageSquare, X, Wifi, WifiOff, Loader, LogOut, Menu, BookOpen, Upload, CheckCircle } from 'lucide-react';
 import axios from 'axios';
+import SidebarTabs from './SidebarTabs';
 
 const API_URL = import.meta.env.VITE_API_URL || 'http://localhost:8000';
 
-const WELCOME_MSG = { role: 'model', text: 'Hello, I am Hviel, your dedicated PRC SCAL AI Specialist.\n\nI am ready to perform a high-level technical evaluation of your core laboratory data. Please state your Well Name, paste a data array, or attach Excel/image files to begin.' };
+const WELCOME_MSG = { role: 'model', text: 'Hello, I am Hviel — your dedicated PRC Senior AI Petrophysical Specialist.\n\nI have been trained on the PRC petroleum engineering library and am ready to assist with SCAL analysis, petrophysical interpretation, and professional report generation.\n\nPlease state your Well Name, paste lab data, or attach Excel / PDF files to begin.' };
 
 function timeAgo(ts) {
   const diff = Date.now() / 1000 - ts;
@@ -218,29 +219,8 @@ function App() {
           </div>
         </div>
 
-        {/* Session list */}
-        <div className="flex-1 overflow-y-auto p-2 space-y-1">
-          {sessions.length === 0 && (
-            <p className="text-slate-600 text-xs text-center mt-8 px-4 leading-relaxed">No past conversations yet.<br />Start a new SCAL study above.</p>
-          )}
-          {sessions.map(s => (
-            <div key={s.id} onClick={() => handleLoadSession(s.id)}
-              className={`group flex items-start gap-3 px-3 py-3 rounded-xl cursor-pointer transition-all border
-                ${s.id === sessionId
-                  ? 'bg-yellow-950/40 border-yellow-800/50 text-yellow-100'
-                  : 'border-transparent hover:bg-slate-900 hover:border-slate-800 text-slate-400 hover:text-slate-200'
-                }`}>
-              <MessageSquare className="w-4 h-4 mt-0.5 shrink-0 text-yellow-500/60" />
-              <div className="flex-1 min-w-0">
-                <p className="text-sm font-medium truncate">{s.title}</p>
-                <p className="text-[10px] text-slate-600 mt-0.5">{timeAgo(s.created_at)}</p>
-              </div>
-              <button onClick={(e) => handleDeleteSession(e, s.id)} className="opacity-0 group-hover:opacity-100 p-1 hover:text-red-400 transition-all shrink-0">
-                <Trash2 className="w-3.5 h-3.5" />
-              </button>
-            </div>
-          ))}
-        </div>
+        {/* Tabs + Session list + Library — handled by SidebarTabs */}
+        <SidebarTabs sessionId={sessionId} sessions={sessions} handleLoadSession={handleLoadSession} handleDeleteSession={handleDeleteSession} />
 
         <div className="p-4 border-t border-slate-800/60 shrink-0">
           <p className="text-[10px] text-slate-700 font-mono tracking-widest uppercase text-center">Petroleum Research Center · Libya</p>
