@@ -42,7 +42,7 @@ function App() {
   useEffect(() => {
     const wakeServer = async () => {
       try {
-        await axios.get(`${API_URL}/`, { timeout: 60000 });
+        await axios.get(`${API_URL}/`, { timeout: 180000 });
         setServerStatus('online');
       } catch {
         setServerStatus('offline');
@@ -160,9 +160,9 @@ function App() {
   };
 
   const statusConfig = {
-    waking:  { icon: <Loader className="w-2.5 h-2.5 animate-spin" />, text: 'CONNECTING...', color: 'text-yellow-500' },
-    online:  { icon: <Circle className="w-2 h-2 fill-yellow-500" />, text: 'ONLINE',        color: 'text-yellow-500' },
-    offline: { icon: <WifiOff className="w-2.5 h-2.5" />,             text: 'RECONNECTING', color: 'text-amber-400' },
+    waking:  { icon: <Loader className="w-2.5 h-2.5 animate-spin" />, text: 'ESTABLISHING SECURE CONNECTION...', color: 'text-yellow-500' },
+    online:  { icon: <Circle className="w-2 h-2 fill-yellow-500" />, text: 'SECURE LINK: ONLINE',        color: 'text-yellow-500' },
+    offline: { icon: <WifiOff className="w-2.5 h-2.5" />,             text: 'RECONNECTING TO HUB...', color: 'text-amber-400' },
   };
   const status = statusConfig[serverStatus];
 
