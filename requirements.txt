@@ -2,12 +2,10 @@ google-generativeai
 pydantic
 pandas
 numpy
-scikit-learn
 fastapi
 uvicorn[standard]
 python-multipart
 python-docx
-matplotlib
 openpyxl
 xlrd>=2.0.1
 python-dotenv
