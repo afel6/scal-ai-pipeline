@@ -69,8 +69,17 @@ async def handle(message: str = Form(...), session_id: Optional[str] = Form(None
     except Exception as e:
         return {"status":"error", "is_error":True, "reply": f"SYSTEM RECOVERY ACTIVE: {str(e)[:50]}"}
 
+@app.get("/api/diag")
+def diag():
+    try:
+        genai.configure(api_key=GEMINI_API_KEY)
+        models = [m.name for m in genai.list_models()]
+        return {"models": models, "key_len": len(GEMINI_API_KEY), "key_start": GEMINI_API_KEY[:4]}
+    except Exception as e:
+        return {"error": str(e)}
+
 @app.get("/api/download/{filename}")
 async def dl(filename: str): return FileResponse(path=filename, filename=filename)
 
 @app.get("/")
-def root(): return {"v": "PRC-HUB-ULTRA-VER-4-ACTIVE"}
+def root(): return {"v": "PRC-HUB-ULTRA-VER-5-DIAG"}
