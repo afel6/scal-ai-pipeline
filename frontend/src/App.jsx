@@ -129,6 +129,7 @@ function App() {
       setLastMessage({ text: msgText, files: msgFiles });
       setInput('');
       setFiles([]);
+      if (inputRef.current) inputRef.current.style.height = 'auto';
     }
     const formData = new FormData();
     formData.append('message', msgText);
@@ -384,15 +385,24 @@ function App() {
               />
               <Paperclip className={`w-5 h-5 ${files.length > 0 ? 'text-yellow-400' : 'text-slate-500'}`} />
             </label>
-            <input
+            <textarea
               ref={inputRef}
-              type="text"
               value={input}
-              onChange={(e) => setInput(e.target.value)}
-              onKeyDown={(e) => e.key === 'Enter' && !e.shiftKey && handleSend()}
+              onChange={(e) => {
+                setInput(e.target.value);
+                e.target.style.height = 'auto';
+                e.target.style.height = `${Math.min(e.target.scrollHeight, 250)}px`;
+              }}
+              onKeyDown={(e) => {
+                if (e.key === 'Enter' && !e.shiftKey) {
+                  e.preventDefault();
+                  if (input.trim() || files.length > 0) handleSend();
+                }
+              }}
+              rows={1}
               disabled={serverStatus === 'waking'}
               placeholder={serverStatus === 'waking' ? 'Connecting to server...' : 'Ask Hviel or paste lab data...'}
-              className="flex-1 bg-transparent border-none outline-none text-yellow-50 placeholder-slate-600 text-sm md:text-[15px] font-serif disabled:opacity-50"
+              className="flex-1 bg-transparent border-none outline-none text-yellow-50 placeholder-slate-600 text-sm md:text-[15px] font-serif disabled:opacity-50 resize-none overflow-y-auto py-2.5 min-h-[44px] leading-relaxed block"
             />
             <button
               onClick={() => handleSend()}
