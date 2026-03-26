@@ -21,7 +21,7 @@ function App() {
   });
   const [messages, setMessages] = useState([WELCOME_MSG]);
   const [input, setInput] = useState('');
-  const [file, setFile] = useState(null);
+  const [files, setFiles] = useState([]);
   const [loading, setLoading] = useState(false);
   const [uploadStatus, setUploadStatus] = useState('');
   const [sessionId, setSessionId] = useState(() => localStorage.getItem('prc_session_id') || '');
@@ -117,25 +117,27 @@ function App() {
 
   const handleSend = async (retryObj = null) => {
     const msgText = retryObj ? retryObj.text : input;
-    const msgFile = retryObj ? retryObj.file : file;
-    if (!msgText.trim() && !msgFile) return;
+    const msgFiles = retryObj ? retryObj.files : files;
+    if (!msgText.trim() && msgFiles.length === 0) return;
     if (serverStatus === 'offline') {
       setMessages(prev => [...prev, { role: 'model', text: '⚠️ The AI server is offline. Please retry in a moment.' }]);
       return;
     }
     if (!retryObj) {
-      setMessages(prev => [...prev, { role: 'user', text: msgText, fileName: msgFile ? msgFile.name : null }]);
-      setLastMessage({ text: msgText, file: msgFile });
+      const fileNames = msgFiles.map(f => f.name).join(', ');
+      setMessages(prev => [...prev, { role: 'user', text: msgText, fileName: fileNames || null }]);
+      setLastMessage({ text: msgText, files: msgFiles });
       setInput('');
-      setFile(null);
+      setFiles([]);
     }
     const formData = new FormData();
     formData.append('message', msgText);
     formData.append('session_id', sessionId);
     formData.append('engineer_name', user?.name || 'PRC Engineer');
-    if (msgFile) formData.append('file', msgFile);
+    // Append all selected files
+    msgFiles.forEach(f => formData.append('files', f));
     setLoading(true);
-    setUploadStatus(msgFile ? 'uploading' : 'thinking');
+    setUploadStatus(msgFiles.length > 0 ? 'uploading' : 'thinking');
     try {
       const response = await axios.post(`${API_URL}/api/chat`, formData, {
         timeout: 120000,
@@ -347,20 +349,40 @@ function App() {
 
         {/* Input Footer */}
         <footer className="p-3 md:p-4 bg-[#050505] border-t border-slate-800/60 shrink-0">
-          {/* File chip */}
-          {file && (
-            <div className="mb-2 flex items-center gap-2 bg-yellow-950/30 border border-yellow-800/40 rounded-xl px-3 py-2 w-fit max-w-full">
-              <FileText className="w-3.5 h-3.5 text-yellow-400 shrink-0" />
-              <span className="text-xs font-mono text-yellow-300 truncate max-w-[200px]">{file.name}</span>
-              <button onClick={() => setFile(null)} className="ml-1 text-slate-500 hover:text-red-400">
-                <X className="w-3.5 h-3.5" />
-              </button>
+          {/* File chips — one per selected file */}
+          {files.length > 0 && (
+            <div className="mb-2 flex flex-wrap gap-2">
+              {files.map((f, i) => (
+                <div key={i} className="flex items-center gap-1.5 bg-yellow-950/30 border border-yellow-800/40 rounded-xl px-3 py-1.5">
+                  <FileText className="w-3 h-3 text-yellow-400 shrink-0" />
+                  <span className="text-xs font-mono text-yellow-300 truncate max-w-[140px]">{f.name}</span>
+                  <button
+                    onClick={() => setFiles(prev => prev.filter((_, idx) => idx !== i))}
+                    className="ml-1 text-slate-500 hover:text-red-400 transition-colors"
+                  >
+                    <X className="w-3 h-3" />
+                  </button>
+                </div>
+              ))}
             </div>
           )}
           <div className="flex items-center gap-2 bg-[#111116] border border-slate-800 rounded-2xl p-2 pl-4 focus-within:border-yellow-500/40 transition-all">
             <label className="cursor-pointer shrink-0 p-1.5 hover:bg-slate-800 rounded-xl transition-colors">
-              <input type="file" className="hidden" onChange={(e) => setFile(e.target.files[0])} />
-              <Paperclip className={`w-5 h-5 ${file ? 'text-yellow-400' : 'text-slate-500'}`} />
+              <input
+                type="file"
+                multiple
+                className="hidden"
+                onChange={(e) => {
+                  const newFiles = Array.from(e.target.files);
+                  setFiles(prev => {
+                    const existingNames = prev.map(f => f.name);
+                    const deduped = newFiles.filter(f => !existingNames.includes(f.name));
+                    return [...prev, ...deduped];
+                  });
+                  e.target.value = '';
+                }}
+              />
+              <Paperclip className={`w-5 h-5 ${files.length > 0 ? 'text-yellow-400' : 'text-slate-500'}`} />
             </label>
             <input
               ref={inputRef}
@@ -374,7 +396,7 @@ function App() {
             />
             <button
               onClick={() => handleSend()}
-              disabled={loading || serverStatus === 'waking' || (!input.trim() && !file)}
+              disabled={loading || serverStatus === 'waking' || (!input.trim() && files.length === 0)}
               className="bg-yellow-600 hover:bg-yellow-500 text-black p-3 rounded-xl shrink-0 transition-all active:scale-95 disabled:opacity-30 disabled:cursor-not-allowed"
             >
               <Send className="w-4 h-4" />

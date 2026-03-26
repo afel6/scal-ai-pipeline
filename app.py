@@ -185,25 +185,28 @@ async def handle(
     message: str = Form(...),
     session_id: Optional[str] = Form(None),
     engineer_name: str = Form("PRC Engineer"),
-    file: Optional[UploadFile] = File(None)
+    files: list[UploadFile] = File(default=[])
 ):
     try:
         sid = session_id if (session_id and session_id != "undefined") else str(uuid.uuid4())
         history = [{"role": r, "text": t} for r, t, u in db("SELECT role, text, url FROM m WHERE sid = ? ORDER BY id", (sid,))]
-        
-        f_b, m_t = None, None
-        if file:
-            f_b = await file.read()
-            m_t = file.content_type
+
+        f_b, m_t = None, None  # binary attachment for AI vision
+        for file in files:
+            f_bytes = await file.read()
             fname = file.filename or ""
-            if "sheet" in (m_t or '') or fname.endswith(('.xlsx', '.xls')):
-                df = pd.read_excel(pd.io.common.BytesIO(f_b))
-                message += f"\n[EXCEL DATA]:\n{df.head(10).to_string()}"
-                f_b = None
+            mime = file.content_type or ""
+            if fname.endswith(('.xlsx', '.xls')) or "sheet" in mime:
+                df = pd.read_excel(pd.io.common.BytesIO(f_bytes))
+                message += f"\n[EXCEL — {fname}]:\n{df.head(10).to_string()}"
             elif fname.endswith('.csv'):
-                df = pd.read_csv(pd.io.common.BytesIO(f_b))
-                message += f"\n[CSV DATA]:\n{df.head(10).to_string()}"
-                f_b = None
+                df = pd.read_csv(pd.io.common.BytesIO(f_bytes))
+                message += f"\n[CSV — {fname}]:\n{df.head(10).to_string()}"
+            else:
+                # Pass first binary file (PDF/image) to the AI
+                SUPPORTED = ['application/pdf', 'image/jpeg', 'image/png', 'image/gif', 'image/webp']
+                if f_b is None and mime in SUPPORTED:
+                    f_b, m_t = f_bytes, mime
 
         # Retrieve relevant knowledge base context
         kb_context = KnowledgeBase.search(message)
