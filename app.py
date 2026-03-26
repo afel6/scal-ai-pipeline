@@ -18,8 +18,7 @@ class PRCChatAssistant:
         self.key = key
         if key and key != "DUMMY_KEY":
             genai.configure(api_key=key)
-            # FORCE GEMINI-PRO FOR 100% REGIONAL AVAILABILITY
-            self.model = genai.GenerativeModel('gemini-1.5-flash')
+            self.model = genai.GenerativeModel('gemini-2.5-flash')
     def chat(self, history, msg, f=None, m=None):
         h = [{"role":'user' if x['role']=='user' else 'model', "parts":[x['text']]} for x in history]
         c = [msg]
@@ -27,8 +26,7 @@ class PRCChatAssistant:
         try:
             return self.model.start_chat(history=h).send_message(c).text
         except:
-            # ULTIMATE EMERGENCY FALLBACK TO PRO-VISION
-            fallback = genai.GenerativeModel('gemini-pro')
+            fallback = genai.GenerativeModel('gemini-2.0-flash')
             return fallback.start_chat(history=h).send_message(msg).text
 
 # ── REPORTING ──
@@ -82,4 +80,4 @@ def diag():
 async def dl(filename: str): return FileResponse(path=filename, filename=filename)
 
 @app.get("/")
-def root(): return {"v": "PRC-HUB-ULTRA-VER-5-DIAG"}
+def root(): return {"v": "PRC-HUB-ULTRA-VER-6-FINAL"}
