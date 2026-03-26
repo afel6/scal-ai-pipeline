@@ -24,6 +24,7 @@ function App() {
   const [loading, setLoading] = useState(false);
   const [uploadStatus, setUploadStatus] = useState(''); // 'uploading' | 'thinking' | ''
   const [sessionId, setSessionId] = useState(() => localStorage.getItem('prc_session_id') || '');
+  const [lastMessage, setLastMessage] = useState(null);
   const [sessions, setSessions] = useState([]);
   const [sidebarOpen, setSidebarOpen] = useState(true);
   // Server status: 'waking' | 'online' | 'offline'
@@ -109,27 +110,36 @@ function App() {
     }
   };
 
-  const handleSend = async () => {
-    if (!input.trim() && !file) return;
+  const handleSend = async (retryObj = null) => {
+    const msgText = retryObj ? retryObj.text : input;
+    const msgFile = retryObj ? retryObj.file : file;
+
+    if (!msgText.trim() && !msgFile) return;
     if (serverStatus === 'offline') {
       setMessages(prev => [...prev, { role: 'model', text: '⚠️ The AI server is currently offline. Please try again in a moment.' }]);
       return;
     }
-    const userMessage = { role: 'user', text: input, fileName: file ? file.name : null };
-    setMessages(prev => [...prev, userMessage]);
+    
+    if (!retryObj) {
+      const userMessage = { role: 'user', text: msgText, fileName: msgFile ? msgFile.name : null };
+      setMessages(prev => [...prev, userMessage]);
+      setLastMessage({ text: msgText, file: msgFile });
+    }
 
     const formData = new FormData();
-    formData.append('message', input);
+    formData.append('message', msgText);
     formData.append('session_id', sessionId);
     formData.append('engineer_name', user?.name || 'PRC Engineering Staff');
-    if (file) formData.append('file', file);
-    setInput('');
-    setFile(null);
+    if (msgFile) formData.append('file', msgFile);
+    
+    if (!retryObj) {
+      setInput('');
+      setFile(null);
+    }
     setLoading(true);
-    setUploadStatus(file ? 'uploading' : 'thinking');
+    setUploadStatus(msgFile ? 'uploading' : 'thinking');
 
     try {
-      // Small delay to allow 'uploading' state to render before heavy processing
       const response = await axios.post(`${API_URL}/api/chat`, formData, {
         timeout: 120000,
         onUploadProgress: (e) => {
@@ -147,11 +157,11 @@ function App() {
           download_url: response.data.is_report_ready ? response.data.download_url : null
         }]);
       } else {
-        setMessages(prev => [...prev, { role: 'model', text: `❌ ${response.data.reply}` }]);
+        setMessages(prev => [...prev, { role: 'model', text: `❌ ${response.data.reply}`, isError: true }]);
       }
       await refreshSessions();
-    } catch {
-      setMessages(prev => [...prev, { role: 'model', text: '⚠️ The server took too long to respond. Please try sending your message again.' }]);
+    } catch (err) {
+      setMessages(prev => [...prev, { role: 'model', text: '❌ Connection error. I am unable to reach the PRC Hub at this moment.', isError: true }]);
       setServerStatus('offline');
     } finally {
       setLoading(false);
@@ -268,6 +278,12 @@ function App() {
                   <button onClick={() => window.open(`${API_URL}${msg.download_url}`, "_blank")}
                     className="mt-5 w-full bg-yellow-600/20 hover:bg-yellow-600/40 border border-yellow-500/50 text-yellow-300 font-bold tracking-widest uppercase px-5 py-3 rounded-xl flex items-center justify-center gap-3 transition-all hover:scale-[1.02]">
                     <Download className="w-4 h-4" /> Download PRC Final Report
+                  </button>
+                )}
+                {msg.isError && lastMessage && (
+                  <button onClick={() => handleSend(lastMessage)}
+                    className="mt-4 w-full bg-slate-800 hover:bg-slate-700 border border-slate-700 text-yellow-500 font-bold tracking-widest uppercase text-[10px] py-2 rounded-lg flex items-center justify-center gap-2 transition-all">
+                    <Loader className="w-3 h-3" /> Try Again (Bypass Rate Limit)
                   </button>
                 )}
               </div>
