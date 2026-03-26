@@ -70,12 +70,19 @@ class PRCChatAssistant:
             return self.model.start_chat(history=valid_history).send_message(c).text
         except Exception as e:
             if "404" in str(e) or "not found" in str(e).lower():
-                fallbacks = ['gemini-2.0-flash', 'gemini-1.5-pro', 'gemini-1.5-flash-latest', 'gemini-pro']
+                fallbacks = ['gemini-2.0-flash', 'gemini-1.5-pro', 'gemini-1.5-flash-latest', 'gemini-pro', 'models/gemini-1.5-flash']
                 for fb in fallbacks:
                     try:
                         self.model = genai.GenerativeModel(fb)
                         return self.model.start_chat(history=valid_history).send_message(c).text
                     except: continue
+                
+                try:
+                    avail = [m.name.replace('models/', '') for m in genai.list_models()]
+                    raise Exception(f"API Key Restrict Error: Google blocked all standard models. Available on your key: {', '.join(avail)}")
+                except Exception as ex:
+                    if "API Key Restrict Error" in str(ex): raise ex
+                    raise Exception("Google API Key highly restricted. Failed to find any compatible model.")
             raise e
 
 
