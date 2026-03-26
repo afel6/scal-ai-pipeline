@@ -187,7 +187,7 @@ async def process_chat(
             friendly = "I was unable to process your request. Please try rephrasing your question or re-uploading the file."
         else:
             friendly = "The AI service encountered a temporary issue. Please try again in a moment."
-        return {"status": "error", "session_id": session_id, "reply": friendly}
+        return {"status": "error", "session_id": session_id, "reply": friendly, "is_error": True}
 
 @app.get("/api/sessions")
 async def list_sessions():
