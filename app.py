@@ -1,141 +1,117 @@
-from fastapi import FastAPI, UploadFile, File, Form
+from fastapi import FastAPI, UploadFile, File, Form, HTTPException
+from fastapi.responses import FileResponse, JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse
-from typing import Optional
-import json
 import os
-import re
-import time
+import json
 import uuid
-import sqlite3
+import time
 import pandas as pd
-from dotenv import load_dotenv
+import re
+import sqlite3
+from typing import List, Optional
 
-from conversational_core import PRCChatAssistant
-from petrophysics_engine import ArchieCalculator
+# Local imports
 from report_builder import SCALReportBuilder
+from physics_engine import ArchieCalculator
+from conversational_core import PRCChatAssistant
 
-load_dotenv()
+app = FastAPI()
 
-app = FastAPI(title="PRC Conversational Intelligence Hub")
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
-    allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-api_key = os.environ.get('GEMINI_API_KEY', 'DUMMY_KEY')
-chat_ai = PRCChatAssistant(api_key=api_key)
+# Initialize API and Database
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "DUMMY_KEY")
+chat_ai = PRCChatAssistant(api_key=GEMINI_API_KEY)
 
-# ── Local SQLite Database ──────────────────────────────────────────────────────
-DB_PATH = "prc_sessions.db"
-
-def get_db():
-    conn = sqlite3.connect(DB_PATH)
-    conn.row_factory = sqlite3.Row
-    return conn
+DB_PATH = "chat_history.db"
 
 def init_db():
-    with get_db() as conn:
-        conn.execute("""
-            CREATE TABLE IF NOT EXISTS sessions (
-                id TEXT PRIMARY KEY,
-                title TEXT NOT NULL,
-                created_at REAL NOT NULL
-            )
-        """)
-        conn.execute("""
-            CREATE TABLE IF NOT EXISTS messages (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                session_id TEXT NOT NULL,
-                role TEXT NOT NULL,
-                text TEXT NOT NULL,
-                download_url TEXT,
-                created_at REAL NOT NULL,
-                FOREIGN KEY (session_id) REFERENCES sessions(id)
-            )
-        """)
-        conn.commit()
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute('''CREATE TABLE IF NOT EXISTS messages
+                 (id INTEGER PRIMARY KEY AUTOINCREMENT, 
+                  session_id TEXT, 
+                  role TEXT, 
+                  text TEXT, 
+                  download_url TEXT,
+                  created_at REAL)''')
+    conn.commit()
+    conn.close()
+
+def save_message(session_id, role, text, download_url=None):
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute("INSERT INTO messages (session_id, role, text, download_url, created_at) VALUES (?, ?, ?, ?, ?)",
+              (session_id, role, text, download_url, time.time()))
+    conn.commit()
+    conn.close()
+
+def get_messages(session_id):
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute("SELECT role, text, download_url FROM messages WHERE session_id = ? ORDER BY id ASC", (session_id,))
+    rows = c.fetchall()
+    conn.close()
+    return [{"role": r, "text": t, "download_url": d} for r, t, d in rows]
+
+def session_exists(session_id):
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute("SELECT 1 FROM messages WHERE session_id = ? LIMIT 1", (session_id,))
+    exists = c.fetchone() is not None
+    conn.close()
+    return exists
+
+def delete_session(session_id):
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute("DELETE FROM messages WHERE session_id = ?", (session_id,))
+    conn.commit()
+    conn.close()
+
+def list_all_sessions():
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute("SELECT DISTINCT session_id, MIN(text), MIN(created_at) FROM messages GROUP BY session_id ORDER BY MIN(created_at) DESC")
+    rows = c.fetchall()
+    conn.close()
+    return [{"id": r[0], "title": r[1][:30] + "...", "created_at": r[2]} for r in rows if r[0]]
 
 init_db()
 
-# ── Session Helpers ────────────────────────────────────────────────────────────
-def create_session(session_id: str, title: str):
-    with get_db() as conn:
-        conn.execute(
-            "INSERT OR IGNORE INTO sessions (id, title, created_at) VALUES (?, ?, ?)",
-            (session_id, title, time.time())
-        )
-        conn.commit()
-
-def session_exists(session_id: str) -> bool:
-    with get_db() as conn:
-        row = conn.execute("SELECT id FROM sessions WHERE id = ?", (session_id,)).fetchone()
-        return row is not None
-
-def get_messages(session_id: str) -> list:
-    with get_db() as conn:
-        rows = conn.execute(
-            "SELECT role, text, download_url FROM messages WHERE session_id = ? ORDER BY created_at ASC",
-            (session_id,)
-        ).fetchall()
-        return [{"role": r["role"], "text": r["text"], "download_url": r["download_url"]} for r in rows]
-
-def save_message(session_id: str, role: str, text: str, download_url: str = None):
-    with get_db() as conn:
-        conn.execute(
-            "INSERT INTO messages (session_id, role, text, download_url, created_at) VALUES (?, ?, ?, ?, ?)",
-            (session_id, role, text, download_url, time.time())
-        )
-        conn.commit()
-
-def delete_session(session_id: str):
-    with get_db() as conn:
-        conn.execute("DELETE FROM messages WHERE session_id = ?", (session_id,))
-        conn.execute("DELETE FROM sessions WHERE id = ?", (session_id,))
-        conn.commit()
-
-def list_all_sessions() -> list:
-    with get_db() as conn:
-        rows = conn.execute(
-            "SELECT id, title, created_at FROM sessions ORDER BY created_at DESC"
-        ).fetchall()
-        return [{"id": r["id"], "title": r["title"], "created_at": r["created_at"]} for r in rows]
-
-# ── Routes ─────────────────────────────────────────────────────────────────────
 @app.post("/api/chat")
 async def process_chat(
-    message: str = Form(""),
-    session_id: str = Form(""),
-    engineer_name: str = Form("PRC Engineering Staff"),
-    file: Optional[UploadFile] = None
+    message: str = Form(...),
+    session_id: Optional[str] = Form(None),
+    engineer_name: str = Form("PRC Engineer"),
+    file: Optional[UploadFile] = File(None)
 ):
+    if not session_id or session_id == "undefined" or session_id == "":
+        session_id = str(uuid.uuid4())
+
+    chat_history = get_messages(session_id)
+    
+    file_bytes = None
+    mime_type = None
+    
     try:
-        # Create new session if needed
-        if not session_id or not session_exists(session_id):
-            session_id = session_id or str(uuid.uuid4())
-            title = (message[:40] + '...') if len(message) > 40 else (message or 'New Study')
-            create_session(session_id, title)
-
-        chat_history = get_messages(session_id)
-
-        file_bytes = None
-        mime_type = None
         if file:
             raw_bytes = await file.read()
             m_type = file.content_type
-            if m_type in ['application/vnd.ms-excel', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet']:
-                import io
-                excel_df = pd.read_excel(io.BytesIO(raw_bytes))
+            
+            if "spreadsheet" in m_type or "excel" in m_type or file.filename.endswith(('.xlsx', '.xls', '.csv')):
+                excel_df = pd.read_excel(raw_bytes) if not file.filename.endswith('.csv') else pd.read_csv(pd.io.common.BytesIO(raw_bytes))
+                summary = excel_df.describe().to_string()
+                MAX_ROWS = 15
                 total_rows = len(excel_df)
-                MAX_ROWS = 300
-                # Prepend statistical summary so AI understands the full dataset even if truncated
-                summary = excel_df.describe(include='all').to_string()
+                truncation_note = ""
                 if total_rows > MAX_ROWS:
-                    excel_df = excel_df.head(MAX_ROWS)
-                    truncation_note = f"[NOTE: File has {total_rows} rows. Showing first {MAX_ROWS} rows. Full statistical summary included below.]\n"
+                    truncation_note = f"[File has {total_rows} rows — only first {MAX_ROWS} included for initial analysis.]\n"
                 else:
                     truncation_note = f"[File has {total_rows} rows — full data included.]\n"
                 csv_extract = excel_df.to_csv(index=False)
@@ -170,15 +146,12 @@ async def process_chat(
             return {"status": "success", "is_report_ready": True, "download_url": download_url, "session_id": session_id, "reply": reply}
 
         clean_response = re.sub(r'```json.*?```', '', ai_response, flags=re.DOTALL).strip()
-
         save_message(session_id, "user", message)
         save_message(session_id, "model", clean_response)
-
         return {"status": "success", "is_report_ready": False, "session_id": session_id, "reply": clean_response}
 
     except Exception as e:
         err = str(e)
-        # Classify errors into professional, user-facing messages
         if 'RESOURCE_EXHAUSTED' in err or '429' in err:
             friendly = "The AI service is currently at capacity due to high usage. Please wait 3 minutes and try again."
         elif 'API_KEY_INVALID' in err or 'PERMISSION_DENIED' in err or '403' in err:

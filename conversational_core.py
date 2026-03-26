@@ -68,13 +68,13 @@ class PRCChatAssistant:
         if active_parts:
             contents.append(types.Content(role='user', parts=active_parts))
             
-        # Switching to 'Flash' architecture to bypass zero-quota limits on newly generated Free API Keys
+        # Model identifier corrected to stable 'gemini-1.5-flash'
         response = self.client.models.generate_content(
             model='gemini-1.5-flash', 
             contents=contents,
             config=types.GenerateContentConfig(
                 system_instruction=self.system_instruction,
-                temperature=0.3 # Precision focused responses
+                temperature=0.3
             )
         )
         
