@@ -15,12 +15,17 @@ DB_PATH = "chat_history.db"
 # ── SYSTEM PROMPT ──
 SYSTEM_PROMPT = """You are Hviel, the Senior AI Petrophysical Specialist at the Petroleum Research Center (PRC) of Libya.
 You are a world-class expert in SCAL (Special Core Analysis), petrophysics, reservoir engineering, and petroleum geology.
-Your role is to assist PRC engineers with technical analysis, data interpretation, and generating professional reports.
-When a user asks a technical question, you must use the KNOWLEDGE BASE context provided below (if any) to give an expert, detailed, and accurate answer.
 Always respond professionally and in English.
 
 IMPORTANT INSTRUCTION FOR REPORTS:
-DO NOT generate a report by default. ONLY include the exact text __PRC_REPORT__ at the very start of your response IF AND ONLY IF the user explicitly asks you to "generate a report", "make a word document", or "create a formal report". If they are just asking for an explanation or chat, DO NOT include __PRC_REPORT__."""
+DO NOT generate a report by default. ONLY include the exact text __PRC_REPORT__ at the very start of your response IF AND ONLY IF the user explicitly asks you to "generate a report", "make a word document", or "create a formal report". If they are just asking for an explanation or chat, DO NOT include __PRC_REPORT__.
+
+GRAPHING & VISUALIZATION ENGINE:
+If the user asks you to plot a graph, draw a curve, or visualize data, you MUST include the exact sequence __PRC_PLOT__ followed immediately by a raw JSON object containing the plot parameters. DO NOT wrap the JSON in markdown code blocks.
+Example format:
+__PRC_PLOT__
+{"x": [1.0, 2.0, 3.0], "y": [10.5, 20.1, 30.8], "title": "Relative Permeability", "x_label": "Sw", "y_label": "Kr", "type": "line"}
+The backend will intercept this JSON and perfectly draw the mathematical graph for the user."""
 
 # ── HVIEL BRAIN ──
 class PRCChatAssistant:
@@ -123,6 +128,45 @@ class KnowledgeBase:
             parts = [f"[From: {s}]\n{ch}" for _, s, ch in top]
             return "\n\n".join(parts)
         except Exception as e: return ""
+
+# ── VISUALIZER ──
+import io, base64
+import matplotlib
+matplotlib.use('Agg')
+import matplotlib.pyplot as plt
+
+class Visualizer:
+    @staticmethod
+    def build_plot(data):
+        try:
+            plt.figure(figsize=(8, 5))
+            plt.style.use('bmh') # Clean predictive style
+            
+            x = data.get('x', [])
+            y = data.get('y', [])
+            title = data.get('title', 'PRC SCAL Analysis')
+            xlabel = data.get('x_label', 'X')
+            ylabel = data.get('y_label', 'Y')
+            ptype = data.get('type', 'line')
+            
+            if ptype == 'scatter':
+                plt.scatter(x, y, color='#1e3a8a', s=60, alpha=0.9, edgecolor='white')
+            else:
+                plt.plot(x, y, marker='o', linestyle='-', color='#1e3a8a', linewidth=2.5, markersize=8)
+                
+            plt.title(title, fontsize=15, fontweight='bold', color='#1e3a8a', pad=15)
+            plt.xlabel(xlabel, fontsize=12, fontweight='bold')
+            plt.ylabel(ylabel, fontsize=12, fontweight='bold')
+            plt.grid(True, linestyle='--', alpha=0.6)
+            
+            buf = io.BytesIO()
+            plt.savefig(buf, format='png', bbox_inches='tight', dpi=150)
+            plt.close()
+            
+            b64 = base64.b64encode(buf.getvalue()).decode('utf-8')
+            return f"\n\n![{title}](data:image/png;base64,{b64})\n\n"
+        except Exception as e:
+            return f"\n*(Failed to generate plot: {str(e)[:100]})*\n"
 
 # ── REPORTING ──
 from docx.shared import Pt, RGBColor
@@ -291,6 +335,21 @@ async def handle(
 
         resp = assistant.chat(history, message, kb_context=kb_context, f_parts=f_parts)
 
+        # Handle Graphs
+        if '__PRC_PLOT__' in resp:
+            try:
+                import json
+                plot_str = resp.split('__PRC_PLOT__')[1].strip()
+                import re
+                json_match = re.search(r'\{.*\}', plot_str, re.DOTALL)
+                if json_match:
+                    plot_data = json.loads(json_match.group(0))
+                    img_md = Visualizer.build_plot(plot_data)
+                    resp = re.sub(r'__PRC_PLOT__[\s\S]*?\}', img_md, resp)
+            except Exception as e:
+                resp += f"\n*(Plot Error: {str(e)[:50]})*"
+
+        # Handle Reports
         if '__PRC_REPORT__' in resp:
             clean_resp = resp.replace('__PRC_REPORT__', '').strip()
             path = Reporter.build(f"Study_{int(time.time())}", engineer_name, resp)

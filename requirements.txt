@@ -10,3 +10,6 @@ python-dotenv
 beautifulsoup4
 lxml
 openpyxl
+matplotlib
+seaborn
+scipy
