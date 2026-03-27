@@ -273,7 +273,17 @@ async def kb_ingest(file: UploadFile = File(...), password: str = Form(...)):
     try:
         content = await file.read()
         name = file.filename or "Unknown Book"
-        if name.endswith(('.html', '.htm')) or 'text/html' in (file.content_type or ''):
+        text = ""
+        
+        if name.endswith('.pdf'):
+            import PyPDF2
+            reader = PyPDF2.PdfReader(io.BytesIO(content))
+            text = "\n".join([page.extract_text() or "" for page in reader.pages])
+        elif name.endswith('.docx'):
+            from docx import Document
+            doc = Document(io.BytesIO(content))
+            text = "\n".join([p.text for p in doc.paragraphs if p.text.strip()])
+        elif name.endswith(('.html', '.htm')) or 'text/html' in (file.content_type or ''):
             soup = BeautifulSoup(content, 'lxml')
             for tag in soup(['script', 'style', 'nav', 'footer', 'header']): tag.decompose()
             text = soup.get_text(separator=' ', strip=True)

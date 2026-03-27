@@ -13,3 +13,4 @@ openpyxl
 matplotlib
 seaborn
 scipy
+PyPDF2
