@@ -265,9 +265,11 @@ def kb_status():
         return {"total_chunks": db("SELECT COUNT(*) FROM kb")[0][0], "books": [{"name": r[0], "chunks": r[1]} for r in rows]}
     except Exception as e: return {"error": str(e)}
 
-# ── ROUTE: INGEST BOOK ──
+# ── ROUTE: KNOWLEDGE BASE INGESTION ──
 @app.post("/api/kb/ingest")
-async def ingest_book(file: UploadFile = File(...)):
+async def kb_ingest(file: UploadFile = File(...), password: str = Form(...)):
+    if password != "0608":
+        return {"status": "error", "message": "Unauthorized"}
     try:
         content = await file.read()
         name = file.filename or "Unknown Book"

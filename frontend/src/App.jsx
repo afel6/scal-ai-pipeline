@@ -56,6 +56,10 @@ function App() {
     wake();
     // On desktop, open sidebar by default
     if (window.innerWidth >= 768) setSidebarOpen(true);
+    
+    // Auto-load last active session
+    const saved = localStorage.getItem('prc_session_id');
+    if (saved) handleLoadSession(saved);
   }, []);
 
   const refreshSessions = useCallback(async () => {

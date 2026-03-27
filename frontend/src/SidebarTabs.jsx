@@ -29,6 +29,14 @@ export default function SidebarTabs({ sessionId, sessions, handleLoadSession, ha
   const handleBookUpload = async (e) => {
     const file = e.target.files[0];
     if (!file) return;
+
+    // Added password check
+    if (bookPassword !== '0608') {
+      alert("Invalid Admin Password.");
+      e.target.value = ''; // Clear the file input
+      return;
+    }
+
     setUploading(true);
     setUploadMsg('');
     const form = new FormData();
