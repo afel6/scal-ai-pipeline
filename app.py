@@ -17,7 +17,10 @@ SYSTEM_PROMPT = """You are Hviel, the Senior AI Petrophysical Specialist at the 
 You are a world-class expert in SCAL (Special Core Analysis), petrophysics, reservoir engineering, and petroleum geology.
 Your role is to assist PRC engineers with technical analysis, data interpretation, and generating professional reports.
 When a user asks a technical question, you must use the KNOWLEDGE BASE context provided below (if any) to give an expert, detailed, and accurate answer.
-Always respond professionally and in English. If generating a report, include __PRC_REPORT__ at the start of your response."""
+Always respond professionally and in English.
+
+IMPORTANT INSTRUCTION FOR REPORTS:
+DO NOT generate a report by default. ONLY include the exact text __PRC_REPORT__ at the very start of your response IF AND ONLY IF the user explicitly asks you to "generate a report", "make a word document", or "create a formal report". If they are just asking for an explanation or chat, DO NOT include __PRC_REPORT__."""
 
 # ── HVIEL BRAIN ──
 class PRCChatAssistant:
@@ -122,15 +125,53 @@ class KnowledgeBase:
         except Exception as e: return ""
 
 # ── REPORTING ──
+from docx.shared import Pt, RGBColor
+from docx.enum.text import WD_ALIGN_PARAGRAPH
+
 class Reporter:
     @staticmethod
     def build(well, engineer, insight):
         doc = Document()
-        doc.add_heading(f'PRC TECHNICAL EVALUATION: {well}', 0)
-        doc.add_paragraph(f"Engineer: {engineer}\nDate: {time.strftime('%Y-%m-%d')}\n")
-        doc.add_heading('Analysis & Findings', 1)
-        doc.add_paragraph(insight.replace('__PRC_REPORT__', '').strip())
-        fname = f"PRC_{int(time.time())}.docx"
+        
+        # Professional Title Page
+        title = doc.add_heading('PRC TECHNICAL EVALUATION REPORT', 0)
+        title.alignment = WD_ALIGN_PARAGRAPH.CENTER
+        
+        subtitle = doc.add_paragraph(f'Well / Project: {well.upper()}')
+        subtitle.alignment = WD_ALIGN_PARAGRAPH.CENTER
+        subtitle.runs[0].font.size = Pt(14)
+        subtitle.runs[0].font.bold = True
+        
+        meta = doc.add_paragraph(f"Prepared by: {engineer}\nDate: {time.strftime('%B %d, %Y')}")
+        meta.alignment = WD_ALIGN_PARAGRAPH.CENTER
+        meta.runs[0].font.italic = True
+        
+        doc.add_page_break()
+        
+        # Analysis Header
+        h1 = doc.add_heading('EXECUTIVE SUMMARY & ANALYSIS', 1)
+        h1.runs[0].font.color.rgb = RGBColor(0x2C, 0x3E, 0x50)  # PRC Dark Blue
+        
+        # Markdown to Native Word Compiler
+        clean_text = insight.replace('__PRC_REPORT__', '').strip()
+        for line in clean_text.split('\n'):
+            line = line.strip()
+            if not line:
+                doc.add_paragraph()
+            elif line.startswith('#'):
+                level = len(line.split(' ')[0])
+                text = line.replace('#', '').replace('*', '').strip()
+                h = doc.add_heading(text, level=min(level, 3))
+                h.runs[0].font.color.rgb = RGBColor(0x2C, 0x3E, 0x50)
+            elif line.startswith('* ') or line.startswith('- '):
+                # Clean bold markdown (**) from simple text
+                clean_list_item = line[2:].replace('**', '').strip()
+                doc.add_paragraph(clean_list_item, style='List Bullet')
+            else:
+                clean_p = line.replace('**', '')
+                doc.add_paragraph(clean_p)
+                
+        fname = f"PRC_Report_{int(time.time())}.docx"
         doc.save(fname)
         return fname
 
