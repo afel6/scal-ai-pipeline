@@ -25,7 +25,10 @@ If the user asks you to plot a graph, draw a curve, or visualize data, you MUST 
 Example format:
 __PRC_PLOT__
 {"x": [1.0, 2.0, 3.0], "y": [10.5, 20.1, 30.8], "title": "Relative Permeability", "x_label": "Sw", "y_label": "Kr", "type": "line"}
-The backend will intercept this JSON and perfectly draw the mathematical graph for the user."""
+The backend will intercept this JSON and perfectly draw the mathematical graph for the user.
+
+PETREL XML EXPORTER:
+If the user asks you to export data to Petrel, Eclipse, or KAPPA, include the exact sequence __PETREL_EXPORT__ at the very start of your response, followed by structured, cleaned tabular data. The backend will automatically package it into a reservoir-compatible XML schematic file for them to download."""
 
 # ── HVIEL BRAIN ──
 class PRCChatAssistant:
@@ -167,6 +170,29 @@ class Visualizer:
             return f"\n\n![{title}](data:image/png;base64,{b64})\n\n"
         except Exception as e:
             return f"\n*(Failed to generate plot: {str(e)[:100]})*\n"
+
+# ── PETREL EXPORTER ──
+class PetrelExporter:
+    @staticmethod
+    def build_xml(well, data_str):
+        # Pack data into an XML structure for 3D simulation software
+        xml = f"""<?xml version="1.0" encoding="UTF-8"?>
+<PRC_Reservoir_Model>
+    <Header>
+        <Application>Petrel / KAPPA Compatible</Application>
+        <Well name="{well.upper()}" />
+        <GeneratedBy>Hviel AI Engine</GeneratedBy>
+    </Header>
+    <TabularData>
+        <![CDATA[
+{data_str}
+        ]]>
+    </TabularData>
+</PRC_Reservoir_Model>"""
+        fname = f"Petrel_Export_{int(time.time())}.xml"
+        with open(fname, 'w', encoding='utf-8') as f:
+            f.write(xml)
+        return fname
 
 # ── REPORTING ──
 from docx.shared import Pt, RGBColor
@@ -365,6 +391,14 @@ async def handle(
         if '__PRC_REPORT__' in resp:
             clean_resp = resp.replace('__PRC_REPORT__', '').strip()
             path = Reporter.build(f"Study_{int(time.time())}", engineer_name, resp)
+            url = f"/api/download/{path}"
+            db("INSERT INTO m (sid, role, text, url, ts) VALUES (?, ?, ?, ?, ?)", (sid, "model", clean_resp, url, time.time()))
+            return {"status": "success", "is_report_ready": True, "download_url": url, "session_id": sid, "reply": clean_resp}
+
+        # Handle Petrel Exports
+        if '__PETREL_EXPORT__' in resp:
+            clean_resp = resp.replace('__PETREL_EXPORT__', '').strip()
+            path = PetrelExporter.build_xml(f"Study_{int(time.time())}", clean_resp)
             url = f"/api/download/{path}"
             db("INSERT INTO m (sid, role, text, url, ts) VALUES (?, ?, ?, ?, ?)", (sid, "model", clean_resp, url, time.time()))
             return {"status": "success", "is_report_ready": True, "download_url": url, "session_id": sid, "reply": clean_resp}
