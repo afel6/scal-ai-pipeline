@@ -87,7 +87,7 @@ function App() {
     if (window.innerWidth < 768) setSidebarOpen(false);
   };
 
-  const handleLoadSession = async (sid) => {
+  async function handleLoadSession(sid) {
     if (sid === sessionId && messages.length > 1) {
       if (window.innerWidth < 768) setSidebarOpen(false);
       return;
@@ -104,9 +104,7 @@ function App() {
     if (window.innerWidth < 768) setSidebarOpen(false);
   };
 
-  useEffect(() => {
-    if (sessionId && user) handleLoadSession(sessionId);
-  }, []);
+
 
   const handleDeleteSession = async (e, sid) => {
     e.stopPropagation();
