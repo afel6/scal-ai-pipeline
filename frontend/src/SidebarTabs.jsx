@@ -16,6 +16,7 @@ export default function SidebarTabs({ sessionId, sessions, handleLoadSession, ha
   const [books, setBooks] = useState([]);
   const [uploading, setUploading] = useState(false);
   const [uploadMsg, setUploadMsg] = useState('');
+  const [bookPassword, setBookPassword] = useState('');
 
   const loadBooks = async () => {
     try {
@@ -41,6 +42,7 @@ export default function SidebarTabs({ sessionId, sessions, handleLoadSession, ha
     setUploadMsg('');
     const form = new FormData();
     form.append('file', file);
+    form.append('password', bookPassword);
     try {
       const { data } = await axios.post(`${API_URL}/api/kb/ingest`, form, { timeout: 120000 });
       if (data.status === 'success') {
@@ -111,16 +113,25 @@ export default function SidebarTabs({ sessionId, sessions, handleLoadSession, ha
           <p className="text-[10px] text-slate-500 font-mono uppercase tracking-widest">Upload books to teach Hviel</p>
           
           {/* Upload button */}
-          <label className={`flex items-center justify-center gap-2 w-full border-2 border-dashed rounded-xl py-4 cursor-pointer transition-all
-            ${uploading ? 'border-yellow-700 bg-yellow-950/20' : 'border-slate-700 hover:border-yellow-600 hover:bg-yellow-950/10'}`}>
-            <input type="file" className="hidden" onChange={handleBookUpload} disabled={uploading}
-              accept=".html,.htm,.txt,.pdf" />
-            {uploading ? (
-              <><Loader className="w-4 h-4 text-yellow-400 animate-spin" /><span className="text-xs text-yellow-400 font-bold">Processing…</span></>
-            ) : (
-              <><Upload className="w-4 h-4 text-slate-400" /><span className="text-xs text-slate-400 font-medium">Click to upload book<br/><span className="text-[10px] text-slate-600">HTML, TXT, PDF</span></span></>
-            )}
-          </label>
+          <div className="space-y-2">
+            <input 
+              type="password" 
+              placeholder="Admin Password"
+              value={bookPassword}
+              onChange={(e) => setBookPassword(e.target.value)}
+              className="w-full bg-slate-900 border border-slate-700/60 rounded-lg px-3 py-2 text-xs text-slate-200 outline-none focus:border-yellow-500/50"
+            />
+            <label className={`flex items-center justify-center gap-2 w-full border-2 border-dashed rounded-xl py-4 cursor-pointer transition-all
+              ${uploading ? 'border-yellow-700 bg-yellow-950/20' : 'border-slate-700 hover:border-yellow-600 hover:bg-yellow-950/10'}`}>
+              <input type="file" className="hidden" onChange={handleBookUpload} disabled={uploading}
+                accept=".html,.htm,.txt,.pdf,.docx" />
+              {uploading ? (
+                <><Loader className="w-4 h-4 text-yellow-400 animate-spin" /><span className="text-xs text-yellow-400 font-bold">Processing…</span></>
+              ) : (
+                <><Upload className="w-4 h-4 text-slate-400" /><span className="text-xs text-slate-400 font-medium">Click to upload book<br/><span className="text-[10px] text-slate-600">HTML, TXT, PDF, DOCX</span></span></>
+              )}
+            </label>
+          </div>
 
           {/* Upload result message */}
           {uploadMsg && (
