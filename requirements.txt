@@ -14,3 +14,4 @@ matplotlib
 seaborn
 scipy
 PyPDF2
+xlrd
