@@ -263,6 +263,42 @@ def db(q, p=()):
 db('CREATE TABLE IF NOT EXISTS m (id INTEGER PRIMARY KEY, sid TEXT, role TEXT, text TEXT, url TEXT, ts REAL)')
 db('CREATE TABLE IF NOT EXISTS kb (id INTEGER PRIMARY KEY, source TEXT, chunk TEXT)')
 
+@app.on_event("startup")
+async def startup_event():
+    import PyPDF2
+    print("🚀 Running PRC Auto-Hydration Engine for Permanent Books...")
+    books_dir = "books"
+    if not os.path.exists(books_dir):
+        return
+
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+
+    for filename in os.listdir(books_dir):
+        filepath = os.path.join(books_dir, filename)
+        count = c.execute("SELECT COUNT(*) FROM kb WHERE source = ?", (filename,)).fetchone()[0]
+        if count == 0:
+            print(f"📚 Auto-Hydrating: {filename} into SQLite RAG Database...")
+            try:
+                full_text = ""
+                if filename.lower().endswith(".pdf"):
+                    with open(filepath, 'rb') as f:
+                        reader = PyPDF2.PdfReader(f)
+                        for page in reader.pages:
+                            text = page.extract_text()
+                            if text: full_text += text + " "
+                
+                if full_text:
+                    chunks = KnowledgeBase.chunk_text(full_text, filename)
+                    c.executemany("INSERT INTO kb (source, chunk) VALUES (?, ?)", chunks)
+                    conn.commit()
+                    print(f"✅ Injected {len(chunks)} knowledge blocks from {filename}")
+            except Exception as e:
+                print(f"❌ Failed to hydrate {filename}: {e}")
+                
+    conn.close()
+    print("✅ Auto-Hydration Complete. PRC Hub ONLINE.")
+
 # ── ROUTES: SESSIONS ──
 @app.get("/api/sessions")
 def get_sessions():
