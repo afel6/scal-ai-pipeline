@@ -9,13 +9,13 @@ from pptx import Presentation
 from pptx.util import Inches, Pt as PtxPt
 from pptx.dml.color import RGBColor as PtxRGB
 
-# Word
+# Word — full Claude-level imports
 from docx import Document
-from docx.shared import Pt as DocxPt, RGBColor as DocxRGB, Inches as DocxInches
-from docx.enum.text import WD_ALIGN_PARAGRAPH
-from docx.enum.table import WD_TABLE_ALIGNMENT
-from docx.oxml.ns import qn
-from docx.oxml import OxmlElement
+from docx.shared import Pt as DocxPt, RGBColor as DocxRGB, Inches as DocxInches, Cm
+from docx.enum.text import WD_ALIGN_PARAGRAPH, WD_LINE_SPACING
+from docx.enum.table import WD_TABLE_ALIGNMENT, WD_ALIGN_VERTICAL
+from docx.oxml.ns import qn, nsdecls
+from docx.oxml import OxmlElement, parse_xml
 
 # PDF
 from reportlab.lib.pagesizes import A4
@@ -30,14 +30,203 @@ from openpyxl import Workbook
 from openpyxl.styles import Font as XLFont, PatternFill as XLFill, Alignment as XLAlign, Border as XLBorder, Side as XLSide
 from openpyxl.utils import get_column_letter
 
-# ── PRC BRAND COLOURS ──
-_NAVY   = DocxRGB(0x1B, 0x3A, 0x5C)   # #1B3A5C — true PRC Navy
-_BLUE   = DocxRGB(0x2E, 0x75, 0xB6)   # #2E75B6 — PRC Accent Blue
-_WHITE  = DocxRGB(0xFF, 0xFF, 0xFF)
-_GRAY   = DocxRGB(0x33, 0x33, 0x33)
-_NAVY_HEX  = '1B3A5C'
-_ZEBRA_HEX = 'EEF2F8'
-_RED    = DocxRGB(0xE3, 0x1E, 0x24)   # PRC Red (cover only)
+# ── PRC BRAND CONSTANTS ──
+_NAVY_RGB      = DocxRGB(0x1B, 0x3A, 0x5C)   # True PRC Navy
+_BLUE_RGB      = DocxRGB(0x2E, 0x75, 0xB6)   # PRC Accent Blue
+_WHITE_RGB     = DocxRGB(0xFF, 0xFF, 0xFF)
+_GRAY_RGB      = DocxRGB(0x33, 0x33, 0x33)
+_RED_RGB       = DocxRGB(0xE3, 0x1E, 0x24)   # Cover accent
+_LTGRAY_RGB    = DocxRGB(0x99, 0x99, 0x99)
+_NAVY_HEX      = '1B3A5C'
+_BLUE_HEX      = '2E75B6'
+_LTBLUE_HEX    = 'D5E8F0'
+_ZEBRA_HEX     = 'F2F2F2'
+_WHITE_HEX     = 'FFFFFF'
+# Aliases kept for backward compat
+_NAVY  = _NAVY_RGB
+_BLUE  = _BLUE_RGB
+_WHITE = _WHITE_RGB
+_GRAY  = _GRAY_RGB
+_RED   = _RED_RGB
+
+
+# ─────────────────────────────────────────
+# CLAUDE'S DOCUMENT HELPER FUNCTIONS
+# Applied precisely as Claude generates — parse_xml/nsdecls
+# approach instead of OxmlElement, giving perfect shading/borders
+# ─────────────────────────────────────────
+
+def _shd(cell, color_hex):
+    """Apply solid background shading to a table cell (parse_xml method)."""
+    shading_elm = parse_xml(
+        f'<w:shd {nsdecls("w")} w:fill="{color_hex}" w:val="clear"/>'
+    )
+    cell._element.get_or_add_tcPr().append(shading_elm)
+
+
+def _brd(cell, color='AAAAAA', sz='4'):
+    """Apply uniform thin borders to a table cell."""
+    tc = cell._element
+    tcPr = tc.get_or_add_tcPr()
+    tcBorders = parse_xml(f'<w:tcBorders {nsdecls("w")}></w:tcBorders>')
+    for edge in ['top', 'bottom', 'left', 'right']:
+        element = parse_xml(
+            f'<w:{edge} {nsdecls("w")} w:val="single" '
+            f'w:sz="{sz}" w:space="0" w:color="{color}"/>'
+        )
+        tcBorders.append(element)
+    tcPr.append(tcBorders)
+
+
+def _brd_custom(cell, **kwargs):
+    """Apply per-edge borders. Each kwarg key is edge name, value is dict(sz,color,val)."""
+    tc = cell._element
+    tcPr = tc.get_or_add_tcPr()
+    tcBorders = parse_xml(f'<w:tcBorders {nsdecls("w")}></w:tcBorders>')
+    for edge, attrs in kwargs.items():
+        element = parse_xml(
+            f'<w:{edge} {nsdecls("w")} w:val="{attrs.get("val","single")}" '
+            f'w:sz="{attrs.get("sz","4")}" w:space="0" w:color="{attrs.get("color","CCCCCC")}"/>'
+        )
+        tcBorders.append(element)
+    tcPr.append(tcBorders)
+
+
+def _brd_none(cell):
+    """Remove all borders from a cell (for signature blocks etc)."""
+    _brd_custom(cell,
+        top=   {'sz':'0','color':'FFFFFF','val':'none'},
+        bottom={'sz':'0','color':'FFFFFF','val':'none'},
+        left=  {'sz':'0','color':'FFFFFF','val':'none'},
+        right= {'sz':'0','color':'FFFFFF','val':'none'},
+    )
+
+
+def _styled_table(doc, headers, rows, col_widths_inches=None):
+    """
+    Build a PRC-branded table: navy header row, zebra data rows, thin borders.
+    This is Claude's styled_table() function integrated directly.
+    """
+    ncols = len(headers)
+    nrows = len(rows)
+    table = doc.add_table(rows=1 + nrows, cols=ncols)
+    table.alignment = WD_TABLE_ALIGNMENT.CENTER
+    table.autofit = False
+
+    if col_widths_inches:
+        for i, w in enumerate(col_widths_inches):
+            for row in table.rows:
+                if i < len(row.cells):
+                    row.cells[i].width = DocxInches(w)
+
+    # Header row
+    hdr = table.rows[0]
+    hdr.height = Cm(0.9)
+    for i, htext in enumerate(headers):
+        cell = hdr.cells[i]
+        cell.vertical_alignment = WD_ALIGN_VERTICAL.CENTER
+        _shd(cell, _NAVY_HEX)
+        _brd(cell, color='AAAAAA', sz='4')
+        p = cell.paragraphs[0]
+        p.alignment = WD_ALIGN_PARAGRAPH.CENTER
+        p.space_before = DocxPt(2)
+        p.space_after  = DocxPt(2)
+        run = p.add_run(str(htext))
+        run.bold = True
+        run.font.size  = DocxPt(9)
+        run.font.color.rgb = _WHITE_RGB
+        run.font.name  = 'Arial'
+
+    # Data rows
+    for ri, row_data in enumerate(rows):
+        row_obj = table.rows[ri + 1]
+        row_obj.height = Cm(0.75)
+        for ci, val in enumerate(row_data):
+            cell = row_obj.cells[ci]
+            cell.vertical_alignment = WD_ALIGN_VERTICAL.CENTER
+            _brd(cell, color='AAAAAA', sz='4')
+            if ri % 2 == 1:
+                _shd(cell, _ZEBRA_HEX)
+            p = cell.paragraphs[0]
+            p.alignment = WD_ALIGN_PARAGRAPH.CENTER
+            p.space_before = DocxPt(1)
+            p.space_after  = DocxPt(1)
+            run = p.add_run(str(val))
+            run.font.size  = DocxPt(9)
+            run.font.color.rgb = _GRAY_RGB
+            run.font.name  = 'Arial'
+
+    return table
+
+
+def _heading(doc, text, level=1):
+    """Add a PRC-styled heading. Level 1 gets a blue underline border."""
+    h = doc.add_heading(level=level)
+    run = h.add_run(text)
+    run.font.color.rgb = _NAVY_RGB
+    run.font.name = 'Arial'
+    run.bold = True
+    if level == 1:
+        run.font.size = DocxPt(16)
+        pPr = h._element.get_or_add_pPr()
+        pBdr = parse_xml(
+            f'<w:pBdr {nsdecls("w")}>'
+            f'<w:bottom w:val="single" w:sz="6" w:space="4" w:color="{_BLUE_HEX}"/>'
+            f'</w:pBdr>'
+        )
+        pPr.append(pBdr)
+    elif level == 2:
+        run.font.size = DocxPt(13)
+    else:
+        run.font.size = DocxPt(11)
+    return h
+
+
+def _body(doc, text, bold=False, italic=False):
+    """Add an Arial 10.5pt body paragraph with 1.25x line spacing."""
+    p = doc.add_paragraph()
+    p.paragraph_format.space_after = DocxPt(6)
+    p.paragraph_format.line_spacing_rule = WD_LINE_SPACING.MULTIPLE
+    p.paragraph_format.line_spacing = 1.25
+    run = p.add_run(str(text))
+    run.font.name  = 'Arial'
+    run.font.size  = DocxPt(10.5)
+    run.font.color.rgb = _GRAY_RGB
+    run.bold   = bold
+    run.italic = italic
+    return p
+
+
+def _bullet(doc, text):
+    """Add a styled bullet point."""
+    p = doc.add_paragraph(style='List Bullet')
+    p.paragraph_format.space_after = DocxPt(3)
+    p.paragraph_format.line_spacing = 1.2
+    p.clear()
+    run = p.add_run(str(text))
+    run.font.name  = 'Arial'
+    run.font.size  = DocxPt(10)
+    run.font.color.rgb = _GRAY_RGB
+    return p
+
+
+def _page_num_field(paragraph):
+    """Inject a PAGE field code into a paragraph run for auto page numbers."""
+    for xml, ftype in [
+        (f'<w:fldChar {nsdecls("w")} w:fldCharType="begin"/>', None),
+        (None, 'instrText'),
+        (f'<w:fldChar {nsdecls("w")} w:fldCharType="end"/>', None),
+    ]:
+        run = paragraph.add_run()
+        run.font.name = 'Arial'; run.font.size = DocxPt(8)
+        run.font.color.rgb = _LTGRAY_RGB
+        if xml:
+            run._element.append(parse_xml(xml))
+        else:
+            run._element.append(
+                parse_xml(f'<w:instrText {nsdecls("w")} xml:space="preserve"> PAGE </w:instrText>')
+            )
+
 
 class DocumentEngines:
     @staticmethod

@@ -15,3 +15,6 @@ seaborn
 scipy
 PyPDF2
 xlrd
+python-pptx
+reportlab
+anthropic

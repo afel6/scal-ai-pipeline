@@ -8,6 +8,8 @@ from typing import Optional
 import google.generativeai as genai
 from docx import Document
 from bs4 import BeautifulSoup
+from hviel_doc_engine import HvielDocEngine
+
 
 # ── CONFIG ──
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "DUMMY_KEY")
@@ -127,16 +129,19 @@ class AnthropicAssistant:
     _DOCX_SCHEMA = """Return ONLY valid JSON (no markdown, no backticks, no explanation) with this exact structure:
 {
   "title": "Document Title",
+  "subtitle": "Optional subtitle",
+  "author": "Engineer name or Hviel AI",
   "sections": [
-    {"heading": "Section Name", "level": 1, "content": "Paragraph text here.", "bullets": ["point 1", "point 2"]}
+    {"heading": "Section Name", "level": 1, "paragraphs": ["Paragraph 1 text.", "Paragraph 2 text."], "bullets": ["point 1", "point 2"]}
   ],
   "tables": [
-    {"title": "Table Caption", "headers": ["Col1", "Col2"], "rows": [["val1", "val2"]]}
+    {"caption": "Table 1 \u2014 Description", "headers": ["Col1", "Col2"], "rows": [["val1", "val2"]]}
   ]
 }
 Rules: level 1 = major section, level 2 = subsection. bullets is optional. tables is optional.
+CRITICAL: DO NOT EVER put raw markdown tables (e.g. `| Col | Col |`) inside `paragraphs`. If you have tabular data, you MUST use the `tables` JSON array structure.
 For petrophysical data tables include ALL calculated values with proper units in the headers.
-For plots include a section with heading \"Visualisation\" and content \"__PRC_PLOT__ {\"curves\": [...], \"title\": \"...\", \"x_label\": \"...\", \"y_label\": \"...\"}\""""
+WRITE REAL ENGINEERING CONTENT in paragraphs — not placeholder text."""
 
     _EXCEL_SCHEMA = """Return ONLY valid JSON (no markdown, no backticks, no explanation) with this exact structure:
 {
@@ -386,8 +391,9 @@ class PetrelExporter:
             f.write(xml)
         return fname
 
-# ── REPORTING ──
-from document_engines import DocumentEngines
+# ── REPORTING ENGINE (HvielDocEngine — Claude's architecture) ──
+# from document_engines import DocumentEngines  # legacy — superseded by HvielDocEngine
+hviel_engine = HvielDocEngine(output_dir='.')   # saves .docx/.xlsx/.pptx/.pdf to working dir
 
 # ── APP SETUP ──
 app = FastAPI()
@@ -672,23 +678,32 @@ async def handle(
                 resp += f"\n*(Plot Error: {str(e)[:60]})*"
                 break
 
-        # Handle Documents
+        # Handle Documents (routed through HvielDocEngine)
         doc_type = None
+        clean_resp = None
         if '__PRC_PPTX__' in resp:
             clean_resp = resp.replace('__PRC_PPTX__', '').strip()
-            path = DocumentEngines.build_pptx(f"Study_{int(time.time())}", engineer_name, clean_resp)
+            path = hviel_engine.build_from_json(
+                clean_resp, 'pptx', well=f"Study_{int(time.time())}", engineer=engineer_name
+            )
             doc_type = "pptx"
         elif '__PRC_PDF__' in resp:
             clean_resp = resp.replace('__PRC_PDF__', '').strip()
-            path = DocumentEngines.build_pdf(f"Study_{int(time.time())}", engineer_name, clean_resp)
+            path = hviel_engine.build_from_json(
+                clean_resp, 'pdf', well=f"Study_{int(time.time())}", engineer=engineer_name
+            )
             doc_type = "pdf"
         elif '__PRC_DOCX__' in resp or '__PRC_REPORT__' in resp:
             clean_resp = resp.replace('__PRC_DOCX__', '').replace('__PRC_REPORT__', '').strip()
-            path = DocumentEngines.build_docx(f"Study_{int(time.time())}", engineer_name, clean_resp)
+            path = hviel_engine.build_from_json(
+                clean_resp, 'docx', well=f"Study_{int(time.time())}", engineer=engineer_name
+            )
             doc_type = "docx"
         elif '__PRC_EXCEL__' in resp:
             clean_resp = resp.replace('__PRC_EXCEL__', '').strip()
-            path = DocumentEngines.build_excel(f"Study_{int(time.time())}", engineer_name, clean_resp)
+            path = hviel_engine.build_from_json(
+                clean_resp, 'xlsx', well=f"Study_{int(time.time())}", engineer=engineer_name
+            )
             doc_type = "excel"
 
         if doc_type:
