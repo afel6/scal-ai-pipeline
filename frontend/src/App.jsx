@@ -136,8 +136,12 @@ function App() {
 
     setLoading(true);
 
-    // ── SSE Streaming path: plain text, no files ──
-    if (msgFiles.length === 0 && !retryObj) {
+    // ── Smart Route Logic ──
+    const triggerWords = ['document', 'report', 'excel', 'word', 'docx', 'xlsx', 'spreadsheet', 'matrix', 'download'];
+    const isDocRequest = triggerWords.some(w => msgText.toLowerCase().includes(w));
+
+    // ── SSE Streaming path: plain text, no files, no document generation requests ──
+    if (msgFiles.length === 0 && !retryObj && !isDocRequest) {
       setUploadStatus('thinking');
       const params = new URLSearchParams({
         message: msgText,
