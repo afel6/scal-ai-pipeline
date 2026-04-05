@@ -12,8 +12,8 @@ from hviel_doc_engine import HvielDocEngine
 
 
 # ── CONFIG ──
-GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "DUMMY_KEY")
-CLAUDE_API_KEY = os.getenv("CLAUDE_API_KEY", "DUMMY_KEY")
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "DUMMY_KEY").strip(' \n\r\t"\'')
+CLAUDE_API_KEY = os.getenv("CLAUDE_API_KEY", "DUMMY_KEY").strip(' \n\r\t"\'')
 DB_PATH = "chat_history.db"
 
 # ── SYSTEM PROMPT ──
