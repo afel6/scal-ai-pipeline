@@ -171,7 +171,10 @@ Create multiple sheets if appropriate (e.g. one for raw data, one for computed r
         return ctx
 
     @staticmethod
-    def generate_docx(history, msg, kb_context=""):
+    def generate_docx(history, msg: str, kb_context: str) -> str:
+        if CLAUDE_API_KEY == "DUMMY_KEY" or not CLAUDE_API_KEY:
+            raise ValueError("CRITICAL RENDER CONFIG ERROR: Your live Render Dashboard does NOT possess the CLAUDE_API_KEY variable! You must literally go into Render -> Web Service -> Environment Variables -> click 'Add Environment Variable', name it exactly 'CLAUDE_API_KEY', and paste your key.")
+            
         import anthropic
         client = anthropic.Anthropic(api_key=CLAUDE_API_KEY)
         system = (
@@ -190,7 +193,10 @@ Create multiple sheets if appropriate (e.g. one for raw data, one for computed r
         return response.content[0].text
 
     @staticmethod
-    def generate_excel(history, msg, kb_context=""):
+    def generate_excel(history, msg: str, kb_context: str) -> str:
+        if CLAUDE_API_KEY == "DUMMY_KEY" or not CLAUDE_API_KEY:
+            raise ValueError("CRITICAL RENDER CONFIG ERROR: Your live Render Dashboard does NOT possess the CLAUDE_API_KEY variable! You must literally go into Render -> Web Service -> Environment Variables -> click 'Add Environment Variable', name it exactly 'CLAUDE_API_KEY', and paste your key.")
+            
         import anthropic
         client = anthropic.Anthropic(api_key=CLAUDE_API_KEY)
         system = (
