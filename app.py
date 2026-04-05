@@ -176,7 +176,7 @@ Create multiple sheets if appropriate (e.g. one for raw data, one for computed r
             + AnthropicAssistant._DOCX_SCHEMA
         )
         response = client.messages.create(
-            model="claude-3-5-sonnet-20241022",
+            model="claude-sonnet-4-6",
             max_tokens=6000,
             system=system,
             messages=[{"role": "user", "content": AnthropicAssistant._build_context(history, msg, kb_context)}]
@@ -195,7 +195,7 @@ Create multiple sheets if appropriate (e.g. one for raw data, one for computed r
             + AnthropicAssistant._EXCEL_SCHEMA
         )
         response = client.messages.create(
-            model="claude-3-5-sonnet-20241022",
+            model="claude-sonnet-4-6",
             max_tokens=6000,
             system=system,
             messages=[{"role": "user", "content": AnthropicAssistant._build_context(history, msg, kb_context)}]
