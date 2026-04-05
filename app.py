@@ -12,6 +12,12 @@ from hviel_doc_engine import HvielDocEngine
 
 
 # ── CONFIG ──
+try:
+    from dotenv import load_dotenv
+    load_dotenv()
+except:
+    pass
+
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "DUMMY_KEY").strip(' \n\r\t"\'')
 CLAUDE_API_KEY = os.getenv("CLAUDE_API_KEY", "DUMMY_KEY").strip(' \n\r\t"\'')
 DB_PATH = "chat_history.db"
