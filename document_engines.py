@@ -23,9 +23,6 @@ class DocumentEngines:
     @staticmethod
     def _draw_chart_for_doc(data, format='png'):
         """Creates a chart image buffer suitable for injection into DOC/PPT/PDF."""
-        import matplotlib
-        matplotlib.use('Agg')
-        import matplotlib.pyplot as plt
         _COLORS = ['#1e3a8a', '#E31E24', '#F59E0B', '#16a34a', '#7c3aed', '#0891b2']
         try:
             fig, ax = plt.subplots(figsize=(7, 4.5), dpi=150)

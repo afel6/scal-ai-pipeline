@@ -1,7 +1,7 @@
 from fastapi import FastAPI, UploadFile, File, Form
 from fastapi.responses import FileResponse, StreamingResponse
 from fastapi.middleware.cors import CORSMiddleware
-import os, uuid, time, sqlite3, re
+import os, uuid, time, sqlite3, re, json as _json
 import numpy as np
 import pandas as pd
 from typing import Optional
@@ -68,7 +68,7 @@ class PRCChatAssistant:
         if kb_context:
             enriched += f"\n\n--- KNOWLEDGE BASE CONTEXT ---\n{kb_context}\n--- END CONTEXT ---"
         enriched += f"\n\nUSER QUERY: {msg}"
-        
+
         # Enforce strictly alternating history (User -> Model -> User -> Model)
         valid_history = []
         for x in history:
@@ -79,32 +79,40 @@ class PRCChatAssistant:
                 if valid_history[-1]['role'] != role:
                     valid_history.append({"role": role, "parts": [x['text']]})
                 elif role == 'user':
-                    # Drop previous unanswered user prompt to maintain sequence
                     valid_history[-1] = {"role": role, "parts": [x['text']]}
                 elif role == 'model':
-                    # Merge consecutive model responses
                     valid_history[-1]['parts'][0] += "\n\n" + x['text']
-        
+
         if valid_history and valid_history[-1]['role'] == 'user':
-            valid_history.pop()  # History must end with a model turn before sending a new user message
+            valid_history.pop()
 
         c = [enriched]
         SUPPORTED = ['application/pdf', 'image/jpeg', 'image/png', 'image/gif', 'image/webp']
         for data, mime in f_parts:
             if mime in SUPPORTED:
                 c.append({'mime_type': mime, 'data': data})
-        
+
+        def _safe_text(response):
+            """Extract text safely from a Gemini response, handling blocked/filtered responses."""
+            try:
+                return response.text
+            except ValueError:
+                # Response was blocked by safety filters or returned no content parts
+                if hasattr(response, 'prompt_feedback') and response.prompt_feedback:
+                    return f"My response was filtered by content safety policies. Prompt feedback: {response.prompt_feedback}. Please rephrase your query."
+                return "My response could not be generated. The content may have been filtered. Please rephrase your question."
+
         try:
-            return self.model.start_chat(history=valid_history).send_message(c).text
+            return _safe_text(self.model.start_chat(history=valid_history).send_message(c))
         except Exception as e:
             if "404" in str(e) or "not found" in str(e).lower():
                 fallbacks = ['gemini-2.0-flash', 'gemini-1.5-pro', 'gemini-1.5-flash-latest', 'gemini-pro', 'models/gemini-1.5-flash']
                 for fb in fallbacks:
                     try:
                         self.model = genai.GenerativeModel(fb)
-                        return self.model.start_chat(history=valid_history).send_message(c).text
+                        return _safe_text(self.model.start_chat(history=valid_history).send_message(c))
                     except: continue
-                
+
                 try:
                     avail = [m.name.replace('models/', '') for m in genai.list_models()]
                     raise Exception(f"API Key Restrict Error: Google blocked all standard models. Available on your key: {', '.join(avail)}")
@@ -112,6 +120,7 @@ class PRCChatAssistant:
                     if "API Key Restrict Error" in str(ex): raise ex
                     raise Exception("Google API Key highly restricted. Failed to find any compatible model.")
             raise e
+
 
 class AnthropicAssistant:
     @staticmethod
@@ -544,21 +553,26 @@ async def stream_chat(
 
             # Stream tokens
             full_resp = ""
-            chat = assistant.model.start_chat(history=valid_history)
-            for chunk in chat.send_message(enriched, stream=True):
-                token = chunk.text or ""
+            chat_session = assistant.model.start_chat(history=valid_history)
+            for chunk in chat_session.send_message(enriched, stream=True):
+                # BUG FIX: chunk.text raises ValueError on finish chunks (no content parts)
+                # — must be caught explicitly, not with `or ""`
+                try:
+                    token = chunk.text
+                except (ValueError, AttributeError):
+                    continue  # skip finish/safety chunks with no content
                 if token:
                     full_resp += token
-                    safe = token.replace('\\', '\\\\').replace('"', '\\"').replace('\n', '\\n')
-                    yield f"data: {{\"type\": \"token\", \"text\": \"{safe}\"}}\n\n"
+                    # BUG FIX: use json.dumps for correct escaping of all chars (\n, \t, ", \\, etc.)
+                    yield f"data: {_json.dumps({'type': 'token', 'text': token})}\n\n"
 
             db("INSERT INTO m (sid, role, text, ts) VALUES (?, ?, ?, ?)",
                (sid, "model", full_resp, time.time()))
-            yield f"data: {{\"type\": \"done\"}}\n\n"
+            yield f"data: {_json.dumps({'type': 'done'})}\n\n"
 
         except Exception as e:
-            err = str(e)[:120].replace('"', "'")
-            yield f"data: {{\"type\": \"error\", \"msg\": \"{err}\"}}\n\n"
+            err = str(e)[:120]
+            yield f"data: {_json.dumps({'type': 'error', 'msg': err})}\n\n"
 
     return StreamingResponse(event_generator(), media_type="text/event-stream",
                              headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
@@ -628,22 +642,24 @@ async def handle(
                 resp = f"*(Claude Excel Generation Failed: {str(e)[:100]}. Falling back...)*\n__PRC_EXCEL__\n{resp.replace('___ROUTE_TO_CLAUDE_EXCEL___','')}"
 
         # Handle Graphs — iterate over ALL __PRC_PLOT__ tokens in one response
-        import json as _json
         _plot_attempts = 0
         while '__PRC_PLOT__' in resp and _plot_attempts < 10:
             _plot_attempts += 1
             try:
                 before, after = resp.split('__PRC_PLOT__', 1)
                 after_stripped = after.lstrip()
-                json_match = re.search(r'\{.*?\}', after_stripped, re.DOTALL)
-                if not json_match:
-                    # No valid JSON after token — remove the token and stop
+                # BUG FIX: old regex \{.*?\} (non-greedy) stopped at the FIRST }
+                # inside a nested JSON (e.g. inside the curves array), producing
+                # invalid partial JSON.  raw_decode() correctly finds the matching
+                # closing brace regardless of nesting depth.
+                try:
+                    plot_data, end_idx = _json.JSONDecoder().raw_decode(after_stripped)
+                except _json.JSONDecodeError:
+                    # No valid JSON object after this token — strip the dangling token and stop
                     resp = before + after
                     break
-                plot_data = _json.loads(json_match.group(0))
                 img_md = Visualizer.build_plot(plot_data)
-                # Replace exactly: __PRC_PLOT__ + leading whitespace + JSON block
-                consumed_len = (len(after) - len(after_stripped)) + json_match.end()
+                consumed_len = (len(after) - len(after_stripped)) + end_idx
                 resp = before + img_md + after[consumed_len:]
             except Exception as e:
                 resp += f"\n*(Plot Error: {str(e)[:60]})*"
