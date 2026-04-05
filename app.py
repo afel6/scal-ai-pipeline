@@ -93,14 +93,14 @@ class PRCChatAssistant:
                 c.append({'mime_type': mime, 'data': data})
 
         def _safe_text(response):
-            """Extract text safely from a Gemini response, handling blocked/filtered responses."""
+            """Extract text safely — handles safety-filtered or empty Gemini responses."""
             try:
                 return response.text
             except ValueError:
                 # Response was blocked by safety filters or returned no content parts
                 if hasattr(response, 'prompt_feedback') and response.prompt_feedback:
-                    return f"My response was filtered by content safety policies. Prompt feedback: {response.prompt_feedback}. Please rephrase your query."
-                return "My response could not be generated. The content may have been filtered. Please rephrase your question."
+                    return f"That query hit a safety threshold on the model side. Feedback: {response.prompt_feedback}. Rework the phrasing and I'll run it again."
+                return "The model returned an empty response on that one — likely a transient quota or safety issue. Hit retry or rephrase the query."
 
         try:
             return _safe_text(self.model.start_chat(history=valid_history).send_message(c))
