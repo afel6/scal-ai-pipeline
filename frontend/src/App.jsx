@@ -5,7 +5,7 @@ import SidebarTabs from './SidebarTabs';
 
 const API_URL = import.meta.env.VITE_API_URL || 'http://localhost:8000';
 
-const WELCOME_MSG = { role: 'model', text: 'Hello, I am Hviel — your dedicated PRC Senior AI Petrophysical Specialist.\n\nI have been trained on the PRC petroleum engineering library and am ready to assist with SCAL analysis, petrophysical interpretation, and professional report generation.\n\nPlease state your Well Name, paste lab data, or attach Excel / PDF files to begin.' };
+const WELCOME_MSG = { role: 'model', text: 'Hello, I am Hviel — your dedicated PRC Senior AI Petrophysical Specialist.\n\nI have been trained on the PRC petroleum engineering library and am ready to assist with SCAL analysis, petrophysical interpretation, and professional report generation.\n\nPlease state your Well Name, paste lab data, or attach Word, Excel, or PDF files to begin.' };
 
 function timeAgo(ts) {
   const diff = Date.now() / 1000 - ts;
@@ -133,13 +133,80 @@ function App() {
       setFiles([]);
       if (inputRef.current) inputRef.current.style.height = 'auto';
     }
+
+    setLoading(true);
+
+    // ── SSE Streaming path: plain text, no files ──
+    if (msgFiles.length === 0 && !retryObj) {
+      setUploadStatus('thinking');
+      const params = new URLSearchParams({
+        message: msgText,
+        session_id: sessionId,
+        engineer_name: user?.name || 'PRC Engineer',
+      });
+      const es = new EventSource(`${API_URL}/api/chat/stream?${params}`);
+      let streamedText = '';
+      let streamMsgIdx = null;
+
+      es.onmessage = (e) => {
+        try {
+          const data = JSON.parse(e.data);
+          if (data.type === 'session') {
+            setSessionId(data.session_id);
+            localStorage.setItem('prc_session_id', data.session_id);
+          } else if (data.type === 'token') {
+            streamedText += data.text.replace(/\\n/g, '\n');
+            setMessages(prev => {
+              const next = [...prev];
+              if (streamMsgIdx === null) {
+                // First token — append a new bubble
+                streamMsgIdx = next.length;
+                next.push({ role: 'model', text: streamedText });
+              } else {
+                next[streamMsgIdx] = { role: 'model', text: streamedText };
+              }
+              return next;
+            });
+            setServerStatus('online');
+          } else if (data.type === 'done') {
+            es.close();
+            setLoading(false);
+            setUploadStatus('');
+            refreshSessions();
+          } else if (data.type === 'error') {
+            es.close();
+            setMessages(prev => [...prev, { role: 'model', text: `❌ ${data.msg}`, isError: true }]);
+            setLoading(false);
+            setUploadStatus('');
+            setServerStatus('offline');
+          }
+        } catch {}
+      };
+
+      es.onerror = () => {
+        if (streamedText) {
+          // We got a partial response — the SSE just closed cleanly
+          es.close();
+          setLoading(false);
+          setUploadStatus('');
+          refreshSessions();
+        } else {
+          es.close();
+          setMessages(prev => [...prev, { role: 'model', text: '❌ Connection error. I am unable to reach the PRC Hub at this moment.', isError: true }]);
+          setLoading(false);
+          setUploadStatus('');
+          setServerStatus('offline');
+        }
+      };
+      return;
+    }
+
+    // ── Blocking POST path: files or retries ──
     const formData = new FormData();
     formData.append('message', msgText);
     formData.append('session_id', sessionId);
     formData.append('engineer_name', user?.name || 'PRC Engineer');
-    // Append all selected files
     msgFiles.forEach(f => formData.append('files', f));
-    setLoading(true);
     setUploadStatus(msgFiles.length > 0 ? 'uploading' : 'thinking');
     try {
       const response = await axios.post(`${API_URL}/api/chat`, formData, {
@@ -152,7 +219,8 @@ function App() {
         setMessages(prev => [...prev, {
           role: 'model',
           text: response.data.reply,
-          download_url: response.data.is_report_ready ? response.data.download_url : null
+          download_url: response.data.is_report_ready ? response.data.download_url : null,
+          doc_type: response.data.doc_type || 'docx'
         }]);
       } else {
         setMessages(prev => [...prev, { role: 'model', text: `❌ ${response.data.reply}`, isError: true }]);
@@ -311,7 +379,7 @@ function App() {
                 {msg.download_url && (
                   <button onClick={() => window.open(`${API_URL}${msg.download_url}`, "_blank")}
                     className="mt-4 w-full bg-yellow-600/20 hover:bg-yellow-600/40 border border-yellow-500/50 text-yellow-300 font-bold tracking-widest uppercase px-4 py-3 rounded-xl flex items-center justify-center gap-2 text-xs transition-all active:scale-95">
-                    <Download className="w-4 h-4" /> Download PRC Final Report
+                    <Download className="w-4 h-4" /> Download {msg.doc_type === 'pptx' ? 'PowerPoint Presentation' : msg.doc_type === 'pdf' ? 'PDF Evaluation' : msg.doc_type === 'excel' ? 'Excel Spreadsheet' : 'Word Document'}
                   </button>
                 )}
                 {msg.isError && lastMessage && (
@@ -374,6 +442,7 @@ function App() {
               <input
                 type="file"
                 multiple
+                accept=".txt,.pdf,.csv,.xlsx,.xls,.doc,.docx,image/jpeg,image/png,image/gif,image/webp"
                 className="hidden"
                 onChange={(e) => {
                   const newFiles = Array.from(e.target.files);
