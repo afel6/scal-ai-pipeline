@@ -123,39 +123,58 @@ class PRCChatAssistant:
 
 
 class AnthropicAssistant:
+    # JSON schema prompts — Claude returns structured data, never raw markdown
+    _DOCX_SCHEMA = """Return ONLY valid JSON (no markdown, no backticks, no explanation) with this exact structure:
+{
+  "title": "Document Title",
+  "sections": [
+    {"heading": "Section Name", "level": 1, "content": "Paragraph text here.", "bullets": ["point 1", "point 2"]}
+  ],
+  "tables": [
+    {"title": "Table Caption", "headers": ["Col1", "Col2"], "rows": [["val1", "val2"]]}
+  ]
+}
+Rules: level 1 = major section, level 2 = subsection. bullets is optional. tables is optional.
+For petrophysical data tables include ALL calculated values with proper units in the headers.
+For plots include a section with heading \"Visualisation\" and content \"__PRC_PLOT__ {\"curves\": [...], \"title\": \"...\", \"x_label\": \"...\", \"y_label\": \"...\"}\""""
+
+    _EXCEL_SCHEMA = """Return ONLY valid JSON (no markdown, no backticks, no explanation) with this exact structure:
+{
+  "title": "Spreadsheet Title",
+  "sheets": [
+    {"name": "Sheet Name", "headers": ["Col1", "Col2", "Col3"], "rows": [["val1", "val2", "val3"]]}
+  ]
+}
+Rules: Include ALL numerical data with full precision. Use proper petrophysical units in headers (e.g. \"Porosity (%)\", \"Kabs (mD)\").
+Create multiple sheets if appropriate (e.g. one for raw data, one for computed results)."""
+
+    @staticmethod
+    def _build_context(history, msg, kb_context):
+        ctx = ""
+        if kb_context:
+            ctx += f"--- KNOWLEDGE BASE ---\n{kb_context}\n--- END ---\n\n"
+        ctx += "--- CONVERSATION HISTORY ---\n"
+        for h in history[-6:]:
+            ctx += f"{h['role'].upper()}: {h['text'][:600]}\n\n"
+        ctx += f"--- END HISTORY ---\n\nUSER REQUEST: {msg}"
+        return ctx
+
     @staticmethod
     def generate_docx(history, msg, kb_context=""):
         import anthropic
         client = anthropic.Anthropic(api_key=CLAUDE_API_KEY)
-        
-        prompt = "You are a professional AI report synthesis engine for the Petroleum Research Center (PRC).\n"
-        if kb_context:
-            prompt += f"--- KNOWLEDGE BASE CONTEXT ---\n{kb_context}\n--- END CONTEXT ---\n"
-        prompt += f"USER QUERY: {msg}\n"
-        prompt += "Please write a highly detailed, professional markdown report based ONLY on the context provided. Use advanced formatting, bullet points, and headers. Act as the primary author."
-        
-        # Anthropic doesn't natively support arbitrary role alternation perfectly without exact formatting.
-        # So we just flatten the prior user-model context as background text.
-        context_str = "--- CONVERSATION HISTORY ---\n"
-        for h in history[-5:]:
-            context_str += f"{h['role'].upper()}: {h['text']}\n\n"
-        context_str += "--- END HISTORY ---\n\n"
-        
-        system_instructions = """You are an elite expert petrophysics AI. Your only job is to write a spectacular markdown Word document responding to the user's latest message based on the conversation history and knowledge base provided.
-        
-IMPORTANT INSTRUCTION FOR PLOTS:
-If you want to draw a chart/graph in the Word Document to demonstrate data trends (like relative permeability or capillary pressure), DO NOT try to use markdown. 
-Instead, output exactly this token on a new line:
-__PRC_PLOT__ {"x": [0.1, 0.2, 0.3], "y": [50.0, 45.2, 30.1], "title": "Chart Title"}
-Our Python backend will intercept this JSON and perfectly render a native Matplotlib vector image right into the Word file!"""
-
+        system = (
+            "You are an elite petrophysics report writer for the Petroleum Research Center (PRC) Libya. "
+            "You write comprehensive, technically detailed SCAL and petrophysical engineering reports. "
+            "Include all relevant data, calculations, interpretations, and engineering conclusions. "
+            "Be thorough — a full professional report should have 6-10 sections and multiple data tables.\n\n"
+            + AnthropicAssistant._DOCX_SCHEMA
+        )
         response = client.messages.create(
-            model="claude-3-5-sonnet-20240620",
-            max_tokens=4000,
-            system=system_instructions,
-            messages=[
-                {"role": "user", "content": context_str + prompt}
-            ]
+            model="claude-3-5-sonnet-20241022",
+            max_tokens=6000,
+            system=system,
+            messages=[{"role": "user", "content": AnthropicAssistant._build_context(history, msg, kb_context)}]
         )
         return response.content[0].text
 
@@ -163,33 +182,21 @@ Our Python backend will intercept this JSON and perfectly render a native Matplo
     def generate_excel(history, msg, kb_context=""):
         import anthropic
         client = anthropic.Anthropic(api_key=CLAUDE_API_KEY)
-        
-        prompt = "You are a professional AI data structuring engine for the Petroleum Research Center (PRC).\n"
-        if kb_context:
-            prompt += f"--- KNOWLEDGE BASE CONTEXT ---\n{kb_context}\n--- END CONTEXT ---\n"
-        prompt += f"USER QUERY: {msg}\n"
-        
-        context_str = "--- CONVERSATION HISTORY ---\n"
-        for h in history[-5:]:
-            context_str += f"{h['role'].upper()}: {h['text']}\n\n"
-        context_str += "--- END HISTORY ---\n\n"
-        
-        system_instructions = """You are an elite expert petrophysics AI. Your only job is to write a spectacular Microsoft Excel dataset responding to the user's latest message based on the conversation history and knowledge base provided.
-        
-IMPORTANT INSTRUCTION FOR EXCEL:
-You MUST output STRICTLY valid CSV format ONLY. Do not write any markdown blocks (like ```csv). Do not add any conversational text before or after.
-Your output will be piped directly into Pandas to build the .xlsx file.
-Use commas to separate columns, and newlines for rows. Make the first row clear descriptive headers."""
-
+        system = (
+            "You are an elite petrophysics data compiler for the Petroleum Research Center (PRC) Libya. "
+            "You build comprehensive, well-structured Excel datasets from SCAL and core analysis data. "
+            "Include all numerical values with proper units. Create multiple sheets for different data categories. "
+            "Every row should have complete, properly formatted values.\n\n"
+            + AnthropicAssistant._EXCEL_SCHEMA
+        )
         response = client.messages.create(
-            model="claude-3-5-sonnet-20240620",
-            max_tokens=4000,
-            system=system_instructions,
-            messages=[
-                {"role": "user", "content": context_str + prompt}
-            ]
+            model="claude-3-5-sonnet-20241022",
+            max_tokens=6000,
+            system=system,
+            messages=[{"role": "user", "content": AnthropicAssistant._build_context(history, msg, kb_context)}]
         )
         return response.content[0].text
+
 
 # ── RAG ──
 EMBED_MODEL = 'models/text-embedding-004'

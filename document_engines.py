@@ -1,23 +1,43 @@
-import time, json, re, io
+import time, json, re, io, os
+from datetime import datetime
 import matplotlib
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 
-# PowerPoint Dependencies
+# PowerPoint
 from pptx import Presentation
 from pptx.util import Inches, Pt as PtxPt
 from pptx.dml.color import RGBColor as PtxRGB
 
-# Word Dependencies
+# Word
 from docx import Document
-from docx.shared import Pt as DocxPt, RGBColor as DocxRGB
+from docx.shared import Pt as DocxPt, RGBColor as DocxRGB, Inches as DocxInches
 from docx.enum.text import WD_ALIGN_PARAGRAPH
+from docx.enum.table import WD_TABLE_ALIGNMENT
+from docx.oxml.ns import qn
+from docx.oxml import OxmlElement
 
-# PDF Dependencies
-from reportlab.lib.pagesizes import letter
+# PDF
+from reportlab.lib.pagesizes import A4
 from reportlab.lib import colors as rl_colors
-from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Image
+from reportlab.lib.units import cm
+from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table as RLTable, TableStyle
 from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+from reportlab.lib.enums import TA_CENTER, TA_LEFT
+
+# Excel
+from openpyxl import Workbook
+from openpyxl.styles import Font as XLFont, PatternFill as XLFill, Alignment as XLAlign, Border as XLBorder, Side as XLSide
+from openpyxl.utils import get_column_letter
+
+# ── PRC BRAND COLOURS ──
+_NAVY   = DocxRGB(0x1B, 0x3A, 0x5C)   # #1B3A5C — true PRC Navy
+_BLUE   = DocxRGB(0x2E, 0x75, 0xB6)   # #2E75B6 — PRC Accent Blue
+_WHITE  = DocxRGB(0xFF, 0xFF, 0xFF)
+_GRAY   = DocxRGB(0x33, 0x33, 0x33)
+_NAVY_HEX  = '1B3A5C'
+_ZEBRA_HEX = 'EEF2F8'
+_RED    = DocxRGB(0xE3, 0x1E, 0x24)   # PRC Red (cover only)
 
 class DocumentEngines:
     @staticmethod
@@ -142,243 +162,311 @@ class DocumentEngines:
         return fname
 
     @staticmethod
-    def build_docx(well, engineer, insight):
-        import os
-        from docx.oxml.ns import qn
-        from docx.oxml import OxmlElement
-
-        def set_cell_bg(cell, hex_color):
-            """Apply a solid background colour to a table cell."""
+    def build_docx(well, engineer, raw_content):
+        """
+        Build a PRC-branded Word document from Claude's JSON output.
+        Falls back to legacy markdown parsing if JSON cannot be decoded.
+        """
+        # ── Helper: set cell background ──
+        def _bg(cell, hex_col):
             tc = cell._tc
             tcPr = tc.get_or_add_tcPr()
             shd = OxmlElement('w:shd')
             shd.set(qn('w:val'), 'clear')
             shd.set(qn('w:color'), 'auto')
-            shd.set(qn('w:fill'), hex_color)
+            shd.set(qn('w:fill'), hex_col)
             tcPr.append(shd)
 
-        doc = Document()
-        # ── Cover Page ──
-        title = doc.add_heading('PRC TECHNICAL EVALUATION REPORT', 0)
-        title.alignment = WD_ALIGN_PARAGRAPH.CENTER
-        title.runs[0].font.color.rgb = DocxRGB(227, 30, 36)  # PRC Red
+        # ── Try to parse Claude JSON ──
+        text = raw_content.strip().replace('```json','').replace('```','').strip()
+        try:
+            data = json.loads(text)
+        except json.JSONDecodeError:
+            # Fallback: find first { ... } block
+            m = re.search(r'\{.*\}', text, re.DOTALL)
+            try:
+                data = json.loads(m.group(0)) if m else None
+            except Exception:
+                data = None
 
-        # PRC Logo
-        logo_paths = ['prc_logo.png', 'prc_logo.jpg']
-        for lp in logo_paths:
+        doc = Document()
+
+        # ── Global styles ──
+        normal = doc.styles['Normal']
+        normal.font.name = 'Arial'
+        normal.font.size = DocxPt(11)
+        normal.font.color.rgb = _GRAY
+        for lvl, size, col in [(1, 16, _NAVY), (2, 13, _BLUE), (3, 11, _BLUE)]:
+            hs = doc.styles[f'Heading {lvl}']
+            hs.font.name = 'Arial'
+            hs.font.size = DocxPt(size)
+            hs.font.bold = True
+            hs.font.color.rgb = col
+
+        # ── Cover Page ──
+        # Logo
+        for lp in ['prc_logo.png', 'prc_logo.jpg']:
             if os.path.exists(lp):
                 try:
-                    from docx.shared import Inches as docxInches
-                    logo_para = doc.add_paragraph()
-                    logo_para.alignment = WD_ALIGN_PARAGRAPH.CENTER
-                    logo_run = logo_para.add_run()
-                    logo_run.add_picture(lp, width=docxInches(2.0))
+                    lp_para = doc.add_paragraph()
+                    lp_para.alignment = WD_ALIGN_PARAGRAPH.CENTER
+                    lp_para.add_run().add_picture(lp, width=DocxInches(2.0))
                     break
                 except: pass
 
-        subtitle = doc.add_paragraph(f'Well / Project: {well.upper()}')
-        subtitle.alignment = WD_ALIGN_PARAGRAPH.CENTER
-        subtitle.runs[0].font.size = DocxPt(14)
-        subtitle.runs[0].font.bold = True
-        subtitle.runs[0].font.color.rgb = DocxRGB(45, 53, 142)  # PRC Navy
+        title_para = doc.add_paragraph()
+        title_para.alignment = WD_ALIGN_PARAGRAPH.CENTER
+        tr = title_para.add_run('PETROLEUM RESEARCH CENTER')
+        tr.bold = True; tr.font.size = DocxPt(22)
+        tr.font.name = 'Arial'; tr.font.color.rgb = _NAVY
 
-        meta = doc.add_paragraph(f"Prepared by: {engineer}\nDate: {time.strftime('%B %d, %Y')}")
-        meta.alignment = WD_ALIGN_PARAGRAPH.CENTER
-        meta.runs[0].font.italic = True
+        doc_title = data.get('title', well) if data else well
+        sub_para = doc.add_paragraph()
+        sub_para.alignment = WD_ALIGN_PARAGRAPH.CENTER
+        sr = sub_para.add_run(doc_title.upper())
+        sr.bold = True; sr.font.size = DocxPt(15)
+        sr.font.name = 'Arial'; sr.font.color.rgb = _RED
 
+        meta_para = doc.add_paragraph()
+        meta_para.alignment = WD_ALIGN_PARAGRAPH.CENTER
+        mr = meta_para.add_run(f"Prepared by: {engineer}\u2003\u2003Date: {datetime.now().strftime('%B %d, %Y')}")
+        mr.font.size = DocxPt(10); mr.font.name = 'Arial'
+        mr.font.color.rgb = DocxRGB(0x88, 0x88, 0x88)
+        mr.italic = True
         doc.add_page_break()
-        h1 = doc.add_heading('EXECUTIVE SUMMARY & ANALYSIS', 1)
-        h1.runs[0].font.color.rgb = DocxRGB(45, 53, 142)
 
-        clean_text = insight.strip()
-        lines = clean_text.split('\n')
+        # ── JSON-driven body ──
+        if data:
+            # Sections
+            for sect in data.get('sections', []):
+                lvl = min(max(int(sect.get('level', 1)), 1), 3)
+                doc.add_heading(sect.get('heading', ''), level=lvl)
 
-        table_lines = []
-
-        def render_table():
-            nonlocal table_lines, doc
-            if not table_lines: return
-
-            parsed = []
-            for tline in table_lines:
-                tline = tline.strip()
-                if tline.startswith('|'): tline = tline[1:]
-                if tline.endswith('|'): tline = tline[:-1]
-                cells = [c.strip() for c in tline.split('|')]
-                parsed.append(cells)
-
-            if len(parsed) > 1:
-                # Remove the markdown separator row (e.g. |---|---|)
-                actual_data = [row for i, row in enumerate(parsed) if i != 1]
-                if not actual_data: return
-
-                num_cols = max(len(r) for r in actual_data)
-                table = doc.add_table(rows=len(actual_data), cols=num_cols)
-                table.style = 'Table Grid'
-
-                # Zebra-stripe colours
-                _HEADER_HEX = '2D358E'   # PRC Navy
-                _ALT_HEX    = 'EEF1FA'   # light periwinkle
-
-                for r_idx, row_data in enumerate(actual_data):
-                    for c_idx in range(num_cols):
-                        cell_value = row_data[c_idx] if c_idx < len(row_data) else ''
-                        cell = table.cell(r_idx, c_idx)
-                        cell.text = cell_value
-                        if r_idx == 0:
-                            # Header row — navy bg, white bold text
-                            set_cell_bg(cell, _HEADER_HEX)
-                            run = cell.paragraphs[0].runs
-                            if run:
-                                run[0].font.bold = True
-                                run[0].font.color.rgb = DocxRGB(255, 255, 255)
-                        elif r_idx % 2 == 0:
-                            set_cell_bg(cell, _ALT_HEX)
-
-            table_lines.clear()
-            doc.add_paragraph()
-
-        i = 0
-        while i < len(lines):
-            raw_line = lines[i]
-            line = raw_line.replace('**', '').strip()
-
-            # Detect Markdown Table Row (including Hard-wrapped text)
-            if line.startswith('|') and '|' in line[1:]:
-                table_lines.append(line)
-                i += 1
-                continue
-            elif table_lines and '|' in line and not line.startswith('#'):
-                # Line continuation for hard-wrapped Markdown!
-                table_lines[-1] += " " + line
-                i += 1
-                continue
-            else:
-                if table_lines:
-                    render_table()
-
-            if not line:
-                doc.add_paragraph()
-            elif '__PRC_PLOT__' in line:
-                plot_str = line.split('__PRC_PLOT__')[-1]
-                json_text = ""
-                j = i
-                while j < len(lines):
-                    json_text += lines[j]
-                    if '}' in lines[j]:
-                        i = j
-                        break
-                    j += 1
-
-                m = re.search(r'\{.*\}', json_text, re.DOTALL)
-                if m:
+                content = (sect.get('content') or '').strip()
+                if '__PRC_PLOT__' in content:
+                    # Parse and inject chart inline
                     try:
-                        chart_data = json.loads(m.group(0))
+                        plot_json_str = content.split('__PRC_PLOT__', 1)[1].strip()
+                        _, end = json.JSONDecoder().raw_decode(plot_json_str)
+                        chart_data = json.loads(plot_json_str[:end + plot_json_str.index('}') + 1])
+                    except Exception:
+                        chart_data = None
+                    if chart_data:
                         buf = DocumentEngines._draw_chart_for_doc(chart_data)
                         if buf:
                             p = doc.add_paragraph()
                             p.alignment = WD_ALIGN_PARAGRAPH.CENTER
-                            from docx.shared import Inches as docxInches
-                            p.add_run().add_picture(buf, width=docxInches(6.0))
-                    except: pass
-            elif line.startswith('#'):
-                level = len(line.split(' ')[0])
-                text = line.replace('#', '').strip()
-                h = doc.add_heading(text, level=min(level, 3))
-                h.runs[0].font.color.rgb = DocxRGB(45, 53, 142)
-            elif line.startswith('* ') or line.startswith('- '):
-                doc.add_paragraph(line[2:], style='List Bullet')
-            else:
-                doc.add_paragraph(line)
+                            p.add_run().add_picture(buf, width=DocxInches(5.8))
+                elif content:
+                    doc.add_paragraph(content)
 
-            i += 1
+                for bullet in (sect.get('bullets') or []):
+                    doc.add_paragraph(str(bullet), style='List Bullet')
 
-        if table_lines:
-            render_table()
+            # Tables
+            for tbl in data.get('tables', []):
+                if tbl.get('title'):
+                    doc.add_heading(tbl['title'], level=2)
+                headers = tbl.get('headers', [])
+                rows    = tbl.get('rows', [])
+                if not headers: continue
+
+                table = doc.add_table(rows=1 + len(rows), cols=len(headers))
+                table.style = 'Table Grid'
+                table.alignment = WD_TABLE_ALIGNMENT.CENTER
+
+                # Header row
+                for ci, hdr in enumerate(headers):
+                    cell = table.rows[0].cells[ci]
+                    cell.text = ''
+                    run = cell.paragraphs[0].add_run(str(hdr))
+                    run.bold = True; run.font.color.rgb = _WHITE
+                    run.font.name = 'Arial'; run.font.size = DocxPt(10)
+                    _bg(cell, _NAVY_HEX)
+
+                # Data rows
+                for ri, row_data in enumerate(rows):
+                    for ci in range(len(headers)):
+                        val = row_data[ci] if ci < len(row_data) else ''
+                        cell = table.rows[ri + 1].cells[ci]
+                        cell.text = str(val)
+                        for run in cell.paragraphs[0].runs:
+                            run.font.name = 'Arial'; run.font.size = DocxPt(10)
+                        if ri % 2 == 1:
+                            _bg(cell, _ZEBRA_HEX)
+
+                doc.add_paragraph()  # spacer
+
+        else:
+            # ── Legacy markdown fallback ──
+            doc.add_heading('EXECUTIVE SUMMARY & ANALYSIS', 1)
+            table_lines = []
+
+            def _render_md_table():
+                if not table_lines: return
+                parsed = []
+                for tl in table_lines:
+                    tl = tl.strip().strip('|')
+                    parsed.append([c.strip() for c in tl.split('|')])
+                actual = [r for i, r in enumerate(parsed) if i != 1]
+                if not actual: return
+                ncols = max(len(r) for r in actual)
+                tbl = doc.add_table(rows=len(actual), cols=ncols)
+                tbl.style = 'Table Grid'
+                for ri, row in enumerate(actual):
+                    for ci in range(ncols):
+                        val = row[ci] if ci < len(row) else ''
+                        c = tbl.cell(ri, ci)
+                        c.text = val
+                        if ri == 0:
+                            _bg(c, _NAVY_HEX)
+                            if c.paragraphs[0].runs:
+                                c.paragraphs[0].runs[0].font.bold = True
+                                c.paragraphs[0].runs[0].font.color.rgb = _WHITE
+                        elif ri % 2 == 0:
+                            _bg(c, _ZEBRA_HEX)
+                table_lines.clear()
+                doc.add_paragraph()
+
+            for line in raw_content.split('\n'):
+                line = line.replace('**', '').strip()
+                if line.startswith('|') and '|' in line[1:]:
+                    table_lines.append(line); continue
+                elif table_lines and '|' in line and not line.startswith('#'):
+                    table_lines[-1] += ' ' + line; continue
+                else:
+                    if table_lines: _render_md_table()
+                if not line:
+                    doc.add_paragraph()
+                elif line.startswith('#'):
+                    lvl = len(line.split(' ')[0])
+                    doc.add_heading(line.replace('#','').strip(), level=min(lvl,3))
+                elif line.startswith(('* ','- ')):
+                    doc.add_paragraph(line[2:], style='List Bullet')
+                else:
+                    doc.add_paragraph(line)
+            if table_lines: _render_md_table()
+
+        # ── Footer ──
+        doc.add_paragraph()
+        fp = doc.add_paragraph()
+        fp.alignment = WD_ALIGN_PARAGRAPH.CENTER
+        fr = fp.add_run('This document was generated by Hviel — PRC AI Petrophysical Specialist')
+        fr.font.size = DocxPt(8); fr.italtic = True
+        fr.font.color.rgb = DocxRGB(0x99, 0x99, 0x99)
+        fr.font.name = 'Arial'
 
         fname = f"PRC_Report_{int(time.time())}.docx"
         doc.save(fname)
         return fname
 
+
     @staticmethod
-    def build_excel(well, engineer, csv_text):
-        import pandas as pd
-        import openpyxl
-        from openpyxl.styles import PatternFill, Font, Alignment, Border, Side
-        import io
-
-        # ── Parse CSV from Claude ──
-        csv_text = csv_text.strip()
-        if ',' not in csv_text and len(csv_text.split()) > 10:
-            df = pd.DataFrame({'Data': [csv_text]})
-        else:
+    def build_excel(well, engineer, raw_content):
+        """
+        Build a PRC-branded Excel workbook from Claude's JSON output.
+        Falls back to CSV parsing if JSON cannot be decoded.
+        """
+        # ── Try to parse Claude JSON ──
+        text = raw_content.strip().replace('```json','').replace('```','').strip()
+        try:
+            data = json.loads(text)
+        except json.JSONDecodeError:
+            m = re.search(r'\{.*\}', text, re.DOTALL)
             try:
-                df = pd.read_csv(io.StringIO(csv_text))
+                data = json.loads(m.group(0)) if m else None
             except Exception:
-                df = pd.DataFrame({'RAW_TEXT': csv_text.split('\n')})
-
-        fname = f"PRC_Dataset_{int(time.time())}.xlsx"
-
-        # ── Write with openpyxl for full styling control ──
-        wb = openpyxl.Workbook()
-        ws = wb.active
-        ws.title = 'PRC SCAL Data'
+                data = None
 
         # Style constants
-        NAVY   = 'FF2D358E'  # PRC Navy
-        WHITE  = 'FFFFFFFF'
-        ALT    = 'FFEEF1FA'  # subtle periwinkle alternate row
-        BORDER = Side(style='thin', color='FFB0B8D0')
-        thin_border = Border(left=BORDER, right=BORDER, top=BORDER, bottom=BORDER)
+        _H_FONT   = XLFont(name='Arial', bold=True, color='FFFFFF', size=11)
+        _H_FILL   = XLFill(start_color=_NAVY_HEX, end_color=_NAVY_HEX, fill_type='solid')
+        _D_FONT   = XLFont(name='Arial', size=10, color='333333')
+        _Z_FILL   = XLFill(start_color='F2F2F2', end_color='F2F2F2', fill_type='solid')
+        _BRD      = XLBorder(
+            left  =XLSide(style='thin', color='CCCCCC'),
+            right =XLSide(style='thin', color='CCCCCC'),
+            top   =XLSide(style='thin', color='CCCCCC'),
+            bottom=XLSide(style='thin', color='CCCCCC')
+        )
+        _CA = XLAlign(horizontal='center', vertical='center', wrap_text=True)
+        _LA = XLAlign(horizontal='left',   vertical='center', wrap_text=True)
 
-        header_font = Font(name='Calibri', bold=True, color=WHITE, size=11)
-        header_fill = PatternFill('solid', fgColor=NAVY)
-        header_align = Alignment(horizontal='center', vertical='center', wrap_text=True)
-        cell_align   = Alignment(horizontal='left',   vertical='center', wrap_text=True)
-        alt_fill     = PatternFill('solid', fgColor=ALT)
+        wb = Workbook()
 
-        # Write header row (row 1)
-        for col_idx, col_name in enumerate(df.columns, start=1):
-            cell = ws.cell(row=1, column=col_idx, value=str(col_name))
-            cell.font   = header_font
-            cell.fill   = header_fill
-            cell.border = thin_border
-            cell.alignment = header_align
+        # ── Metadata sheet ──
+        meta = wb.active
+        meta.title = 'Report Info'
+        for i, (k, v) in enumerate([
+            ('Document Title', data.get('title', well) if data else well),
+            ('Well / Project', well),
+            ('Prepared By',    engineer),
+            ('Date',           datetime.now().strftime('%B %d, %Y')),
+            ('System',         'Hviel — PRC AI Petrophysical Specialist'),
+        ], 1):
+            kc = meta.cell(row=i, column=1, value=k)
+            kc.font = XLFont(name='Arial', bold=True, size=11, color=_NAVY_HEX)
+            vc = meta.cell(row=i, column=2, value=v)
+            vc.font = _D_FONT
+        meta.column_dimensions['A'].width = 22
+        meta.column_dimensions['B'].width = 44
 
-        # Write data rows
-        for row_idx, row in enumerate(df.itertuples(index=False), start=2):
-            is_alt = (row_idx % 2 == 1)  # alternate every other data row
-            for col_idx, value in enumerate(row, start=1):
-                cell = ws.cell(row=row_idx, column=col_idx, value=value)
-                cell.border    = thin_border
-                cell.alignment = cell_align
-                if is_alt:
-                    cell.fill = alt_fill
+        # ── JSON-driven sheets ──
+        if data and data.get('sheets'):
+            for sheet_data in data['sheets']:
+                ws = wb.create_sheet(title=str(sheet_data.get('name','Sheet'))[:31])
+                headers = sheet_data.get('headers', [])
+                rows    = sheet_data.get('rows', [])
 
-        # Freeze header row
-        ws.freeze_panes = 'A2'
+                # Header row
+                for ci, hdr in enumerate(headers, 1):
+                    c = ws.cell(row=1, column=ci, value=str(hdr))
+                    c.font = _H_FONT; c.fill = _H_FILL
+                    c.border = _BRD; c.alignment = _CA
 
-        # Auto-fit column widths (cap at 45 chars)
-        for col_cells in ws.columns:
-            max_len = 0
-            col_letter = col_cells[0].column_letter
-            for cell in col_cells:
-                try:
-                    max_len = max(max_len, len(str(cell.value or '')))
-                except:
-                    pass
-            ws.column_dimensions[col_letter].width = min(max_len + 4, 45)
+                # Data rows
+                for ri, row_data in enumerate(rows, 2):
+                    for ci, val in enumerate(row_data, 1):
+                        c = ws.cell(row=ri, column=ci, value=val)
+                        c.font = _D_FONT; c.border = _BRD
+                        c.alignment = _LA if isinstance(val, str) else _CA
+                        if ri % 2 == 0:
+                            c.fill = _Z_FILL
 
-        # Row height for header
-        ws.row_dimensions[1].height = 22
+                # Auto-width
+                for ci, hdr in enumerate(headers, 1):
+                    max_len = len(str(hdr))
+                    for row_data in rows:
+                        if ci - 1 < len(row_data):
+                            max_len = max(max_len, len(str(row_data[ci-1])))
+                    ws.column_dimensions[get_column_letter(ci)].width = min(max_len + 4, 42)
 
-        # Add metadata on a second sheet
-        meta_ws = wb.create_sheet('Report Info')
-        meta_ws['A1'] = 'PRC SCAL AI Export'
-        meta_ws['A2'] = f'Well / Project: {well}'
-        meta_ws['A3'] = f'Prepared by: {engineer}'
-        meta_ws['A4'] = f'Generated: {time.strftime("%B %d, %Y")}'
-        meta_ws['A1'].font = Font(bold=True, color=NAVY[2:], size=14)
+                ws.freeze_panes = 'A2'
+                ws.row_dimensions[1].height = 22
 
+        else:
+            # ── CSV fallback ──
+            import pandas as pd
+            try:
+                df = pd.read_csv(io.StringIO(raw_content.strip()))
+            except Exception:
+                df = pd.DataFrame({'RAW': raw_content.strip().split('\n')})
+
+            ws = wb.create_sheet('PRC SCAL Data')
+            for ci, col in enumerate(df.columns, 1):
+                c = ws.cell(row=1, column=ci, value=str(col))
+                c.font = _H_FONT; c.fill = _H_FILL
+                c.border = _BRD; c.alignment = _CA
+            for ri, row in enumerate(df.itertuples(index=False), 2):
+                for ci, val in enumerate(row, 1):
+                    c = ws.cell(row=ri, column=ci, value=val)
+                    c.font = _D_FONT; c.border = _BRD; c.alignment = _LA
+                    if ri % 2 == 0: c.fill = _Z_FILL
+            for col_cells in ws.columns:
+                max_len = max((len(str(c.value or '')) for c in col_cells), default=10)
+                ws.column_dimensions[col_cells[0].column_letter].width = min(max_len + 4, 45)
+            ws.freeze_panes = 'A2'
+
+        fname = f"PRC_Dataset_{int(time.time())}.xlsx"
         wb.save(fname)
         return fname
