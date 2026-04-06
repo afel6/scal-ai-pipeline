@@ -5,6 +5,32 @@ import SidebarTabs from './SidebarTabs';
 
 const API_URL = import.meta.env.VITE_API_URL || 'http://localhost:8000';
 
+// Splits a message into text and embedded chart image segments
+function renderMessageContent(text) {
+  if (!text) return null;
+  // Match markdown images: ![alt](src) — supports data URIs and http URLs
+  const imgRegex = /!\[([^\]]*)\]\((data:[^)]+|https?:[^)]+)\)/g;
+  const parts = [];
+  let lastIndex = 0;
+  let match;
+  while ((match = imgRegex.exec(text)) !== null) {
+    if (match.index > lastIndex) {
+      parts.push({ type: 'text', content: text.slice(lastIndex, match.index) });
+    }
+    parts.push({ type: 'img', alt: match[1], src: match[2] });
+    lastIndex = match.index + match[0].length;
+  }
+  if (lastIndex < text.length) {
+    parts.push({ type: 'text', content: text.slice(lastIndex) });
+  }
+  if (parts.length === 0) return <p className="whitespace-pre-wrap font-serif leading-[1.75]">{text}</p>;
+  return parts.map((part, i) =>
+    part.type === 'img'
+      ? <img key={i} src={part.src} alt={part.alt || 'PRC Chart'} className="w-full rounded-xl border border-yellow-900/30 my-3 shadow-lg" />
+      : part.content.trim() ? <p key={i} className="whitespace-pre-wrap font-serif leading-[1.75]">{part.content}</p> : null
+  );
+}
+
 const WELCOME_MSG = { role: 'model', text: 'Hello, I am Hviel — your dedicated PRC Senior AI Petrophysical Specialist.\n\nI have been trained on the PRC petroleum engineering library and am ready to assist with SCAL analysis, petrophysical interpretation, and professional report generation.\n\nPlease state your Well Name, paste lab data, or attach Word, Excel, or PDF files to begin.' };
 
 function timeAgo(ts) {
@@ -383,7 +409,7 @@ function App() {
                     <span className="text-xs font-mono text-yellow-300 truncate max-w-[160px]">{msg.fileName}</span>
                   </div>
                 )}
-                <p className="whitespace-pre-wrap font-serif leading-[1.75]">{msg.text}</p>
+                {renderMessageContent(msg.text)}
                 {msg.download_url && (
                   <button onClick={() => window.open(`${API_URL}${msg.download_url}`, "_blank")}
                     className="mt-4 w-full bg-yellow-600/20 hover:bg-yellow-600/40 border border-yellow-500/50 text-yellow-300 font-bold tracking-widest uppercase px-4 py-3 rounded-xl flex items-center justify-center gap-2 text-xs transition-all active:scale-95">
