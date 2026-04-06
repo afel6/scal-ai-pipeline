@@ -388,14 +388,21 @@ class HvielDocEngine:
 
         # ── Sections ──
         sec_num = 0
+        import re
         for sec in content.get('sections', []):
             level   = int(sec.get('level', 1))
             heading = sec.get('heading', '')
+            
+            # Clean AI hallucinations (e.g., if it provides '1. Introduction', we strip '1. ' so we don't get '1. 1. Introduction')
+            heading = re.sub(r'^\d+[\.\-\s]+', '', heading).strip()
+            
             if level == 1:
                 sec_num += 1
                 heading = f'{sec_num}. {heading}'
 
             h = doc.add_heading(level=level)
+            h.paragraph_format.space_before = Pt(24 if level == 1 else 16)
+            h.paragraph_format.space_after = Pt(8)
             hr2 = h.add_run(heading)
             hr2.font.color.rgb = NAVY_RGB; hr2.font.name = 'Arial'; hr2.bold = True
             hr2.font.size = Pt(16 if level == 1 else 13 if level == 2 else 11)
@@ -430,7 +437,8 @@ class HvielDocEngine:
                             continue  # Skip adding this as a paragraph!
                 
                 p = doc.add_paragraph()
-                p.paragraph_format.space_after = Pt(6)
+                p.paragraph_format.space_after = Pt(12)  # Increased from 6 for better breathing room
+                p.paragraph_format.line_spacing = 1.15
                 r = p.add_run(para_str)
                 r.font.name = 'Arial'; r.font.size = Pt(10.5); r.font.color.rgb = GRAY_RGB
 
