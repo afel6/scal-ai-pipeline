@@ -353,6 +353,12 @@ class Visualizer:
                 for i, curve in enumerate(curves):
                     cx = curve.get('x', [])
                     cy = curve.get('y', [])
+                    
+                    # LLM Hallucination safety guard: ensure dimensions match exactly
+                    min_len = min(len(cx), len(cy))
+                    cx = cx[:min_len]
+                    cy = cy[:min_len]
+                    
                     lbl = curve.get('label', f'Series {i+1}')
                     color = _PRC_COLORS[i % len(_PRC_COLORS)]
                     ax.plot(cx, cy, marker='o', linestyle='-', color=color,
@@ -362,6 +368,12 @@ class Visualizer:
                 # ── Legacy single-curve mode ──
                 x = data.get('x', [])
                 y = data.get('y', [])
+                
+                # LLM Hallucination safety guard: ensure dimensions match exactly
+                min_len = min(len(x), len(y))
+                x = x[:min_len]
+                y = y[:min_len]
+                
                 if ptype == 'scatter':
                     ax.scatter(x, y, color='#1e3a8a', s=60, alpha=0.9, edgecolor='white')
                 else:
