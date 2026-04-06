@@ -554,7 +554,7 @@ async def stream_chat(
     engineer_name: str = "PRC Engineer"
 ):
     """Server-Sent Events endpoint for real-time Gemini token streaming."""
-    async def event_generator():
+    def event_generator():
         try:
             sid = session_id if (session_id and session_id != "undefined") else str(uuid.uuid4())
             
@@ -591,9 +591,6 @@ async def stream_chat(
 
             # Send session_id first so the frontend can latch onto it
             yield f"data: {{\"type\": \"session\", \"session_id\": \"{sid}\"}}\n\n"
-            import asyncio
-            await asyncio.sleep(0.01) # Force HTTP flush to front-end to bypass async blocking
-
 
             # Stream tokens
             full_resp = ""
