@@ -565,9 +565,24 @@ async def stream_chat(
             history_rows = db("SELECT role, text, url FROM m WHERE sid = ? ORDER BY id DESC LIMIT 12", (sid,))
             history = [{"role": r, "text": t} for r, t, u in reversed(history_rows)]
 
-            # Bypass the Google Embedding API delay for simple greetings ("hello")
+            # --- SMART ROUTER: Heavy vs Easy ---
+            def _is_heavy_query(msg):
+                msg_lower = msg.lower()
+                words = msg_lower.replace('?', '').replace('.', '').replace(',', '').split()
+                if len(words) > 12: return True
+                
+                heavy_keywords = {
+                    'what', 'how', 'why', 'explain', 'analysis', 'core', 'permeability', 
+                    'porosity', 'saturation', 'archie', 'capillary', 'pc', 'sw', 'krw', 
+                    'kro', 'wettability', 'fracture', 'relative', 'formation', 'resistivity',
+                    'calculate', 'equation', 'theory', 'model', 'brooks', 'corey', 'report', 'plot'
+                }
+                
+                if any(kw in words for kw in heavy_keywords): return True
+                return False
+
             kb_context = ""
-            if len(message.split()) > 2:
+            if _is_heavy_query(message):
                 kb_context = KnowledgeBase.search(message)
 
             # Build enriched prompt
@@ -662,7 +677,25 @@ async def handle(
                     f_parts.append((f_bytes, mime))
 
         # Retrieve relevant knowledge base context
-        kb_context = KnowledgeBase.search(message)
+        # --- SMART ROUTER: Heavy vs Easy ---
+        def _is_heavy_query(msg):
+            msg_lower = msg.lower()
+            words = msg_lower.replace('?', '').replace('.', '').replace(',', '').split()
+            if len(words) > 12: return True
+            
+            heavy_keywords = {
+                'what', 'how', 'why', 'explain', 'analysis', 'core', 'permeability', 
+                'porosity', 'saturation', 'archie', 'capillary', 'pc', 'sw', 'krw', 
+                'kro', 'wettability', 'fracture', 'relative', 'formation', 'resistivity',
+                'calculate', 'equation', 'theory', 'model', 'brooks', 'corey', 'report', 'plot'
+            }
+            
+            if any(kw in words for kw in heavy_keywords): return True
+            return False
+
+        kb_context = ""
+        if _is_heavy_query(message):
+            kb_context = KnowledgeBase.search(message)
 
         # SAVE USER MESSAGE TO DB
         db("INSERT INTO m (sid, role, text, ts) VALUES (?, ?, ?, ?)", (sid, "user", message, time.time()))
