@@ -660,22 +660,31 @@ async def handle(
             _plot_attempts += 1
             try:
                 before, after = resp.split('__PRC_PLOT__', 1)
-                after_stripped = after.lstrip()
-                # BUG FIX: old regex \{.*?\} (non-greedy) stopped at the FIRST }
-                # inside a nested JSON (e.g. inside the curves array), producing
-                # invalid partial JSON.  raw_decode() correctly finds the matching
-                # closing brace regardless of nesting depth.
+                after_stripped = after.strip()
+                
+                # Strip markdown code blocks if Gemini aggressively fenced the JSON
+                if after_stripped.startswith('```json'):
+                    after_stripped = after_stripped[7:].strip()
+                elif after_stripped.startswith('```'):
+                    after_stripped = after_stripped[3:].strip()
+                    
                 try:
-                    plot_data, end_idx = _json.JSONDecoder().raw_decode(after_stripped)
-                except _json.JSONDecodeError:
+                    import json
+                    plot_data, end_idx = json.JSONDecoder().raw_decode(after_stripped)
+                except json.JSONDecodeError:
                     # No valid JSON object after this token — strip the dangling token and stop
-                    resp = before + after
+                    resp = before + "\n" + after_stripped
                     break
+                
                 img_md = Visualizer.build_plot(plot_data)
-                consumed_len = (len(after) - len(after_stripped)) + end_idx
-                resp = before + img_md + after[consumed_len:]
+                
+                remaining = after_stripped[end_idx:].strip()
+                if remaining.startswith('```'):
+                    remaining = remaining[3:].strip()
+                    
+                resp = before + "\n\n" + img_md + "\n\n" + remaining
             except Exception as e:
-                resp += f"\n*(Plot Error: {str(e)[:60]})*"
+                resp = resp.replace('__PRC_PLOT__', '') + f"\n*(Plot Error: {str(e)[:60]})*"
                 break
 
         # Handle Documents (routed through HvielDocEngine)
