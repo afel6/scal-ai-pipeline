@@ -36,8 +36,8 @@ IMPORTANT EXPORT ENGINE INSTRUCTIONS:
 - You can natively draw complex documents for the user. ONLY do this if explicitly asked to generate a report, PDF, or PowerPoint.
 - IF PowerPoint requested: Start your response EXACTLY with `__PRC_PPTX__` followed by a raw JSON string containing {"title": "Slide Title", "slides": [{"title": "Data Slide", "bullets": ["Point"]}]}
 - IF PDF requested: Start your response EXACTLY with `__PRC_PDF__` followed by standard unformatted markdown.
-- IF Word document requested: DO NOT write the content yourself. Output the exact literal token `___ROUTE_TO_CLAUDE_DOCX___` and stop generating. The backend expert will handle it.
-- IF Excel spreadsheet requested: DO NOT write the content yourself. Output the exact literal token `___ROUTE_TO_CLAUDE_EXCEL___` and stop generating. The backend data compiler will handle it.
+- IF Word document requested: Start your response EXACTLY with `__PRC_DOCX__` followed by a raw JSON string containing exactly this schema: { "title": "Report", "author": "Hviel AI", "sections": [{"heading": "Section", "level": 1, "paragraphs": ["data..."]}], "tables": [{"caption": "Table", "headers": ["A"], "rows": [["B"]]}] }
+- IF Excel spreadsheet requested: Start your response EXACTLY with `__PRC_EXCEL__` followed by a raw JSON string containing exactly this schema: { "title": "Sheet Title", "sheets": [{"name": "Data", "headers": ["A"], "rows": [["B"]]}] }
 
 GRAPHING & VISUALIZATION ENGINE:
 If the user asks you to plot a graph, draw a curve, or visualize data, you MUST include the exact sequence __PRC_PLOT__ followed immediately by a raw JSON object containing the plot parameters. DO NOT wrap the JSON in markdown code blocks.
@@ -649,21 +649,7 @@ async def handle(
 
         resp = assistant.chat(history, message, kb_context=kb_context, f_parts=f_parts)
 
-        # ── MIXTURE OF EXPERTS ROUTER ──
-        if '___ROUTE_TO_CLAUDE_DOCX___' in resp:
-            try:
-                # Intercept the request and fire the specialized Anthropic endpoint
-                claude_resp = AnthropicAssistant.generate_docx(history, message, kb_context)
-                resp = "__PRC_DOCX__\n" + claude_resp
-            except Exception as e:
-                resp = f"*(Claude Generation Failed: {str(e)[:100]}. Falling back...)*\n__PRC_DOCX__\n{resp.replace('___ROUTE_TO_CLAUDE_DOCX___','')}"
-        elif '___ROUTE_TO_CLAUDE_EXCEL___' in resp:
-            try:
-                # Route EXCEL parsing to Anthropic
-                claude_resp = AnthropicAssistant.generate_excel(history, message, kb_context)
-                resp = "__PRC_EXCEL__\n" + claude_resp
-            except Exception as e:
-                resp = f"*(Claude Excel Generation Failed: {str(e)[:100]}. Falling back...)*\n__PRC_EXCEL__\n{resp.replace('___ROUTE_TO_CLAUDE_EXCEL___','')}"
+        # ── GEMINI NATIVE ENGINE ──
 
         # Handle Graphs — iterate over ALL __PRC_PLOT__ tokens in one response
         _plot_attempts = 0
