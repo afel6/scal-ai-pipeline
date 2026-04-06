@@ -61,16 +61,18 @@ If the user asks you to export data to Petrel, Eclipse, or KAPPA, include the ex
 # ── HVIEL BRAIN ──
 class PRCChatAssistant:
     def __init__(self, key):
-        self.model_name = 'gemini-1.5-flash'
+        self.model_name = 'gemini-2.5-flash' # Default to user-requested 2.5 engine
         if key and key != "DUMMY_KEY":
             genai.configure(api_key=key)
             try:
                 avail = [m.name for m in genai.list_models()]
-                if   'models/gemini-2.5-pro'   in avail: self.model_name = 'gemini-2.5-pro'
+                # 2026 Model Priority Stack
+                if   'models/gemini-3.1-pro'   in avail: self.model_name = 'gemini-3.1-pro'
+                elif 'models/gemini-3.1-flash' in avail: self.model_name = 'gemini-3.1-flash'
+                elif 'models/gemini-3.0-flash' in avail: self.model_name = 'gemini-3.0-flash'
+                elif 'models/gemini-2.5-pro'   in avail: self.model_name = 'gemini-2.5-pro'
                 elif 'models/gemini-2.5-flash' in avail: self.model_name = 'gemini-2.5-flash'
                 elif 'models/gemini-2.0-flash' in avail: self.model_name = 'gemini-2.0-flash'
-                elif 'models/gemini-1.5-flash' in avail: self.model_name = 'gemini-1.5-flash'
-                elif 'models/gemini-pro'        in avail: self.model_name = 'gemini-pro'
             except: pass
             self.model = genai.GenerativeModel(self.model_name)
 
