@@ -589,6 +589,9 @@ class HvielDocEngine:
             ws.freeze_panes = 'A2'
             ws.row_dimensions[1].height = 22
 
+        if len(wb.sheetnames) > 1:
+            wb.active = 1
+
         path = os.path.join(self.output_dir, f'{filename}.xlsx')
         wb.save(path); return path
 
