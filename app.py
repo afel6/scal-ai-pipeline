@@ -616,7 +616,12 @@ async def stream_chat(
             full_resp = ""
             chat_session = assistant.model.start_chat(history=valid_history)
             
-            response = await chat_session.send_message_async(enriched, stream=True)
+            # Use a strict 15-second timeout to prevent Google from silently queueing connections during high-demand outages
+            response = await chat_session.send_message_async(
+                enriched, 
+                stream=True,
+                request_options={'timeout': 15.0}
+            )
             async for chunk in response:
                 try:
                     token = chunk.text
