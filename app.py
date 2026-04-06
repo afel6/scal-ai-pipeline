@@ -63,10 +63,11 @@ class PRCChatAssistant:
             genai.configure(api_key=key)
             try:
                 avail = [m.name for m in genai.list_models()]
-                if 'models/gemini-2.5-flash' in avail: self.model_name = 'gemini-2.5-flash'
+                if   'models/gemini-2.5-pro'   in avail: self.model_name = 'gemini-2.5-pro'
+                elif 'models/gemini-2.5-flash' in avail: self.model_name = 'gemini-2.5-flash'
                 elif 'models/gemini-2.0-flash' in avail: self.model_name = 'gemini-2.0-flash'
                 elif 'models/gemini-1.5-flash' in avail: self.model_name = 'gemini-1.5-flash'
-                elif 'models/gemini-pro' in avail: self.model_name = 'gemini-pro'
+                elif 'models/gemini-pro'        in avail: self.model_name = 'gemini-pro'
             except: pass
             self.model = genai.GenerativeModel(self.model_name)
 
