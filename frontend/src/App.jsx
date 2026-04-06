@@ -147,10 +147,6 @@ function App() {
     const msgText = retryObj ? retryObj.text : input;
     const msgFiles = retryObj ? retryObj.files : files;
     if (!msgText.trim() && msgFiles.length === 0) return;
-    if (serverStatus === 'offline') {
-      setMessages(prev => [...prev, { role: 'model', text: '⚠️ The AI server is offline. Please retry in a moment.' }]);
-      return;
-    }
     if (!retryObj) {
       const fileNames = msgFiles.map(f => f.name).join(', ');
       setMessages(prev => [...prev, { role: 'user', text: msgText, fileName: fileNames || null }]);
