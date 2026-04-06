@@ -702,30 +702,39 @@ async def handle(
         # Handle Documents (routed through HvielDocEngine)
         doc_type = None
         clean_resp = None
+        
+        def _strip_doc_json(text_with_json):
+            # Clean up hallucinated extra underscores and find the JSON payload
+            import re, json
+            text = re.sub(r'_*__PRC_(PPTX|PDF|DOCX|REPORT|EXCEL)__*', '', text_with_json).strip()
+            
+            idx = text.find('{')
+            if idx == -1: return text
+            
+            try:
+                _, end_idx = json.JSONDecoder().raw_decode(text[idx:])
+                stripped = (text[:idx] + text[idx+end_idx:]).strip()
+                return stripped if stripped else "I have generated the requested data file."
+            except:
+                stripped = re.sub(r'\{.*\}', '', text, flags=re.DOTALL).strip()
+                return stripped if stripped else "I have generated the requested data file."
+
         if '__PRC_PPTX__' in resp:
-            clean_resp = resp.replace('__PRC_PPTX__', '').strip()
-            path = hviel_engine.build_from_json(
-                clean_resp, 'pptx', well=f"Study_{int(time.time())}", engineer=engineer_name
-            )
+            path = hviel_engine.build_from_json(resp, 'pptx', well=f"Study_{int(time.time())}", engineer=engineer_name)
             doc_type = "pptx"
+            clean_resp = _strip_doc_json(resp)
         elif '__PRC_PDF__' in resp:
-            clean_resp = resp.replace('__PRC_PDF__', '').strip()
-            path = hviel_engine.build_from_json(
-                clean_resp, 'pdf', well=f"Study_{int(time.time())}", engineer=engineer_name
-            )
+            path = hviel_engine.build_from_json(resp, 'pdf', well=f"Study_{int(time.time())}", engineer=engineer_name)
             doc_type = "pdf"
+            clean_resp = _strip_doc_json(resp)
         elif '__PRC_DOCX__' in resp or '__PRC_REPORT__' in resp:
-            clean_resp = resp.replace('__PRC_DOCX__', '').replace('__PRC_REPORT__', '').strip()
-            path = hviel_engine.build_from_json(
-                clean_resp, 'docx', well=f"Study_{int(time.time())}", engineer=engineer_name
-            )
+            path = hviel_engine.build_from_json(resp, 'docx', well=f"Study_{int(time.time())}", engineer=engineer_name)
             doc_type = "docx"
+            clean_resp = _strip_doc_json(resp)
         elif '__PRC_EXCEL__' in resp:
-            clean_resp = resp.replace('__PRC_EXCEL__', '').strip()
-            path = hviel_engine.build_from_json(
-                clean_resp, 'xlsx', well=f"Study_{int(time.time())}", engineer=engineer_name
-            )
+            path = hviel_engine.build_from_json(resp, 'xlsx', well=f"Study_{int(time.time())}", engineer=engineer_name)
             doc_type = "excel"
+            clean_resp = _strip_doc_json(resp)
 
         if doc_type:
             url = f"/api/download/{path}"
