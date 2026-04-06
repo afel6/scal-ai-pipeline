@@ -558,11 +558,17 @@ async def stream_chat(
         try:
             sid = session_id if (session_id and session_id != "undefined") else str(uuid.uuid4())
             
+            # Send session_id first so the frontend can latch onto it IMMEDIATELY
+            yield f"data: {{\"type\": \"session\", \"session_id\": \"{sid}\"}}\n\n"
+            
             # Limit history to the last 12 messages to massively speed up Gemini generation times
             history_rows = db("SELECT role, text, url FROM m WHERE sid = ? ORDER BY id DESC LIMIT 12", (sid,))
             history = [{"role": r, "text": t} for r, t, u in reversed(history_rows)]
 
-            kb_context = KnowledgeBase.search(message)
+            # Bypass the Google Embedding API delay for simple greetings ("hello")
+            kb_context = ""
+            if len(message.split()) > 2:
+                kb_context = KnowledgeBase.search(message)
 
             # Build enriched prompt
             enriched = SYSTEM_PROMPT
@@ -588,9 +594,6 @@ async def stream_chat(
 
             db("INSERT INTO m (sid, role, text, ts) VALUES (?, ?, ?, ?)",
                (sid, "user", message, time.time()))
-
-            # Send session_id first so the frontend can latch onto it
-            yield f"data: {{\"type\": \"session\", \"session_id\": \"{sid}\"}}\n\n"
 
             # Stream tokens
             full_resp = ""
