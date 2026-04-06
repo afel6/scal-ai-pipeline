@@ -575,7 +575,8 @@ async def stream_chat(
                     'what', 'how', 'why', 'explain', 'analysis', 'core', 'permeability', 
                     'porosity', 'saturation', 'archie', 'capillary', 'pc', 'sw', 'krw', 
                     'kro', 'wettability', 'fracture', 'relative', 'formation', 'resistivity',
-                    'calculate', 'equation', 'theory', 'model', 'brooks', 'corey', 'report', 'plot'
+                    'calculate', 'equation', 'theory', 'model', 'brooks', 'corey', 'report', 
+                    'plot', 'excel', 'word', 'document', 'file', 'csv', 'generate', 'pdf', 'powerpoint'
                 }
                 
                 if any(kw in words for kw in heavy_keywords): return True
@@ -687,7 +688,8 @@ async def handle(
                 'what', 'how', 'why', 'explain', 'analysis', 'core', 'permeability', 
                 'porosity', 'saturation', 'archie', 'capillary', 'pc', 'sw', 'krw', 
                 'kro', 'wettability', 'fracture', 'relative', 'formation', 'resistivity',
-                'calculate', 'equation', 'theory', 'model', 'brooks', 'corey', 'report', 'plot'
+                'calculate', 'equation', 'theory', 'model', 'brooks', 'corey', 'report', 
+                'plot', 'excel', 'word', 'document', 'file', 'csv', 'generate', 'pdf', 'powerpoint'
             }
             
             if any(kw in words for kw in heavy_keywords): return True
