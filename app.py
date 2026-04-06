@@ -579,7 +579,8 @@ async def stream_chat(
                     'porosity', 'saturation', 'archie', 'capillary', 'pc', 'sw', 'krw', 
                     'kro', 'wettability', 'fracture', 'relative', 'formation', 'resistivity',
                     'calculate', 'equation', 'theory', 'model', 'brooks', 'corey', 'report', 
-                    'plot', 'excel', 'word', 'document', 'file', 'csv', 'generate', 'pdf', 'powerpoint'
+                    'plot', 'excel', 'word', 'document', 'file', 'csv', 'generate', 'pdf', 'powerpoint',
+                    'curves', 'draw', 'graph', 'chart', 'visualize'
                 }
                 
                 if any(kw in words for kw in heavy_keywords): return True
