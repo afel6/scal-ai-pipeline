@@ -555,7 +555,7 @@ async def stream_chat(
     engineer_name: str = "PRC Engineer"
 ):
     """Server-Sent Events endpoint for real-time Gemini token streaming."""
-    def event_generator():
+    async def event_generator():
         try:
             sid = session_id if (session_id and session_id != "undefined") else str(uuid.uuid4())
             
@@ -612,12 +612,12 @@ async def stream_chat(
             db("INSERT INTO m (sid, role, text, ts) VALUES (?, ?, ?, ?)",
                (sid, "user", message, time.time()))
 
-            # Stream tokens
+            # Stream tokens asynchronously to prevent UI lag and thread starvation
             full_resp = ""
             chat_session = assistant.model.start_chat(history=valid_history)
-            for chunk in chat_session.send_message(enriched, stream=True):
-                # BUG FIX: chunk.text raises ValueError on finish chunks (no content parts)
-                # — must be caught explicitly, not with `or ""`
+            
+            response = await chat_session.send_message_async(enriched, stream=True)
+            async for chunk in response:
                 try:
                     token = chunk.text
                 except (ValueError, AttributeError):
