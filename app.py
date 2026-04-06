@@ -180,8 +180,8 @@ Create multiple sheets if appropriate (e.g. one for raw data, one for computed r
         system = (
             "You are an elite petrophysics report writer for the Petroleum Research Center (PRC) Libya. "
             "You write highly concise, sharply focused, and technically detailed SCAL reports. "
-            "Include all critical data, interpretations, and engineering conclusions. "
-            "CRITICAL TIME LIMIT: Produce a fast executive summary report with exactly 3-4 sections. DO NOT generate more than 1500 tokens, otherwise the server connection will drop.\n\n"
+            "Include critical data interpretations. "
+            "CRITICAL TIME LIMIT: Produce a fast executive summary report. You must strictly limit all generated tables to a MAXIMUM of 3 data rows. DO NOT dump massive datasets. DO NOT generate more than 1500 tokens, otherwise the server connection will drop.\n\n"
             + AnthropicAssistant._DOCX_SCHEMA
         )
         response = client.messages.create(
@@ -202,7 +202,7 @@ Create multiple sheets if appropriate (e.g. one for raw data, one for computed r
         system = (
             "You are an elite data engineer for the Petroleum Research Center (PRC). "
             "You generate highly structured, organized SCAL and petrophysical data Excel sheets. "
-            "CRITICAL TIME LIMIT: Produce a fast snapshot with exactly 1-2 core sheets containing only the most critical calculation results. DO NOT generate more than 1500 tokens, otherwise the server connection will drop.\n\n"
+            "CRITICAL TIME LIMIT: Produce a fast snapshot. YOU MUST limit all sheet rows to a MAXIMUM of 5 rows of summary data! DO NOT dump the full CSV dataset. DO NOT generate more than 1500 tokens, otherwise the server connection will drop.\n\n"
             + AnthropicAssistant._EXCEL_SCHEMA
         )
         response = client.messages.create(
