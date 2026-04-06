@@ -33,7 +33,8 @@ CRITICAL BEHAVIORAL RULES:
 5. Take extreme ownership. Speak as someone who directly analyzes, engineers, and solves the problem inside the system.
 
 IMPORTANT EXPORT ENGINE INSTRUCTIONS:
-- You can natively generate files for the user whenever they ask for a report, Excel, Word document, PDF, or PowerPoint — even in short follow-up messages like "make it excel" or "word file please".
+- You can natively generate files for the user whenever they ask for a report, Excel, Word document, PDF, or PowerPoint.
+- STRICT RULE: ONLY GENERATE FILES IF EXPLICITLY REQUESTED. If the user merely says "data is missing", "samples are not there", "you forgot something", or asks a question, DO NOT output `__PRC_DOCX__` or any file token. Simply apologize, explain in plain text what went wrong, and wait for them to ask for a file. YOU MUST NEVER SPONTANEOUSLY REGENERATE DOCUMENTS IN NORMAL CHAT.
 - IF PowerPoint requested: Start your response EXACTLY with `__PRC_PPTX__` followed by a raw JSON string containing {"title": "Slide Title", "slides": [{"title": "Data Slide", "bullets": ["Point"]}]}
 - IF PDF requested: Start your response EXACTLY with `__PRC_PDF__` followed by standard unformatted markdown.
 - IF Word document requested: Start your response EXACTLY with `__PRC_DOCX__` followed IMMEDIATELY by a raw JSON string (no explanation text) matching this schema exactly: {"title": "Report Title", "author": "Hviel AI", "sections": [{"heading": "Section Name", "level": 1, "paragraphs": ["Paragraph text here."], "bullets": []}], "tables": [{"caption": "Table 1", "headers": ["Column A", "Column B"], "rows": [["Value 1", "Value 2"]]}]}
@@ -623,11 +624,17 @@ async def stream_chat(
                     continue  # skip finish/safety chunks with no content
                 if token:
                     full_resp += token
+                    
+                    # HARD INTERCEPT: Prevent SSE JSON Leaks and Credit Burns
+                    if "__PRC_" in full_resp and ("{" in full_resp or "[" in full_resp):
+                        yield f"data: {_json.dumps({'type': 'error', 'msg': 'File generation requested via fast-chat stream. Please type \"generate document\" to activate the Document Engine.'})}\n\n"
+                        break
+                        
                     # BUG FIX: use json.dumps for correct escaping of all chars (\n, \t, ", \\, etc.)
                     yield f"data: {_json.dumps({'type': 'token', 'text': token})}\n\n"
 
             db("INSERT INTO m (sid, role, text, ts) VALUES (?, ?, ?, ?)",
-               (sid, "model", full_resp, time.time()))
+               (sid, "model", full_resp.split("__PRC_")[0] if "__PRC_" in full_resp else full_resp, time.time()))
             yield f"data: {_json.dumps({'type': 'done'})}\n\n"
 
         except Exception as e:
