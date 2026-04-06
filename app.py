@@ -580,7 +580,8 @@ async def stream_chat(
                     'kro', 'wettability', 'fracture', 'relative', 'formation', 'resistivity',
                     'calculate', 'equation', 'theory', 'model', 'brooks', 'corey', 'report', 
                     'plot', 'excel', 'word', 'document', 'file', 'csv', 'generate', 'pdf', 'powerpoint',
-                    'curves', 'draw', 'graph', 'chart', 'visualize'
+                    'curves', 'draw', 'graph', 'chart', 'visualize', 'thomeer', 'pore-throat',
+                    'ok', 'yes', 'sure', 'proceed', 'go', 'confirm'
                 }
                 
                 if any(kw in words for kw in heavy_keywords): return True
@@ -619,11 +620,12 @@ async def stream_chat(
             full_resp = ""
             chat_session = assistant.model.start_chat(history=valid_history)
             
-            # Use a 30-second timeout to balance responsiveness with model thinking time
+            # Use a 60-second timeout to allow the 2.5 model time for complex 'hidden reasoning' 
+            # while still maintaining a streaming user experience.
             response = await chat_session.send_message_async(
                 enriched, 
                 stream=True,
-                request_options={'timeout': 30.0}
+                request_options={'timeout': 60.0}
             )
             async for chunk in response:
                 try:
