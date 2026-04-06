@@ -557,8 +557,10 @@ async def stream_chat(
     async def event_generator():
         try:
             sid = session_id if (session_id and session_id != "undefined") else str(uuid.uuid4())
-            history = [{"role": r, "text": t} for r, t, u in
-                       db("SELECT role, text, url FROM m WHERE sid = ? ORDER BY id", (sid,))]
+            
+            # Limit history to the last 12 messages to massively speed up Gemini generation times
+            history_rows = db("SELECT role, text, url FROM m WHERE sid = ? ORDER BY id DESC LIMIT 12", (sid,))
+            history = [{"role": r, "text": t} for r, t, u in reversed(history_rows)]
 
             kb_context = KnowledgeBase.search(message)
 
@@ -589,6 +591,9 @@ async def stream_chat(
 
             # Send session_id first so the frontend can latch onto it
             yield f"data: {{\"type\": \"session\", \"session_id\": \"{sid}\"}}\n\n"
+            import asyncio
+            await asyncio.sleep(0.01) # Force HTTP flush to front-end to bypass async blocking
+
 
             # Stream tokens
             full_resp = ""
@@ -661,6 +666,10 @@ async def handle(
 
         # SAVE USER MESSAGE TO DB
         db("INSERT INTO m (sid, role, text, ts) VALUES (?, ?, ?, ?)", (sid, "user", message, time.time()))
+
+        # Limit history heavily to speed up the prompt evaluation
+        history_rows = db("SELECT role, text, url FROM m WHERE sid = ? ORDER BY id DESC LIMIT 12", (sid,))
+        history = [{"role": r, "text": t} for r, t, u in reversed(history_rows)]
 
         resp = assistant.chat(history, message, kb_context=kb_context, f_parts=f_parts)
 

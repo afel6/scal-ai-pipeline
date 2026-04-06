@@ -8,7 +8,7 @@ FOR /F "tokens=5" %%a in ('netstat -aon ^| findstr :5173') do (
 )
 
 echo Starting SCAL AI Backend (FastAPI) on Port 8000...
-start cmd /k "C:\Users\Asus\AppData\Local\Programs\Python\Python313\python.exe -m uvicorn app:app --port 8000"
+start cmd /k ".venv\Scripts\python.exe -m uvicorn app:app --port 8000 --reload"
 
 echo Starting SCAL AI Frontend (React/Vite) on Port 5173...
 cd frontend
