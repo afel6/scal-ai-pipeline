@@ -214,7 +214,7 @@ function App() {
     setUploadStatus(msgFiles.length > 0 ? 'uploading' : 'thinking');
     try {
       const response = await axios.post(`${API_URL}/api/chat`, formData, {
-        timeout: 120000,
+        timeout: 280000,
         onUploadProgress: (e) => { if (e.progress >= 1) setUploadStatus('thinking'); }
       });
       if (response.data.session_id) setSessionId(response.data.session_id);
@@ -231,7 +231,11 @@ function App() {
       }
       await refreshSessions();
     } catch (err) {
-      setMessages(prev => [...prev, { role: 'model', text: '❌ Connection error. I am unable to reach the PRC Hub at this moment.', isError: true }]);
+      if (err.code === 'ECONNABORTED') {
+        setMessages(prev => [...prev, { role: 'model', text: '❌ Generation timed out. Deep AI analysis or massive document generation can take up to 4 minutes. Please try again or submit a smaller dataset.', isError: true }]);
+      } else {
+        setMessages(prev => [...prev, { role: 'model', text: '❌ Connection error. I am unable to reach the PRC Hub at this moment.', isError: true }]);
+      }
       setServerStatus('offline');
     } finally {
       setLoading(false);

@@ -179,14 +179,14 @@ Create multiple sheets if appropriate (e.g. one for raw data, one for computed r
         client = anthropic.Anthropic(api_key=CLAUDE_API_KEY)
         system = (
             "You are an elite petrophysics report writer for the Petroleum Research Center (PRC) Libya. "
-            "You write comprehensive, technically detailed SCAL and petrophysical engineering reports. "
-            "Include all relevant data, calculations, interpretations, and engineering conclusions. "
-            "Be thorough — a full professional report should have 6-10 sections and multiple data tables.\n\n"
+            "You write highly concise, sharply focused, and technically detailed SCAL reports. "
+            "Include all critical data, interpretations, and engineering conclusions. "
+            "CRITICAL TIME LIMIT: Produce a fast executive summary report with exactly 3-4 sections. DO NOT generate more than 1500 tokens, otherwise the server connection will drop.\n\n"
             + AnthropicAssistant._DOCX_SCHEMA
         )
         response = client.messages.create(
             model="claude-sonnet-4-6",
-            max_tokens=6000,
+            max_tokens=1500,
             system=system,
             messages=[{"role": "user", "content": AnthropicAssistant._build_context(history, msg, kb_context)}]
         )
@@ -200,15 +200,14 @@ Create multiple sheets if appropriate (e.g. one for raw data, one for computed r
         import anthropic
         client = anthropic.Anthropic(api_key=CLAUDE_API_KEY)
         system = (
-            "You are an elite petrophysics data compiler for the Petroleum Research Center (PRC) Libya. "
-            "You build comprehensive, well-structured Excel datasets from SCAL and core analysis data. "
-            "Include all numerical values with proper units. Create multiple sheets for different data categories. "
-            "Every row should have complete, properly formatted values.\n\n"
+            "You are an elite data engineer for the Petroleum Research Center (PRC). "
+            "You generate highly structured, organized SCAL and petrophysical data Excel sheets. "
+            "CRITICAL TIME LIMIT: Produce a fast snapshot with exactly 1-2 core sheets containing only the most critical calculation results. DO NOT generate more than 1500 tokens, otherwise the server connection will drop.\n\n"
             + AnthropicAssistant._EXCEL_SCHEMA
         )
         response = client.messages.create(
             model="claude-sonnet-4-6",
-            max_tokens=6000,
+            max_tokens=1500,
             system=system,
             messages=[{"role": "user", "content": AnthropicAssistant._build_context(history, msg, kb_context)}]
         )
