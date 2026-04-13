@@ -1,14 +1,38 @@
 from fastapi import FastAPI, UploadFile, File, Form
 from fastapi.responses import FileResponse, StreamingResponse
 from fastapi.middleware.cors import CORSMiddleware
-import os, uuid, time, sqlite3, re, json as _json
+import os, uuid, time, re, json as _json
 import numpy as np
 import pandas as pd
 from typing import Optional
-import google.generativeai as genai
 from docx import Document
 from bs4 import BeautifulSoup
 from hviel_doc_engine import HvielDocEngine
+import keepalive  # Fix 1: self-ping keep-alive (prevents Render cold starts)
+
+# ── Fix 2: Google Gemini SDK Migration (google-generativeai → google.genai) ──
+# The old SDK (google-generativeai) is deprecated. The new SDK is google-genai.
+# We use a compatibility shim so the rest of the code requires minimal changes.
+try:
+    from google import genai as genai_new
+    from google.genai import types as genai_types
+    _USE_NEW_SDK = True
+except ImportError:
+    import google.generativeai as genai  # fallback to old SDK
+    _USE_NEW_SDK = False
+
+# ── Fix 3: PostgreSQL + SQLite unified DB layer ──
+DATABASE_URL = os.getenv("DATABASE_URL", "").strip()
+_PG_AVAILABLE = False
+if DATABASE_URL:
+    try:
+        import psycopg2
+        _PG_AVAILABLE = True
+    except ImportError:
+        pass
+
+if not _PG_AVAILABLE:
+    import sqlite3
 
 
 # ── CONFIG ──
@@ -20,7 +44,7 @@ except:
 
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "DUMMY_KEY").strip(' \n\r\t"\'')
 CLAUDE_API_KEY = os.getenv("CLAUDE_API_KEY", "DUMMY_KEY").strip(' \n\r\t"\'')
-DB_PATH = "chat_history.db"
+DB_PATH = "chat_history.db"  # used only when PostgreSQL is not available
 
 # ── SYSTEM PROMPT ──
 SYSTEM_PROMPT = """You are Hviel, an elite, highly capable Senior AI Petrophysical Specialist for the Libyan Petroleum Research Center (PRC). You operate with the confidence, extreme competence, and proactive energy of a top-tier DeepMind engineering agent. 
@@ -58,35 +82,45 @@ PETREL XML EXPORTER:
 ONLY use this if the user EXPLICITLY mentions Petrel, Eclipse, or KAPPA software by name. Do NOT use this for regular Excel or spreadsheet requests — those must use `__PRC_EXCEL__` instead.
 If the user asks you to export data to Petrel, Eclipse, or KAPPA, include the exact sequence __PETREL_EXPORT__ at the very start of your response, followed by structured, cleaned tabular data. The backend will automatically package it into a reservoir-compatible XML schematic file for them to download."""
 
-# ── HVIEL BRAIN ──
+# ── HVIEL BRAIN (Fix 2: new google.genai SDK with old-SDK fallback) ──
 class PRCChatAssistant:
     def __init__(self, key):
-        self.model_name = 'gemini-2.5-flash' # Default to user-requested 2.5 engine
-        if key and key != "DUMMY_KEY":
+        self.model_name = 'gemini-2.5-flash'
+        self._key = key
+        if not key or key == "DUMMY_KEY":
+            return
+        if _USE_NEW_SDK:
+            # New google.genai SDK
+            self._client = genai_new.Client(api_key=key)
+            try:
+                avail = [m.name for m in self._client.models.list()]
+                for candidate in ['gemini-3.1-pro','gemini-3.1-flash','gemini-2.5-pro','gemini-2.5-flash','gemini-2.0-flash']:
+                    if any(candidate in a for a in avail):
+                        self.model_name = candidate
+                        break
+            except: pass
+        else:
+            # Fallback: old google.generativeai SDK
             genai.configure(api_key=key)
             try:
                 avail = [m.name for m in genai.list_models()]
-                # 2026 Model Priority Stack
-                if   'models/gemini-3.1-pro'   in avail: self.model_name = 'gemini-3.1-pro'
-                elif 'models/gemini-3.1-flash' in avail: self.model_name = 'gemini-3.1-flash'
-                elif 'models/gemini-3.0-flash' in avail: self.model_name = 'gemini-3.0-flash'
-                elif 'models/gemini-2.5-pro'   in avail: self.model_name = 'gemini-2.5-pro'
-                elif 'models/gemini-2.5-flash' in avail: self.model_name = 'gemini-2.5-flash'
-                elif 'models/gemini-2.0-flash' in avail: self.model_name = 'gemini-2.0-flash'
+                for candidate in ['models/gemini-2.5-flash','models/gemini-2.0-flash']:
+                    if candidate in avail:
+                        self.model_name = candidate.replace('models/','')
+                        break
             except: pass
             self.model = genai.GenerativeModel(
                 self.model_name,
-                generation_config={'temperature': 0.1} # DeepMind High-Logic Mode
+                generation_config={'temperature': 0.1}
             )
 
     def chat(self, history, msg, kb_context="", f_parts=[]):
-        # Build system + context enriched message
         enriched = SYSTEM_PROMPT
         if kb_context:
             enriched += f"\n\n--- KNOWLEDGE BASE CONTEXT ---\n{kb_context}\n--- END CONTEXT ---"
         enriched += f"\n\nUSER QUERY: {msg}"
 
-        # Enforce strictly alternating history (User -> Model -> User -> Model)
+        # Build strictly alternating history
         valid_history = []
         for x in history:
             role = 'user' if x['role'] == 'user' else 'model'
@@ -99,44 +133,55 @@ class PRCChatAssistant:
                     valid_history[-1] = {"role": role, "parts": [x['text']]}
                 elif role == 'model':
                     valid_history[-1]['parts'][0] += "\n\n" + x['text']
-
         if valid_history and valid_history[-1]['role'] == 'user':
             valid_history.pop()
 
-        c = [enriched]
-        SUPPORTED = ['application/pdf', 'image/jpeg', 'image/png', 'image/gif', 'image/webp']
-        for data, mime in f_parts:
-            if mime in SUPPORTED:
-                c.append({'mime_type': mime, 'data': data})
-
-        def _safe_text(response):
-            """Extract text safely — handles safety-filtered or empty Gemini responses."""
+        if _USE_NEW_SDK:
+            # ── New google.genai SDK path ──
+            SUPPORTED = ['application/pdf', 'image/jpeg', 'image/png', 'image/gif', 'image/webp']
+            contents = []
+            for h in valid_history:
+                contents.append(genai_types.Content(role=h['role'], parts=[genai_types.Part(text=h['parts'][0])]))
+            user_parts = [genai_types.Part(text=enriched)]
+            for data, mime in f_parts:
+                if mime in SUPPORTED:
+                    user_parts.append(genai_types.Part(inline_data=genai_types.Blob(mime_type=mime, data=data)))
+            contents.append(genai_types.Content(role='user', parts=user_parts))
             try:
-                return response.text
-            except ValueError:
-                # Response was blocked by safety filters or returned no content parts
-                if hasattr(response, 'prompt_feedback') and response.prompt_feedback:
-                    return f"That query hit a safety threshold on the model side. Feedback: {response.prompt_feedback}. Rework the phrasing and I'll run it again."
-                return "The model returned an empty response on that one — likely a transient quota or safety issue. Hit retry or rephrase the query."
-
-        try:
-            return _safe_text(self.model.start_chat(history=valid_history).send_message(c))
-        except Exception as e:
-            if "404" in str(e) or "not found" in str(e).lower():
-                fallbacks = ['gemini-2.0-flash', 'gemini-1.5-pro', 'gemini-1.5-flash-latest', 'gemini-pro', 'models/gemini-1.5-flash']
-                for fb in fallbacks:
+                resp = self._client.models.generate_content(
+                    model=self.model_name,
+                    contents=contents,
+                    config=genai_types.GenerateContentConfig(temperature=0.1)
+                )
+                return resp.text
+            except Exception as e:
+                # Fallback to a known-safe model
+                for fb in ['gemini-2.0-flash', 'gemini-1.5-flash']:
+                    try:
+                        resp = self._client.models.generate_content(model=fb, contents=contents,
+                            config=genai_types.GenerateContentConfig(temperature=0.1))
+                        return resp.text
+                    except: continue
+                raise e
+        else:
+            # ── Old google.generativeai SDK fallback ──
+            c = [enriched]
+            SUPPORTED = ['application/pdf', 'image/jpeg', 'image/png', 'image/gif', 'image/webp']
+            for data, mime in f_parts:
+                if mime in SUPPORTED:
+                    c.append({'mime_type': mime, 'data': data})
+            def _safe_text(response):
+                try: return response.text
+                except ValueError: return "The model returned an empty response — retry or rephrase."
+            try:
+                return _safe_text(self.model.start_chat(history=valid_history).send_message(c))
+            except Exception as e:
+                for fb in ['gemini-2.0-flash', 'gemini-1.5-flash']:
                     try:
                         self.model = genai.GenerativeModel(fb)
                         return _safe_text(self.model.start_chat(history=valid_history).send_message(c))
                     except: continue
-
-                try:
-                    avail = [m.name.replace('models/', '') for m in genai.list_models()]
-                    raise Exception(f"API Key Restrict Error: Google blocked all standard models. Available on your key: {', '.join(avail)}")
-                except Exception as ex:
-                    if "API Key Restrict Error" in str(ex): raise ex
-                    raise Exception("Google API Key highly restricted. Failed to find any compatible model.")
-            raise e
+                raise e
 
 
 class AnthropicAssistant:
@@ -232,21 +277,29 @@ class KnowledgeBase:
 
     @staticmethod
     def _embed(text: str):
-        """Return a numpy float32 embedding vector via Gemini, or None on failure."""
+        """Return a numpy float32 embedding vector via Gemini (new + old SDK), or None."""
         try:
-            result = genai.embed_content(model=EMBED_MODEL, content=text,
-                                          task_type='RETRIEVAL_DOCUMENT')
-            return np.array(result['embedding'], dtype=np.float32)
+            if _USE_NEW_SDK:
+                client = genai_new.Client(api_key=GEMINI_API_KEY)
+                result = client.models.embed_content(model=EMBED_MODEL, contents=text)
+                return np.array(result.embeddings[0].values, dtype=np.float32)
+            else:
+                result = genai.embed_content(model=EMBED_MODEL, content=text, task_type='RETRIEVAL_DOCUMENT')
+                return np.array(result['embedding'], dtype=np.float32)
         except Exception:
             return None
 
     @staticmethod
     def _embed_query(text: str):
-        """Return a numpy float32 query embedding vector via Gemini, or None on failure."""
+        """Return a numpy float32 query embedding vector via Gemini, or None."""
         try:
-            result = genai.embed_content(model=EMBED_MODEL, content=text,
-                                          task_type='RETRIEVAL_QUERY')
-            return np.array(result['embedding'], dtype=np.float32)
+            if _USE_NEW_SDK:
+                client = genai_new.Client(api_key=GEMINI_API_KEY)
+                result = client.models.embed_content(model=EMBED_MODEL, contents=text)
+                return np.array(result.embeddings[0].values, dtype=np.float32)
+            else:
+                result = genai.embed_content(model=EMBED_MODEL, content=text, task_type='RETRIEVAL_QUERY')
+                return np.array(result['embedding'], dtype=np.float32)
         except Exception:
             return None
 
@@ -432,24 +485,52 @@ app = FastAPI()
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
 assistant = PRCChatAssistant(GEMINI_API_KEY)
 
+# ── Fix 3: Unified DB layer — PostgreSQL when available, SQLite fallback ──
 def db(q, p=()):
-    conn = sqlite3.connect(DB_PATH)
-    c = conn.cursor()
-    c.execute(q, p)
-    res = c.fetchall()
-    conn.commit()
-    conn.close()
-    return res
+    if _PG_AVAILABLE:
+        import psycopg2
+        # Translate SQLite-style ? placeholders to PostgreSQL %s
+        pg_q = q.replace('?', '%s')
+        conn = psycopg2.connect(DATABASE_URL)
+        cur = conn.cursor()
+        cur.execute(pg_q, p)
+        try: res = cur.fetchall()
+        except: res = []
+        conn.commit()
+        cur.close()
+        conn.close()
+        return res
+    else:
+        conn = sqlite3.connect(DB_PATH)
+        c = conn.cursor()
+        c.execute(q, p)
+        res = c.fetchall()
+        conn.commit()
+        conn.close()
+        return res
 
-# Init tables
-db('CREATE TABLE IF NOT EXISTS m (id INTEGER PRIMARY KEY, sid TEXT, role TEXT, text TEXT, url TEXT, ts REAL)')
-db('CREATE TABLE IF NOT EXISTS kb (id INTEGER PRIMARY KEY, source TEXT, chunk TEXT)')
-db('CREATE TABLE IF NOT EXISTS kb_vectors (id INTEGER PRIMARY KEY, chunk_id INTEGER UNIQUE, embedding BLOB)')
+# Init tables — works for both PostgreSQL and SQLite
+if _PG_AVAILABLE:
+    # PostgreSQL uses SERIAL instead of INTEGER PRIMARY KEY
+    db('CREATE TABLE IF NOT EXISTS m (id SERIAL PRIMARY KEY, sid TEXT, role TEXT, text TEXT, url TEXT, ts REAL)')
+    db('CREATE TABLE IF NOT EXISTS kb (id SERIAL PRIMARY KEY, source TEXT, chunk TEXT)')
+    db('CREATE TABLE IF NOT EXISTS kb_vectors (id SERIAL PRIMARY KEY, chunk_id INTEGER UNIQUE, embedding BYTEA)')
+else:
+    db('CREATE TABLE IF NOT EXISTS m (id INTEGER PRIMARY KEY, sid TEXT, role TEXT, text TEXT, url TEXT, ts REAL)')
+    db('CREATE TABLE IF NOT EXISTS kb (id INTEGER PRIMARY KEY, source TEXT, chunk TEXT)')
+    db('CREATE TABLE IF NOT EXISTS kb_vectors (id INTEGER PRIMARY KEY, chunk_id INTEGER UNIQUE, embedding BLOB)')
 
-@app.on_event("startup")
+# ── Fix 1: Start keep-alive self-ping ──
+keepalive.start()
+
+@app.get('/health')
+def health():
+    return {'status': 'ok', 'db': 'postgres' if _PG_AVAILABLE else 'sqlite', 'sdk': 'google.genai' if _USE_NEW_SDK else 'google-generativeai'}
+
+@app.on_event("startup")  # TODO: migrate to lifespan= when fully on FastAPI 0.103+
 async def startup_event():
     import PyPDF2
-    print("🚀 Running PRC Auto-Hydration Engine for Permanent Books...")
+    print("[SYSTEM] Running PRC Auto-Hydration Engine for Permanent Books...")
     books_dir = "books"
     if not os.path.exists(books_dir):
         return
@@ -461,7 +542,7 @@ async def startup_event():
         count = c.execute("SELECT COUNT(*) FROM kb WHERE source = ?", (filename,)).fetchone()[0]
         conn.close()
         if count == 0:
-            print(f"📚 Auto-Hydrating: {filename} into RAG + Vector DB...")
+            print(f"[BOOK] Auto-Hydrating: {filename} into RAG + Vector DB...")
             try:
                 full_text = ""
                 if filename.lower().endswith(".pdf"):
@@ -474,11 +555,11 @@ async def startup_event():
                 if full_text:
                     chunks = KnowledgeBase.chunk_text(full_text, filename)
                     KnowledgeBase.ingest_chunks_with_embeddings(chunks)
-                    print(f"✅ Injected {len(chunks)} knowledge blocks + embeddings from {filename}")
+                    print(f"[SUCCESS] Injected {len(chunks)} knowledge blocks + embeddings from {filename}")
             except Exception as e:
-                print(f"❌ Failed to hydrate {filename}: {e}")
+                print(f"[ERROR] Failed to hydrate {filename}: {e}")
 
-    print("✅ Auto-Hydration Complete. PRC Hub ONLINE.")
+    print("[OK] Auto-Hydration Complete. PRC Hub ONLINE.")
 
 # ── ROUTES: SESSIONS ──
 @app.get("/api/sessions")
@@ -537,15 +618,12 @@ async def kb_ingest(file: UploadFile = File(...), password: str = Form(...)):
         if len(text) < 100:
             return {"status": "error", "message": "File too short or unreadable"}
 
-        chunks = KnowledgeBase.chunk_text(text, name)
-        # Clear old data for this source
-        conn = sqlite3.connect(DB_PATH)
-        old_ids = [r[0] for r in conn.execute("SELECT id FROM kb WHERE source = ?", (name,)).fetchall()]
+        # Clear old data for this source using the unified db() layer
+        old_ids = [r[0] for r in db("SELECT id FROM kb WHERE source = ?", (name,))]
         if old_ids:
-            conn.execute(f"DELETE FROM kb_vectors WHERE chunk_id IN ({','.join('?'*len(old_ids))})", old_ids)
-        conn.execute("DELETE FROM kb WHERE source = ?", (name,))
-        conn.commit()
-        conn.close()
+            placeholders = ','.join(['?' ] * len(old_ids))
+            db(f"DELETE FROM kb_vectors WHERE chunk_id IN ({placeholders})", tuple(old_ids))
+        db("DELETE FROM kb WHERE source = ?", (name,))
         # Ingest with embeddings
         KnowledgeBase.ingest_chunks_with_embeddings(chunks)
         return {"status": "success", "book": name, "chunks_stored": len(chunks), "words": len(text.split()), "semantic_rag": True}
@@ -619,17 +697,31 @@ async def stream_chat(
             db("INSERT INTO m (sid, role, text, ts) VALUES (?, ?, ?, ?)",
                (sid, "user", message, time.time()))
 
-            # Stream tokens asynchronously to prevent UI lag and thread starvation
+            # Stream tokens — support both SDKs
             full_resp = ""
-            chat_session = assistant.model.start_chat(history=valid_history)
-            
-            # Use a 60-second timeout to allow the 2.5 model time for complex 'hidden reasoning' 
-            # while still maintaining a streaming user experience.
-            response = await chat_session.send_message_async(
-                enriched, 
-                stream=True,
-                request_options={'timeout': 60.0}
-            )
+            if _USE_NEW_SDK:
+                # New google.genai SDK — async streaming
+                import asyncio
+                contents_stream = []
+                for h in valid_history:
+                    contents_stream.append(genai_types.Content(role=h['role'], parts=[genai_types.Part(text=h['parts'][0])]))
+                contents_stream.append(genai_types.Content(role='user', parts=[genai_types.Part(text=enriched)]))
+                loop = asyncio.get_event_loop()
+                stream_resp = await loop.run_in_executor(
+                    None,
+                    lambda: assistant._client.models.generate_content_stream(
+                        model=assistant.model_name,
+                        contents=contents_stream,
+                        config=genai_types.GenerateContentConfig(temperature=0.1)
+                    )
+                )
+                response = stream_resp
+            else:
+                # Old google.generativeai SDK
+                chat_session = assistant.model.start_chat(history=valid_history)
+                response = await chat_session.send_message_async(
+                    enriched, stream=True, request_options={'timeout': 60.0}
+                )
             async for chunk in response:
                 try:
                     token = chunk.text

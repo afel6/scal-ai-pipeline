@@ -1,4 +1,4 @@
-import React, { useState, useRef, useEffect, useCallback } from 'react';
+import React, { useState, useRef, useEffect, useCallback, startTransition } from 'react';
 import { Send, Paperclip, Bot, User, Download, FileText, Database, Circle, PlusCircle, Trash2, MessageSquare, X, Wifi, WifiOff, Loader, LogOut, Menu, BookOpen, Upload, CheckCircle } from 'lucide-react';
 import axios from 'axios';
 import SidebarTabs from './SidebarTabs';
@@ -97,7 +97,8 @@ function App() {
 
   useEffect(() => {
     refreshSessions();
-    const interval = setInterval(refreshSessions, 5000);
+    // Poll every 8s instead of 5s — reduces server overhead by 37%
+    const interval = setInterval(refreshSessions, 8000);
     return () => clearInterval(interval);
   }, [refreshSessions]);
 
@@ -121,10 +122,12 @@ function App() {
     try {
       const { data } = await axios.get(`${API_URL}/api/session/${sid}`);
       if (data.status === 'ok') {
-        setSessionId(sid);
+        startTransition(() => {
+          setSessionId(sid);
+          setMessages([WELCOME_MSG, ...data.messages.map(m => ({ role: m.role, text: m.text, download_url: m.download_url }))]);
+          setLastMessage(null);
+        });
         localStorage.setItem('prc_session_id', sid);
-        setMessages([WELCOME_MSG, ...data.messages.map(m => ({ role: m.role, text: m.text, download_url: m.download_url }))]);
-        setLastMessage(null);
       }
     } catch {}
     if (window.innerWidth < 768) setSidebarOpen(false);
@@ -159,7 +162,10 @@ function App() {
     setLoading(true);
 
     // ── Smart Route Logic ──
-    const triggerWords = ['document', 'report', 'excel', 'word', 'docx', 'xlsx', 'spreadsheet', 'matrix', 'download'];
+    // Bug fix: added 'plot','chart','graph','curve','generate' so visualization
+    // requests correctly route to the Document Engine (not SSE which can't handle them)
+    const triggerWords = ['document', 'report', 'excel', 'word', 'docx', 'xlsx',
+      'spreadsheet', 'matrix', 'download', 'plot', 'chart', 'graph', 'curve', 'generate'];
     const isDocRequest = triggerWords.some(w => msgText.toLowerCase().includes(w));
 
     // ── SSE Streaming path: plain text, no files, no document generation requests ──
@@ -201,7 +207,14 @@ function App() {
             refreshSessions();
           } else if (data.type === 'error') {
             es.close();
-            setMessages(prev => [...prev, { role: 'model', text: `❌ ${data.msg}`, isError: true }]);
+            // Tag doc-engine errors so we can show the clickable button
+            const isDocEngineError = data.msg?.includes('generate document') || data.msg?.includes('Document Engine');
+            setMessages(prev => [...prev, {
+              role: 'model',
+              text: `❌ ${data.msg}`,
+              isError: true,
+              isDocEngineError,
+            }]);
             setLoading(false);
             setUploadStatus('');
             setServerStatus('offline');
@@ -273,12 +286,12 @@ function App() {
     }
   }, [retryCooldown]);
 
-  const statusConfig = {
+  // Hoisted outside render cycle via useMemo — avoids object recreation on every render (Vercel perf skill)
+  const status = React.useMemo(() => ({
     waking:  { icon: <Loader className="w-3 h-3 animate-spin" />, text: 'Connecting...', color: 'text-yellow-500' },
     online:  { icon: <Circle className="w-2 h-2 fill-green-500" />, text: 'Online',   color: 'text-green-400' },
     offline: { icon: <WifiOff className="w-3 h-3" />, text: 'Reconnecting...', color: 'text-red-400' },
-  };
-  const status = statusConfig[serverStatus];
+  })[serverStatus], [serverStatus]);
 
   if (!user) {
     return <Login onLogin={(u) => {
@@ -406,17 +419,40 @@ function App() {
                   </div>
                 )}
                 {renderMessageContent(msg.text)}
+                {/* Fix 4: "Export as PRC Report" button on chart messages */}
+                {msg.role === 'model' && !msg.download_url && msg.text?.includes('data:image/png;base64,') && (
+                  <button
+                    onClick={() => handleSend({ text: 'generate document', files: [] })}
+                    disabled={loading}
+                    className="mt-3 w-full bg-gradient-to-r from-yellow-900/40 to-amber-900/30 hover:from-yellow-800/50 hover:to-amber-800/40 border border-yellow-600/50 text-yellow-200 font-bold tracking-widest uppercase px-4 py-3 rounded-xl flex items-center justify-center gap-2 text-xs transition-all active:scale-95 disabled:opacity-30 shadow-lg"
+                  >
+                    {loading ? <Loader className="w-4 h-4 animate-spin" /> : <FileText className="w-4 h-4" />}
+                    {loading ? 'GENERATING REPORT…' : 'EXPORT AS PRC REPORT'}
+                  </button>
+                )}
                 {msg.download_url && (
                   <button onClick={() => window.open(`${API_URL}${msg.download_url}`, "_blank")}
                     className="mt-4 w-full bg-yellow-600/20 hover:bg-yellow-600/40 border border-yellow-500/50 text-yellow-300 font-bold tracking-widest uppercase px-4 py-3 rounded-xl flex items-center justify-center gap-2 text-xs transition-all active:scale-95">
                     <Download className="w-4 h-4" /> Download {msg.doc_type === 'pptx' ? 'PowerPoint Presentation' : msg.doc_type === 'pdf' ? 'PDF Evaluation' : msg.doc_type === 'excel' ? 'Excel Spreadsheet' : 'Word Document'}
                   </button>
                 )}
-                {msg.isError && lastMessage && (
+                {/* Bug 1 fix: clickable "Generate Chart" button — no typing required */}
+                {msg.isDocEngineError && (
+                  <button
+                    onClick={() => handleSend({ text: 'generate document', files: [] })}
+                    disabled={loading}
+                    className="mt-3 w-full bg-yellow-600/20 hover:bg-yellow-600/35 border border-yellow-500/50 text-yellow-300 font-bold tracking-widest uppercase text-[10px] py-2.5 rounded-lg flex items-center justify-center gap-2 transition-all active:scale-95 disabled:opacity-30"
+                  >
+                    {loading ? <Loader className="w-3 h-3 animate-spin" /> : <Download className="w-3 h-3" />}
+                    {loading ? 'GENERATING…' : 'GENERATE CHART / DOCUMENT'}
+                  </button>
+                )}
+                {/* Bug 2 fix: accurate label — was "Wait 3 Minutes" but cooldown is only 15s */}
+                {msg.isError && !msg.isDocEngineError && lastMessage && (
                   <button onClick={() => handleSend(lastMessage)} disabled={loading || retryCooldown > 0}
                     className="mt-3 w-full bg-amber-950/20 hover:bg-amber-950/40 border border-amber-600/50 text-amber-300 font-bold tracking-widest uppercase text-[10px] py-2.5 rounded-lg flex items-center justify-center gap-2 transition-all active:scale-95 disabled:opacity-30">
                     {loading ? <Loader className="w-3 h-3 animate-spin" /> : <Wifi className="w-3 h-3 text-yellow-500" />}
-                    {loading ? 'RETRYING...' : retryCooldown > 0 ? `COOL DOWN (${retryCooldown}s)...` : 'RE-TRY (Wait 3 Minutes for Quota Reset)'}
+                    {loading ? 'RETRYING...' : retryCooldown > 0 ? `RE-TRY IN ${retryCooldown}s…` : 'RE-TRY REQUEST'}
                   </button>
                 )}
               </div>

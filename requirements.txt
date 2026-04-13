@@ -1,3 +1,4 @@
+google-genai
 google-generativeai
 pydantic
 pandas
@@ -18,3 +19,4 @@ xlrd
 python-pptx
 reportlab
 anthropic
+psycopg2-binary

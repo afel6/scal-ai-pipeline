@@ -1,69 +1,91 @@
 @import "tailwindcss";
 
+/* ── Design Tokens (Anthropic Frontend Design Skill) ────────────────────── */
 :root {
   --prc-gold: #fbbf24;
+  --prc-gold-dim: #92400e;
   --prc-blue: #2D358E;
+  --prc-bg: #050505;
+  --prc-surface: #09090b;
+  --prc-glass: rgba(255, 255, 255, 0.025);
+  --prc-border: rgba(255, 255, 255, 0.06);
 }
 
+/* ── Base ──────────────────────────────────────────────────────────────── */
 body {
   margin: 0;
   font-family: 'Outfit', 'Google Sans', system-ui, -apple-system, sans-serif;
-  background-color: #050505;
+  background-color: var(--prc-bg);
   color: #f8fafc;
   overflow: hidden;
 }
 
-/* Base Styles */
+/* ── Glassmorphism Surface ──────────────────────────────────────────────── */
 .bg-gloss {
   background: rgba(255, 255, 255, 0.03);
-  backdrop-filter: blur(10px);
-  border: 1px solid rgba(255, 255, 255, 0.05);
+  backdrop-filter: blur(16px) saturate(1.4);
+  -webkit-backdrop-filter: blur(16px) saturate(1.4);
+  border: 1px solid rgba(255, 255, 255, 0.06);
 }
 
+/* ── Brand Colors ───────────────────────────────────────────────────────── */
 .text-prc-gold { color: var(--prc-gold); }
 .text-prc-blue { color: var(--prc-blue); }
-.bg-prc-gold { background-color: var(--prc-gold); }
-.bg-prc-blue { background-color: var(--prc-blue); }
+.bg-prc-gold   { background-color: var(--prc-gold); }
+.bg-prc-blue   { background-color: var(--prc-blue); }
 
-/* Custom Scrollbar */
-::-webkit-scrollbar {
-  width: 5px;
-}
-::-webkit-scrollbar-track {
-  background: transparent;
-}
+/* ── Custom Scrollbar ───────────────────────────────────────────────────── */
+::-webkit-scrollbar { width: 4px; }
+::-webkit-scrollbar-track { background: transparent; }
 ::-webkit-scrollbar-thumb {
-  background: #27272a;
+  background: rgba(251, 191, 36, 0.15);
   border-radius: 10px;
+  transition: background 0.2s;
 }
-::-webkit-scrollbar-thumb:hover {
-  background: #3f3f46;
-}
+::-webkit-scrollbar-thumb:hover { background: rgba(251, 191, 36, 0.35); }
 
-/* Animations */
-@keyframes fadeIn {
-  from { opacity: 0; transform: translateY(10px); }
-  to { opacity: 1; transform: translateY(0); }
+/* ── Motion (Anthropic — staggered reveals > scattered micro-interactions) */
+@keyframes fadeSlideUp {
+  from { opacity: 0; transform: translateY(14px); }
+  to   { opacity: 1; transform: translateY(0); }
 }
-
-.animate-fade-in {
-  animation: fadeIn 0.5s ease-out forwards;
+@keyframes fadeSlideIn {
+  from { opacity: 0; transform: translateX(-8px); }
+  to   { opacity: 1; transform: translateX(0); }
 }
-
 @keyframes pulse-slow {
   0%, 100% { opacity: 1; }
-  50% { opacity: 0.7; }
+  50%       { opacity: 0.6; }
 }
 
-.animate-pulse-slow {
-  animation: pulse-slow 3s infinite ease-in-out;
-}
+.animate-fade-in    { animation: fadeSlideUp 0.45s cubic-bezier(0.16, 1, 0.3, 1) forwards; }
+.animate-slide-in   { animation: fadeSlideIn 0.35s cubic-bezier(0.16, 1, 0.3, 1) forwards; }
+.animate-pulse-slow { animation: pulse-slow 3s infinite ease-in-out; }
 
-/* Auth Specific */
+/* Chat bubble staggered reveal */
+.msg-bubble { animation: fadeSlideUp 0.4s cubic-bezier(0.16, 1, 0.3, 1) both; }
+
+/* ── Premium Auth Form ──────────────────────────────────────────────────── */
 .auth-input {
-  @apply w-full bg-[#111] border border-slate-800 rounded-xl px-4 py-3 outline-none focus:border-yellow-500/50 transition-all text-sm font-medium;
+  @apply w-full bg-[#0d0d0d] border border-slate-800 rounded-xl px-4 py-3 outline-none text-sm font-medium;
+  transition: border-color 0.25s ease, box-shadow 0.25s ease;
+  caret-color: var(--prc-gold);
 }
+.auth-input:focus {
+  border-color: rgba(251, 191, 36, 0.4);
+  box-shadow: 0 0 0 3px rgba(251, 191, 36, 0.07), inset 0 0 12px rgba(251, 191, 36, 0.03);
+}
+.auth-input::placeholder { color: #3f3f46; }
 
 .auth-button {
-  @apply w-full bg-yellow-500 hover:bg-yellow-400 text-black font-bold py-3.5 rounded-xl transition-all active:scale-95 shadow-lg shadow-yellow-900/20 disabled:opacity-50;
+  @apply w-full font-bold py-3.5 rounded-xl disabled:opacity-50;
+  background: linear-gradient(135deg, #f59e0b 0%, #d97706 100%);
+  color: #000;
+  transition: filter 0.2s ease, transform 0.15s ease, box-shadow 0.2s ease;
+  box-shadow: 0 4px 24px rgba(251, 191, 36, 0.2);
 }
+.auth-button:hover:not(:disabled) {
+  filter: brightness(1.12);
+  box-shadow: 0 6px 30px rgba(251, 191, 36, 0.35);
+}
+.auth-button:active:not(:disabled) { transform: scale(0.97); }

@@ -61,8 +61,8 @@ class PRCSimulatedAnnealing:
         return new_params
 
     def optimize(self, initial_temp=100.0, cooling_rate=0.99, max_iterations=2000):
-        print("🔥 Initializing Simulated Annealing Core Matching Optimizer...")
-        print(f"🌡️ Initial Temperature: {initial_temp} | Cooling Rate: {cooling_rate}\n")
+        print("[OK] Initializing Simulated Annealing Core Matching Optimizer...")
+        print(f"[STATUS] Initial Temperature: {initial_temp} | Cooling Rate: {cooling_rate}\n")
         
         # Initial terrible guess
         current_state = [0.2, 0.2, 1.5, 1.5]
@@ -99,10 +99,10 @@ class PRCSimulatedAnnealing:
             temperature *= cooling_rate
             
             if iteration % 400 == 0:
-                print(f"⚙️ Iteration {iteration}: Temp = {temperature:.2f} | Error (MSE) = {best_energy:.4f}")
+                print(f"[PROGRESS] Iteration {iteration}: Temp = {temperature:.2f} | Error (MSE) = {best_energy:.4f}")
                 
-        print("\n✅ Optimization Complete (Absolute Minimum Found without local entrapment)")
-        print(f"🎯 Final Optimal Parameters: krw_max={best_state[0]:.2f}, kro_max={best_state[1]:.2f}, nw={best_state[2]:.2f}, no={best_state[3]:.2f}")
+        print("\n[SUCCESS] Optimization Complete (Absolute Minimum Found without local entrapment)")
+        print(f"[RESULT] Final Optimal Parameters: krw_max={best_state[0]:.2f}, kro_max={best_state[1]:.2f}, nw={best_state[2]:.2f}, no={best_state[3]:.2f}")
         return best_state, history_energy
 
 def run_academic_demo():
@@ -129,7 +129,7 @@ def run_academic_demo():
     best_params, history = optimizer.optimize()
     end_time = time.time()
     
-    print(f"\n⏱️ Total Computation Time: {end_time - start_time:.2f} seconds")
+    print(f"\n[TIME] Total Computation Time: {end_time - start_time:.2f} seconds")
     
     # 3. Create the Visualization (Crucial for the "Demonstration Video" Requirement)
     krw_fit, kro_fit = optimizer._brooks_corey(best_params)
@@ -156,7 +156,7 @@ def run_academic_demo():
     ax2.grid(True, alpha=0.2)
     
     plt.tight_layout()
-    print("📊 Spawning Interactive Matplotlib Visualizer...")
+    print("[PLOT] Spawning Interactive Matplotlib Visualizer...")
     plt.show()
 
 if __name__ == "__main__":
