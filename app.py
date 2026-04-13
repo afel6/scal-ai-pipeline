@@ -316,62 +316,91 @@ class KnowledgeBase:
     def ingest_chunks_with_embeddings(chunks):
         """
         Insert (source, chunk) pairs into `kb`, then embed and store in `kb_vectors`.
-        Skips chunks that already have an embedding.
+        Works with both PostgreSQL (via DATABASE_URL) and SQLite fallback.
         """
-        conn = sqlite3.connect(DB_PATH)
-        c = conn.cursor()
-        for source, chunk in chunks:
-            c.execute("INSERT INTO kb (source, chunk) VALUES (?, ?)", (source, chunk))
-            chunk_id = c.lastrowid
-            vec = KnowledgeBase._embed(chunk)
-            if vec is not None:
-                c.execute(
-                    "INSERT INTO kb_vectors (chunk_id, embedding) VALUES (?, ?)",
-                    (chunk_id, vec.tobytes())
-                )
-        conn.commit()
-        conn.close()
+        if _PG_AVAILABLE:
+            import psycopg2
+            conn = psycopg2.connect(DATABASE_URL)
+            cur = conn.cursor()
+            for source, chunk in chunks:
+                cur.execute("INSERT INTO kb (source, chunk) VALUES (%s, %s) RETURNING id", (source, chunk))
+                chunk_id = cur.fetchone()[0]
+                vec = KnowledgeBase._embed(chunk)
+                if vec is not None:
+                    cur.execute(
+                        "INSERT INTO kb_vectors (chunk_id, embedding) VALUES (%s, %s) ON CONFLICT (chunk_id) DO NOTHING",
+                        (chunk_id, vec.tobytes())
+                    )
+            conn.commit()
+            cur.close()
+            conn.close()
+        else:
+            import sqlite3 as _sqlite3
+            conn = _sqlite3.connect(DB_PATH)
+            c = conn.cursor()
+            for source, chunk in chunks:
+                c.execute("INSERT INTO kb (source, chunk) VALUES (?, ?)", (source, chunk))
+                chunk_id = c.lastrowid
+                vec = KnowledgeBase._embed(chunk)
+                if vec is not None:
+                    c.execute(
+                        "INSERT INTO kb_vectors (chunk_id, embedding) VALUES (?, ?)",
+                        (chunk_id, vec.tobytes())
+                    )
+            conn.commit()
+            conn.close()
 
     @staticmethod
     def search(query, top_k=5):
-        """Vector cosine-similarity search with keyword fallback."""
+        """Vector cosine-similarity search with keyword fallback. Works for PostgreSQL + SQLite."""
         try:
-            conn = sqlite3.connect(DB_PATH)
-            c = conn.cursor()
+            if _PG_AVAILABLE:
+                import psycopg2
+                conn = psycopg2.connect(DATABASE_URL)
+                cur = conn.cursor()
+                _exec  = lambda q, p=(): cur.execute(q.replace('?','%s'), p) or cur
+                _fetch = lambda: cur.fetchall()
+                _close = lambda: (cur.close(), conn.close())
+            else:
+                import sqlite3 as _sqlite3
+                conn = _sqlite3.connect(DB_PATH)
+                cur  = conn.cursor()
+                _exec  = lambda q, p=(): cur.execute(q, p) or cur
+                _fetch = lambda: cur.fetchall()
+                _close = lambda: conn.close()
 
             # ── Try semantic search ──
-            vec_count = c.execute("SELECT COUNT(*) FROM kb_vectors").fetchone()[0]
+            _exec("SELECT COUNT(*) FROM kb_vectors")
+            vec_count = _fetch()[0][0]
             if vec_count > 0:
                 q_vec = KnowledgeBase._embed_query(query)
                 if q_vec is not None:
-                    # Load all embedded chunks
-                    rows = c.execute(
-                        """SELECT kb.source, kb.chunk, kb_vectors.embedding
-                           FROM kb_vectors
-                           JOIN kb ON kb.id = kb_vectors.chunk_id"""
-                    ).fetchall()
-                    conn.close()
+                    _exec("""SELECT kb.source, kb.chunk, kb_vectors.embedding
+                               FROM kb_vectors
+                               JOIN kb ON kb.id = kb_vectors.chunk_id""")
+                    rows = _fetch()
+                    _close()
                     if rows:
-                        sources  = [r[0] for r in rows]
-                        texts    = [r[1] for r in rows]
-                        vecs     = np.stack([np.frombuffer(r[2], dtype=np.float32) for r in rows])
-                        # Cosine similarity
-                        q_norm   = q_vec / (np.linalg.norm(q_vec) + 1e-9)
-                        v_norms  = vecs / (np.linalg.norm(vecs, axis=1, keepdims=True) + 1e-9)
-                        scores   = v_norms @ q_norm
-                        top_idx  = np.argsort(scores)[::-1][:top_k]
-                        parts    = [f"[From: {sources[i]}]\n{texts[i]}" for i in top_idx if scores[i] > 0.3]
+                        sources = [r[0] for r in rows]
+                        texts   = [r[1] for r in rows]
+                        raw_vecs = [r[2] for r in rows]
+                        # psycopg2 returns memoryview for BYTEA; sqlite3 returns bytes
+                        vecs = np.stack([np.frombuffer(bytes(v) if isinstance(v, memoryview) else v, dtype=np.float32) for v in raw_vecs])
+                        q_norm  = q_vec / (np.linalg.norm(q_vec) + 1e-9)
+                        v_norms = vecs / (np.linalg.norm(vecs, axis=1, keepdims=True) + 1e-9)
+                        scores  = v_norms @ q_norm
+                        top_idx = np.argsort(scores)[::-1][:top_k]
+                        parts   = [f"[From: {sources[i]}]\n{texts[i]}" for i in top_idx if scores[i] > 0.3]
                         return "\n\n".join(parts)
 
             # ── Keyword fallback ──
-            conn = sqlite3.connect(DB_PATH)
-            c = conn.cursor()
             keywords = [w.lower() for w in re.split(r'\W+', query) if len(w) > 3]
             if not keywords:
-                conn.close()
+                _close()
                 return ""
-            results = c.execute("SELECT source, chunk FROM kb").fetchall()
-            conn.close()
+            _exec("SELECT source, chunk FROM kb")
+            results = _fetch()
+            _close()
             scored = []
             for source, chunk in results:
                 cl = chunk.lower()
@@ -537,10 +566,8 @@ async def startup_event():
 
     for filename in os.listdir(books_dir):
         filepath = os.path.join(books_dir, filename)
-        conn = sqlite3.connect(DB_PATH)
-        c = conn.cursor()
-        count = c.execute("SELECT COUNT(*) FROM kb WHERE source = ?", (filename,)).fetchone()[0]
-        conn.close()
+        count_result = db("SELECT COUNT(*) FROM kb WHERE source = ?", (filename,))
+        count = count_result[0][0] if count_result else 0
         if count == 0:
             print(f"[BOOK] Auto-Hydrating: {filename} into RAG + Vector DB...")
             try:
