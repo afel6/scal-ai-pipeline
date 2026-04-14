@@ -92,12 +92,24 @@ class PRCChatAssistant:
         if _USE_NEW_SDK:
             # New google.genai SDK
             self._client = genai_new.Client(api_key=key)
+            # Only use models confirmed to be available on free tier.
+            # gemini-3.1-* appears in models.list() but is NOT yet accessible — causes 404.
+            SAFE_MODELS = ['gemini-2.5-pro', 'gemini-2.5-flash', 'gemini-2.0-flash', 'gemini-1.5-flash']
             try:
                 avail = [m.name for m in self._client.models.list()]
-                for candidate in ['gemini-3.1-pro','gemini-3.1-flash','gemini-2.5-pro','gemini-2.5-flash','gemini-2.0-flash']:
+                for candidate in SAFE_MODELS:
                     if any(candidate in a for a in avail):
-                        self.model_name = candidate
-                        break
+                        # Validate the model actually works before committing
+                        try:
+                            self._client.models.generate_content(
+                                model=candidate,
+                                contents='ping',
+                                config=genai_types.GenerateContentConfig(max_output_tokens=1)
+                            )
+                            self.model_name = candidate
+                            break
+                        except Exception:
+                            continue  # try next candidate
             except: pass
         else:
             # Fallback: old google.generativeai SDK
@@ -155,11 +167,13 @@ class PRCChatAssistant:
                 )
                 return resp.text
             except Exception as e:
-                # Fallback to a known-safe model
-                for fb in ['gemini-2.0-flash', 'gemini-1.5-flash']:
+                # Fallback chain on 404 or quota errors
+                for fb in ['gemini-2.5-flash', 'gemini-2.0-flash', 'gemini-1.5-flash']:
+                    if fb == self.model_name: continue
                     try:
                         resp = self._client.models.generate_content(model=fb, contents=contents,
                             config=genai_types.GenerateContentConfig(temperature=0.1))
+                        self.model_name = fb  # persist working model
                         return resp.text
                     except: continue
                 raise e
@@ -734,14 +748,23 @@ async def stream_chat(
                     contents_stream.append(genai_types.Content(role=h['role'], parts=[genai_types.Part(text=h['parts'][0])]))
                 contents_stream.append(genai_types.Content(role='user', parts=[genai_types.Part(text=enriched)]))
                 loop = asyncio.get_event_loop()
-                stream_resp = await loop.run_in_executor(
-                    None,
-                    lambda: assistant._client.models.generate_content_stream(
-                        model=assistant.model_name,
-                        contents=contents_stream,
-                        config=genai_types.GenerateContentConfig(temperature=0.1)
-                    )
-                )
+                
+                for fb in [assistant.model_name, 'gemini-2.5-flash', 'gemini-2.0-flash', 'gemini-1.5-flash']:
+                    try:
+                        stream_resp = await loop.run_in_executor(
+                            None,
+                            lambda m=fb: assistant._client.models.generate_content_stream(
+                                model=m,
+                                contents=contents_stream,
+                                config=genai_types.GenerateContentConfig(temperature=0.1)
+                            )
+                        )
+                        assistant.model_name = fb  # persist working model
+                        break
+                    except Exception as try_e:
+                        if fb == 'gemini-1.5-flash':
+                            raise try_e
+                
                 response = stream_resp
             else:
                 # Old google.generativeai SDK
