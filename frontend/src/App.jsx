@@ -448,8 +448,15 @@ function App() {
                       a.download = dlName;
                       document.body.appendChild(a);
                       a.click();
-                      window.URL.revokeObjectURL(url);
-                      a.remove();
+                      
+                      // CRITICAL WORKAROUND: Edge/Chrome race condition!
+                      // If we revoke and remove synchronously, the browser download manager
+                      // can't read the 'download' attribute and falls back to saving the Blob UUID.
+                      setTimeout(() => {
+                        window.URL.revokeObjectURL(url);
+                        a.remove();
+                      }, 2000);
+                      
                     } catch (err) {
                       window.open(`${API_URL}${msg.download_url}`, "_blank");
                     } finally {
