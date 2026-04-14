@@ -5,10 +5,9 @@ import os, uuid, time, re, json as _json
 import numpy as np
 import pandas as pd
 from typing import Optional
-from docx import Document
-from bs4 import BeautifulSoup
 from hviel_doc_engine import HvielDocEngine
-import keepalive  # Fix 1: self-ping keep-alive (prevents Render cold starts)
+from skills_engine import SkillsEngine
+import keepalive
 
 # ── Fix 2: Google Gemini SDK Migration (google-generativeai → google.genai) ──
 # The old SDK (google-generativeai) is deprecated. The new SDK is google-genai.
@@ -56,6 +55,12 @@ CRITICAL BEHAVIORAL RULES:
 4. DO NOT use Markdown bold asterisks (**). The system renders plain text, so asterisks look extremely messy. Use capital letters for EMPHASIS if strictly necessary. 
 5. Take extreme ownership. Speak as an architectural lead who directly engineers and solves the problem inside the system. Format your logic cleanly.
 
+STRATEGIC THINKING & TOOL USE:
+- You have been upgraded with AUTONOMOUS ENGINEERING COGNITION.
+- If a query is complex, begin by stating your "ENGINEERING STRATEGY" in a clear block.
+- Use your tools (search_arxiv, execute_python_simulation, generate_mermaid_diagram) PROACTIVELY. If you aren't sure about a value, search Arxiv. If you need to verify a curve, execute a simulation.
+- Never guess. If you can simulate it, do it.
+
 IMPORTANT EXPORT ENGINE INSTRUCTIONS:
 - You can natively generate files for the user whenever they ask for a report, Excel, Word document, PDF, or PowerPoint.
 - STRICT RULE: ONLY GENERATE FILES IF EXPLICITLY REQUESTED. If the user merely says "data is missing", "samples are not there", "you forgot something", or asks a question, DO NOT output `__PRC_DOCX__` or any file token. Simply apologize, explain in plain text what went wrong, and wait for them to ask for a file. YOU MUST NEVER SPONTANEOUSLY REGENERATE DOCUMENTS IN NORMAL CHAT.
@@ -80,7 +85,58 @@ Always use the multi-curve format when showing more than one data series. You ca
 
 PETREL XML EXPORTER:
 ONLY use this if the user EXPLICITLY mentions Petrel, Eclipse, or KAPPA software by name. Do NOT use this for regular Excel or spreadsheet requests — those must use `__PRC_EXCEL__` instead.
-If the user asks you to export data to Petrel, Eclipse, or KAPPA, include the exact sequence __PETREL_EXPORT__ at the very start of your response, followed by structured, cleaned tabular data. The backend will automatically package it into a reservoir-compatible XML schematic file for them to download."""
+If the user asks you to export data to Petrel, Eclipse, or KAPPA, include the exact sequence __PETREL_EXPORT__ at the very start of your response, followed by structured, cleaned tabular data. The backend will automatically package it into a reservoir-compatible XML schematic file for them to download.
+
+AUTONOMOUS SKILLS & TOOLS:
+You have access to high-performance autonomous tools. Use them whenever you need external data, complex math, or technical diagrams.
+- search_arxiv: Use this for technical literature review and finding petroleum research papers.
+- execute_python_simulation: Use this for complex petrophysical modeling (Brooks-Corey, Archie, etc.).
+- generate_mermaid_diagram: Use this to visualize engineering workflows or decision trees.
+"""
+
+# ── TOOL DEFINITIONS (Gemini JSON Schema) ──
+_HVIEL_TOOLS = [
+    {
+        "function_declarations": [
+            {
+                "name": "search_arxiv",
+                "description": "Search arXiv for academic papers. Use this for literature reviews or technical research.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "query": {"type": "string", "description": "The search query (e.g., 'Relative Permeability Carbonates')"},
+                        "max_results": {"type": "integer", "description": "Number of results to return (max 10)"}
+                    },
+                    "required": ["query"]
+                }
+            },
+            {
+                "name": "execute_python_simulation",
+                "description": "Executes a Python-based petrophysical simulation. Returns data and parameters.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "model": {"type": "string", "description": "Model type: 'brooks_corey' or 'archie'"},
+                        "params": {"type": "object", "description": "Parameters for the model (e.g., sw_start, entry_pressure, swr, etc.)"}
+                    },
+                    "required": ["model", "params"]
+                }
+            },
+            {
+                "name": "generate_mermaid_diagram",
+                "description": "Generates a Mermaid.js diagram code for complex workflows.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "type": {"type": "string", "description": "Diagram type: 'flowchart', 'sequence', 'graph'"},
+                        "content": {"type": "string", "description": "The mermaid code content (e.g., 'graph TD; A-->B;')"}
+                    },
+                    "required": ["type", "content"]
+                }
+            }
+        ]
+    }
+]
 
 # ── HVIEL BRAIN (Fix 2: new google.genai SDK with old-SDK fallback) ──
 class PRCChatAssistant:
@@ -126,6 +182,22 @@ class PRCChatAssistant:
                 generation_config={'temperature': 0.1}
             )
 
+    def _execute_tool(self, call):
+        name = call.name
+        args = call.args
+        if name == "search_arxiv":
+            res = SkillsEngine.run_skill("research", "arxiv", "search_arxiv.py", [args.get("query"), "--max", str(args.get("max_results", 5))])
+            return res.get("stdout") or res.get("error")
+        elif name == "execute_python_simulation":
+            model = args.get("model")
+            p = args.get("params", {})
+            # We can now run the specialized petroleum skill script
+            res = SkillsEngine.run_skill("petroleum", "scalskills", "petrophysics.py", [model, json.dumps(p)])
+            return res.get("stdout") or res.get("error")
+        elif name == "generate_mermaid_diagram":
+            return f"__MERMAID_START__\n{args.get('content')}\n__MERMAID_END__"
+        return f"Unknown tool: {name}"
+
     def chat(self, history, msg, kb_context="", f_parts=[]):
         enriched = SYSTEM_PROMPT
         if kb_context:
@@ -160,11 +232,40 @@ class PRCChatAssistant:
                     user_parts.append(genai_types.Part(inline_data=genai_types.Blob(mime_type=mime, data=data)))
             contents.append(genai_types.Content(role='user', parts=user_parts))
             try:
+                # First attempt with tool support
                 resp = self._client.models.generate_content(
                     model=self.model_name,
                     contents=contents,
-                    config=genai_types.GenerateContentConfig(temperature=0.1)
+                    config=genai_types.GenerateContentConfig(
+                        temperature=0.1,
+                        tools=_HVIEL_TOOLS
+                    )
                 )
+                
+                # Check for tool/function calls
+                if resp.candidates and resp.candidates[0].content.parts:
+                    for part in resp.candidates[0].content.parts:
+                        if part.function_call:
+                            tool_result = self._execute_tool(part.function_call)
+                            # Prepare response to the tool call
+                            contents.append(resp.candidates[0].content)
+                            contents.append(genai_types.Content(
+                                role='user',
+                                parts=[genai_types.Part(
+                                    function_response=genai_types.FunctionResponse(
+                                        name=part.function_call.name,
+                                        response={"result": tool_result}
+                                    )
+                                )]
+                            ))
+                            # Get final response after tool execution
+                            final_resp = self._client.models.generate_content(
+                                model=self.model_name,
+                                contents=contents,
+                                config=genai_types.GenerateContentConfig(temperature=0.1)
+                            )
+                            return final_resp.text
+
                 return resp.text
             except Exception as e:
                 # Fallback chain on 404 or quota errors
@@ -742,13 +843,18 @@ async def stream_chat(
             # Stream tokens — support both SDKs
             full_resp = ""
             if _USE_NEW_SDK:
-                # New google.genai SDK — async streaming
+                # New google.genai SDK — tool support in stream is complex,
+                # so we use the non-stream chat if tools are detected or needed.
+                # However, for now, we enable tools in the generation config.
                 import asyncio
                 contents_stream = []
                 for h in valid_history:
                     contents_stream.append(genai_types.Content(role=h['role'], parts=[genai_types.Part(text=h['parts'][0])]))
                 contents_stream.append(genai_types.Content(role='user', parts=[genai_types.Part(text=enriched)]))
                 loop = asyncio.get_event_loop()
+                
+                # Check for tool use by doing a quick non-stream check or just allowing it
+                # For the stream, we just handle the text. If it calls a tool, we'll need to intercept.
                 
                 for fb in [assistant.model_name, 'gemini-2.5-flash', 'gemini-2.0-flash', 'gemini-1.5-flash']:
                     try:
@@ -757,7 +863,10 @@ async def stream_chat(
                             lambda m=fb: assistant._client.models.generate_content_stream(
                                 model=m,
                                 contents=contents_stream,
-                                config=genai_types.GenerateContentConfig(temperature=0.1)
+                                config=genai_types.GenerateContentConfig(
+                                    temperature=0.1,
+                                    tools=_HVIEL_TOOLS
+                                )
                             )
                         )
                         assistant.model_name = fb  # persist working model
@@ -775,6 +884,19 @@ async def stream_chat(
                 )
             async for chunk in response:
                 try:
+                    # In new SDK, we check for function calls in the chunk
+                    if _USE_NEW_SDK:
+                        if chunk.candidates and chunk.candidates[0].content.parts:
+                            for part in chunk.candidates[0].content.parts:
+                                if part.function_call:
+                                    # Handle tool call in stream
+                                    yield f"data: {_json.dumps({'type': 'token', 'text': f' [Executing {part.function_call.name}...] '})}\n\n"
+                                    tool_result = assistant._execute_tool(part.function_call)
+                                    # Since we're in a stream, we can't easily "wait and continue" the same stream
+                                    # with the tool result. We provide the result and finish.
+                                    yield f"data: {_json.dumps({'type': 'token', 'text': f'\n\nRESULT: {tool_result}\n\n'})}\n\n"
+                                    full_resp += f"\n\nTOOL RESULT ({part.function_call.name}): {tool_result}"
+                                    continue
                     token = chunk.text
                 except (ValueError, AttributeError):
                     continue  # skip finish/safety chunks with no content
