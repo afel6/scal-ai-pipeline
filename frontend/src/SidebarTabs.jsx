@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { MessageSquare, Trash2, BookOpen, Upload, CheckCircle, Loader, FileText } from 'lucide-react';
+import { MessageSquare, Trash2, BookOpen, Upload, CheckCircle, Loader, FileText, Zap } from 'lucide-react';
 import axios from 'axios';
 
 const API_URL = import.meta.env.VITE_API_URL || 'http://localhost:8000';
@@ -14,6 +14,7 @@ function timeAgo(ts) {
 export default function SidebarTabs({ sessionId, sessions, handleLoadSession, handleDeleteSession }) {
   const [tab, setTab] = useState('chats');
   const [books, setBooks] = useState([]);
+  const [skills, setSkills] = useState([]);
   const [uploading, setUploading] = useState(false);
   const [uploadMsg, setUploadMsg] = useState('');
   const [bookPassword, setBookPassword] = useState('');
@@ -25,7 +26,21 @@ export default function SidebarTabs({ sessionId, sessions, handleLoadSession, ha
     } catch {}
   };
 
-  useEffect(() => { if (tab === 'library') loadBooks(); }, [tab]);
+  const loadSkills = async () => {
+    try {
+      const { data } = await axios.get(`${API_URL}/api/skills/list`);
+      setSkills(data.skills || []);
+    } catch (err) {
+      console.error("Failed to load skills:", err);
+    }
+  };
+
+  useEffect(() => { 
+    if (tab === 'library') {
+      loadBooks();
+      loadSkills();
+    } 
+  }, [tab]);
 
   const handleBookUpload = async (e) => {
     const file = e.target.files[0];
@@ -137,6 +152,26 @@ export default function SidebarTabs({ sessionId, sessions, handleLoadSession, ha
           {uploadMsg && (
             <p className="text-[11px] text-yellow-300 bg-yellow-950/30 border border-yellow-800/30 rounded-lg px-3 py-2 leading-relaxed">{uploadMsg}</p>
           )}
+
+          {/* Autonomous Skills Section */}
+          <div className="space-y-2.5 pt-2">
+            <p className="text-[10px] text-yellow-500 uppercase tracking-widest font-bold flex items-center gap-1.5 px-1">
+              <Zap className="w-3 h-3" /> Autonomous Agent Skills
+            </p>
+            <div className="space-y-2">
+              {skills.map((s, i) => (
+                <div key={i} className="bg-yellow-950/5 border border-yellow-950/20 rounded-xl p-3 transition-all hover:bg-yellow-950/10 hover:border-yellow-900/40">
+                  <div className="flex items-center gap-2 mb-1.5">
+                    <span className="text-[9px] font-bold text-yellow-600 bg-yellow-950/30 px-1.5 py-0.5 rounded uppercase tracking-tighter">{s.category}</span>
+                    <span className="text-[11px] font-bold text-slate-200">{s.name}</span>
+                  </div>
+                  <p className="text-[10px] text-slate-500 leading-tight font-medium">{s.desc}</p>
+                </div>
+              ))}
+            </div>
+          </div>
+
+          <div className="h-px bg-slate-800/40 my-2" />
 
           {/* Loaded books */}
           {books.length > 0 ? (

@@ -2,6 +2,7 @@ import React, { useState, useRef, useEffect, useCallback, startTransition } from
 import { Send, Paperclip, Bot, User, Download, FileText, Database, Circle, PlusCircle, Trash2, MessageSquare, X, Wifi, WifiOff, Loader, LogOut, Menu, BookOpen, Upload, CheckCircle } from 'lucide-react';
 import axios from 'axios';
 import SidebarTabs from './SidebarTabs';
+import Mermaid from './Mermaid';
 
 const API_URL = import.meta.env.VITE_API_URL || 'http://localhost:8000';
 
@@ -23,12 +24,35 @@ function renderMessageContent(text) {
   if (lastIndex < text.length) {
     parts.push({ type: 'text', content: text.slice(lastIndex) });
   }
-  if (parts.length === 0) return <p className="whitespace-pre-wrap font-serif leading-[1.75]">{text}</p>;
-  return parts.map((part, i) =>
-    part.type === 'img'
-      ? <img key={i} src={part.src} alt={part.alt || 'PRC Chart'} className="w-full rounded-xl border border-yellow-900/30 my-3 shadow-lg" />
-      : part.content.trim() ? <p key={i} className="whitespace-pre-wrap font-serif leading-[1.75]">{part.content}</p> : null
-  );
+
+  // New logic: Split by Mermaid tokens
+  const finalParts = [];
+  parts.forEach(p => {
+    if (p.type === 'text') {
+      const merRegex = /__MERMAID_START__([\s\S]*?)__MERMAID_END__/g;
+      let lastMIndex = 0;
+      let mMatch;
+      while ((mMatch = merRegex.exec(p.content)) !== null) {
+        if (mMatch.index > lastMIndex) {
+          finalParts.push({ type: 'text', content: p.content.slice(lastMIndex, mMatch.index) });
+        }
+        finalParts.push({ type: 'mermaid', content: mMatch[1].trim() });
+        lastMIndex = mMatch.index + mMatch[0].length;
+      }
+      if (lastMIndex < p.content.length) {
+        finalParts.push({ type: 'text', content: p.content.slice(lastMIndex) });
+      }
+    } else {
+      finalParts.push(p);
+    }
+  });
+
+  if (finalParts.length === 0) return <p className="whitespace-pre-wrap font-serif leading-[1.75]">{text}</p>;
+  return finalParts.map((part, i) => {
+    if (part.type === 'img') return <img key={i} src={part.src} alt={part.alt || 'PRC Chart'} className="w-full rounded-xl border border-yellow-900/30 my-3 shadow-lg" />;
+    if (part.type === 'mermaid') return <Mermaid key={i} content={part.content} />;
+    return part.content.trim() ? <p key={i} className="whitespace-pre-wrap font-serif leading-[1.75]">{part.content}</p> : null;
+  });
 }
 
 const WELCOME_MSG = { role: 'model', text: 'Hello, I am Hviel — your dedicated PRC Senior AI Petrophysical Specialist.\n\nI have been trained on the PRC petroleum engineering library and am ready to assist with SCAL analysis, petrophysical interpretation, and professional report generation.\n\nPlease state your Well Name, paste lab data, or attach Word, Excel, or PDF files to begin.' };

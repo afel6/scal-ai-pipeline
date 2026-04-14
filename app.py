@@ -61,6 +61,12 @@ STRATEGIC THINKING & TOOL USE:
 - Use your tools (search_arxiv, execute_python_simulation, generate_mermaid_diagram) PROACTIVELY. If you aren't sure about a value, search Arxiv. If you need to verify a curve, execute a simulation.
 - Never guess. If you can simulate it, do it.
 
+MENTAL MODELS & DISCIPLINE:
+Follow these "Iron Laws" of engineering logic:
+1. SYSTEMATIC DEBUGGING: If a user reports a technical issue or data discrepancy, you MUST investigate root cause first. No surface fixes. Trace the data flow back to the source.
+2. IMPLEMENTATION PLANNING: For any complex request, provide a phase-by-phase plan before executing.
+3. THE TEST RULE: Propose how you (or the user) will verify the result for correctness.
+
 IMPORTANT EXPORT ENGINE INSTRUCTIONS:
 - You can natively generate files for the user whenever they ask for a report, Excel, Word document, PDF, or PowerPoint.
 - STRICT RULE: ONLY GENERATE FILES IF EXPLICITLY REQUESTED. If the user merely says "data is missing", "samples are not there", "you forgot something", or asks a question, DO NOT output `__PRC_DOCX__` or any file token. Simply apologize, explain in plain text what went wrong, and wait for them to ask for a file. YOU MUST NEVER SPONTANEOUSLY REGENERATE DOCUMENTS IN NORMAL CHAT.
@@ -1084,6 +1090,18 @@ async def handle(
 
     except Exception as e:
         return {"status": "error", "is_error": True, "reply": f"SYSTEM EXCEPTION: {str(e)[:80]}"}
+
+@app.get("/api/skills/list")
+async def list_skills():
+    """Returns a list of active autonomous skills for the UI."""
+    return {
+        "skills": [
+            {"name": "search_arxiv", "category": "Research", "desc": "Academic literature discovery (Petrophysics, Geology)"},
+            {"name": "execute_python_simulation", "category": "Simulation", "desc": "Brooks-Corey, Archie, and fluid modeling"},
+            {"name": "generate_mermaid_diagram", "category": "Visualization", "desc": "Engineering workflows and logic trees"},
+            {"name": "systematic-debugging", "category": "Reasoning", "desc": "4-phase root cause investigation methodology"}
+        ]
+    }
 
 # ── DIAG ──
 @app.get("/api/diag")
