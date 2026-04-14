@@ -782,7 +782,8 @@ async def stream_chat(
                     
                     # HARD INTERCEPT: Prevent SSE JSON Leaks and Credit Burns
                     if "__PRC_" in full_resp and ("{" in full_resp or "[" in full_resp):
-                        yield f"data: {_json.dumps({'type': 'error', 'msg': 'File generation requested via fast-chat stream. Please type \"generate document\" to activate the Document Engine.'})}\n\n"
+                        err_msg = 'File generation requested via fast-chat stream. Please type "generate document" to activate the Document Engine.'
+                        yield f"data: {_json.dumps({'type': 'error', 'msg': err_msg})}\n\n"
                         break
                         
                     # BUG FIX: use json.dumps for correct escaping of all chars (\n, \t, ", \\, etc.)
@@ -981,8 +982,18 @@ def diag():
     except Exception as e:
         return {"error": str(e)}
 
-@app.get("/api/download/{filename}")
-async def dl(filename: str): return FileResponse(path=filename, filename=filename)
+@app.get("/api/download/{filename:path}")
+async def dl(filename: str):
+    import os
+    basename = os.path.basename(filename).strip()
+    # Prevent directory traversal and restrict to safe extensions
+    safe_exts = {".docx", ".xlsx", ".pptx", ".pdf", ".xml", ".csv"}
+    _, ext = os.path.splitext(basename)
+    if ext.lower() not in safe_exts:
+        return {"error": "Invalid file type requested."}
+    
+    # Strip path decorators like .\ or ./ to satisfy Chromium strict header parsing
+    return FileResponse(path=basename, filename=basename)
 
 @app.get("/")
 def root(): return {"v": "PRC-HUB-VER-11-SEMANTIC-RAG-STREAMING", "model": assistant.model_name}
