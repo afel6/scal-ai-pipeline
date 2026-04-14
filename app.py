@@ -888,7 +888,16 @@ async def stream_chat(
                 response = await chat_session.send_message_async(
                     enriched, stream=True, request_options={'timeout': 60.0}
                 )
-            async for chunk in response:
+
+            async def iterate_response(resp):
+                if _USE_NEW_SDK:
+                    for c in resp:
+                        yield c
+                else:
+                    async for c in resp:
+                        yield c
+
+            async for chunk in iterate_response(response):
                 try:
                     # In new SDK, we check for function calls in the chunk
                     if _USE_NEW_SDK:
