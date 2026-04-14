@@ -198,7 +198,7 @@ class PRCChatAssistant:
             model = args.get("model")
             p = args.get("params", {})
             # We can now run the specialized petroleum skill script
-            res = SkillsEngine.run_skill("petroleum", "scalskills", "petrophysics.py", [model, json.dumps(p)])
+            res = SkillsEngine.run_skill("petroleum", "scalskills", "petrophysics.py", [model, _json.dumps(dict(p) if p else {})])
             return res.get("stdout") or res.get("error")
         elif name == "generate_mermaid_diagram":
             return f"__MERMAID_START__\n{args.get('content')}\n__MERMAID_END__"
