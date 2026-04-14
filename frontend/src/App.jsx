@@ -431,7 +431,32 @@ function App() {
                   </button>
                 )}
                 {msg.download_url && (
-                  <button onClick={() => window.open(`${API_URL}${msg.download_url}`, "_blank")}
+                  <button onClick={async (e) => {
+                    const btn = e.currentTarget;
+                    const origText = btn.innerHTML;
+                    btn.innerHTML = 'DOWNLOADING...';
+                    btn.disabled = true;
+                    try {
+                      const ext = msg.doc_type === 'excel' ? 'xlsx' : msg.doc_type === 'pdf' ? 'pdf' : msg.doc_type === 'pptx' ? 'pptx' : 'docx';
+                      const dlName = `PRC_AI_Report_${Date.now()}.${ext}`;
+                      const res = await fetch(`${API_URL}${msg.download_url}`);
+                      const blob = await res.blob();
+                      const url = window.URL.createObjectURL(blob);
+                      const a = document.createElement('a');
+                      a.style.display = 'none';
+                      a.href = url;
+                      a.download = dlName;
+                      document.body.appendChild(a);
+                      a.click();
+                      window.URL.revokeObjectURL(url);
+                      a.remove();
+                    } catch (err) {
+                      window.open(`${API_URL}${msg.download_url}`, "_blank");
+                    } finally {
+                      btn.innerHTML = origText;
+                      btn.disabled = false;
+                    }
+                  }}
                     className="mt-4 w-full bg-yellow-600/20 hover:bg-yellow-600/40 border border-yellow-500/50 text-yellow-300 font-bold tracking-widest uppercase px-4 py-3 rounded-xl flex items-center justify-center gap-2 text-xs transition-all active:scale-95">
                     <Download className="w-4 h-4" /> Download {msg.doc_type === 'pptx' ? 'PowerPoint Presentation' : msg.doc_type === 'pdf' ? 'PDF Evaluation' : msg.doc_type === 'excel' ? 'Excel Spreadsheet' : 'Word Document'}
                   </button>
