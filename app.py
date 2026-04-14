@@ -900,7 +900,8 @@ async def stream_chat(
                                     tool_result = assistant._execute_tool(part.function_call)
                                     # Since we're in a stream, we can't easily "wait and continue" the same stream
                                     # with the tool result. We provide the result and finish.
-                                    yield f"data: {_json.dumps({'type': 'token', 'text': f'\n\nRESULT: {tool_result}\n\n'})}\n\n"
+                                    res_text = f'\n\nRESULT: {tool_result}\n\n'
+                                    yield f"data: {_json.dumps({'type': 'token', 'text': res_text})}\n\n"
                                     full_resp += f"\n\nTOOL RESULT ({part.function_call.name}): {tool_result}"
                                     continue
                     token = chunk.text
