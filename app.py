@@ -619,7 +619,8 @@ def del_session(sid: str):
 def get_session(sid: str):
     try:
         rows = db("SELECT role, text, url, ts FROM m WHERE sid = ? ORDER BY id", (sid,))
-        return {"status": "ok", "messages": [{"role": r[0], "text": r[1], "url": r[2], "ts": r[3]} for r in rows]}
+        # Map DB 'url' column to frontend 'download_url' key for persistence consistency
+        return {"status": "ok", "messages": [{"role": r, "text": t, "download_url": u, "ts": ts} for r, t, u, ts in rows]}
     except Exception as e: return {"status": "error"}
 
 # ── ROUTE: KNOWLEDGE BASE STATUS ──
@@ -987,18 +988,27 @@ async def dl(filename: str):
     import os
     basename = os.path.basename(filename).strip()
     # Prevent directory traversal and restrict to safe extensions
-    safe_exts = {".docx", ".xlsx", ".pptx", ".pdf", ".xml", ".csv"}
+    safe_exts = {".docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                 ".xlsx": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                 ".pptx": "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+                 ".pdf": "application/pdf",
+                 ".xml": "application/xml",
+                 ".csv": "text/csv"}
     _, ext = os.path.splitext(basename)
-    if ext.lower() not in safe_exts:
+    ext_lower = ext.lower()
+    if ext_lower not in safe_exts:
         return {"error": "Invalid file type requested."}
     
-    # Strip path decorators like .\ or ./ to satisfy Chromium strict header parsing
+    # Return directly with absolute control over headers to force Chromium to respect filename
     return FileResponse(
         path=basename, 
+        media_type=safe_exts[ext_lower],
         filename=basename,
         headers={
+            "Content-Disposition": f'attachment; filename="{basename}"',
             "Access-Control-Allow-Origin": "*",
-            "Access-Control-Expose-Headers": "Content-Disposition"
+            "Access-Control-Expose-Headers": "Content-Disposition",
+            "Cache-Control": "no-cache"
         }
     )
 
