@@ -993,7 +993,14 @@ async def dl(filename: str):
         return {"error": "Invalid file type requested."}
     
     # Strip path decorators like .\ or ./ to satisfy Chromium strict header parsing
-    return FileResponse(path=basename, filename=basename)
+    return FileResponse(
+        path=basename, 
+        filename=basename,
+        headers={
+            "Access-Control-Allow-Origin": "*",
+            "Access-Control-Expose-Headers": "Content-Disposition"
+        }
+    )
 
 @app.get("/")
 def root(): return {"v": "PRC-HUB-VER-11-SEMANTIC-RAG-STREAMING", "model": assistant.model_name}
