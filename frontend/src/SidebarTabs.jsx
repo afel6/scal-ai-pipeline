@@ -47,7 +47,7 @@ export default function SidebarTabs({ sessionId, sessions, handleLoadSession, ha
     if (!file) return;
 
     // Added password check
-    if (bookPassword !== '0608') {
+    if (bookPassword !== '1509') {
       alert("Invalid Admin Password.");
       e.target.value = ''; // Clear the file input
       return;

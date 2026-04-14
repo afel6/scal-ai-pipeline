@@ -741,7 +741,7 @@ def kb_status():
 # ── ROUTE: KNOWLEDGE BASE INGESTION ──
 @app.post("/api/kb/ingest")
 async def kb_ingest(file: UploadFile = File(...), password: str = Form(...)):
-    if password != "0608":
+    if password != "1509":
         return {"status": "error", "message": "Unauthorized"}
     try:
         content = await file.read()
