@@ -10,15 +10,18 @@ from skills_engine import SkillsEngine
 import keepalive
 
 # ── Fix 2: Google Gemini SDK Migration (google-generativeai → google.genai) ──
-# The old SDK (google-generativeai) is deprecated. The new SDK is google-genai.
-# We use a compatibility shim so the rest of the code requires minimal changes.
 try:
     from google import genai as genai_new
     from google.genai import types as genai_types
     _USE_NEW_SDK = True
 except ImportError:
-    import google.generativeai as genai  # fallback to old SDK
+    import google.generativeai as genai  # old SDK
     _USE_NEW_SDK = False
+
+# Ensure 'genai' name is always available for legacy fallbacks
+if _USE_NEW_SDK:
+    try: import google.generativeai as genai
+    except ImportError: genai = None
 
 # ── Fix 3: PostgreSQL + SQLite unified DB layer ──
 DATABASE_URL = os.getenv("DATABASE_URL", "").strip()
