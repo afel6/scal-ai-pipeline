@@ -998,6 +998,11 @@ async def stream_chat(
             import asyncio
             loop = asyncio.get_event_loop()
             if _USE_NEW_SDK:
+                contents_stream = []
+                for h in valid_history:
+                    contents_stream.append(genai_types.Content(role=h['role'], parts=[genai_types.Part(text=h['parts'][0])]))
+                contents_stream.append(genai_types.Content(role='user', parts=[genai_types.Part(text=enriched)]))
+
                 # --- PRC HA ROTATOR LOOP ---
                 max_retries = len(GEMINI_KEY_POOL)
                 for attempt in range(max_retries):
