@@ -995,6 +995,8 @@ async def stream_chat(
 
             # Stream tokens — support both SDKs
             full_resp = ""
+            import asyncio
+            loop = asyncio.get_event_loop()
             if _USE_NEW_SDK:
                 # --- PRC HA ROTATOR LOOP ---
                 max_retries = len(GEMINI_KEY_POOL)
