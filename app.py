@@ -1149,11 +1149,16 @@ async def handle(
         history = [{"role": r, "text": t} for r, t, u in reversed(history_rows)]
 
         # --- HA ROTATOR RETRY LOOP ---
+        import asyncio
+        loop = asyncio.get_event_loop()
         max_retries = len(GEMINI_KEY_POOL)
         resp = "SYSTEM ERROR: All API nodes are currently exhausted."
         for attempt in range(max_retries):
             try:
-                resp = assistant.chat(history, message, kb_context=kb_context, f_parts=f_parts)
+                resp = await loop.run_in_executor(
+                    None,
+                    lambda req=(history, message, kb_context, f_parts): assistant.chat(*req)
+                )
                 break # Success!
             except Exception as e:
                 err_str = str(e).lower()
