@@ -6,7 +6,61 @@ import Mermaid from './Mermaid';
 
 const API_URL = import.meta.env.VITE_API_URL || 'http://localhost:8000';
 
-// Splits a message into text and embedded chart image segments
+function PetrophysicalTable({ content }) {
+  try {
+    const data = JSON.parse(content);
+    const headers = data.headers || Object.keys(data.rows[0] || {});
+    return (
+      <div className="my-6 overflow-hidden rounded-2xl border border-yellow-900/40 bg-[#0c0c10] shadow-2xl">
+        <div className="bg-gradient-to-r from-yellow-950/40 to-black px-4 py-3 border-b border-yellow-900/30 flex items-center justify-between">
+          <div className="flex items-center gap-2">
+            <Database className="w-4 h-4 text-yellow-500" />
+            <span className="text-[11px] font-black tracking-[0.2em] text-yellow-50/90 uppercase">V-Table Ingestion Preview</span>
+          </div>
+          <div className="text-[10px] text-slate-500 font-mono italic">
+            Total Samples: {data.rows.length}
+          </div>
+        </div>
+        <div className="overflow-x-auto">
+          <table className="w-full text-left border-collapse min-w-[600px]">
+            <thead>
+              <tr className="bg-yellow-950/10">
+                {headers.map((h, i) => (
+                  <th key={i} className="px-4 py-3 text-[10px] font-bold text-yellow-600 uppercase tracking-widest border-b border-yellow-900/20">
+                    {h.replace(/_/g, ' ')}
+                  </th>
+                ))}
+              </tr>
+            </thead>
+            <tbody className="divide-y divide-yellow-900/10">
+              {data.rows.slice(0, 10).map((row, i) => {
+                const values = Array.isArray(row) ? row : headers.map(h => row[h]);
+                return (
+                  <tr key={i} className="hover:bg-yellow-900/5 transition-colors group">
+                    {values.map((v, j) => (
+                      <td key={j} className={`px-4 py-3 text-xs font-serif ${v === null || v === 'NaN' || v === 'nan' ? 'text-slate-700 italic' : 'text-slate-300'}`}>
+                        {v === null || v === 'NaN' || v === 'nan' ? '—' : (typeof v === 'number' ? v.toFixed(3) : v)}
+                      </td>
+                    ))}
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+          {data.rows.length > 10 && (
+            <div className="p-3 bg-black/40 text-center border-t border-yellow-900/10">
+              <p className="text-[10px] text-slate-500 font-mono italic uppercase tracking-widest">+ {data.rows.length - 10} additional samples available in full export</p>
+            </div>
+          )}
+        </div>
+      </div>
+    );
+  } catch (err) {
+    return <div className="p-4 bg-red-950/20 border border-red-900/50 text-red-400 text-xs font-mono">Invalid Data Format: {err.message}</div>;
+  }
+}
+
+// Splits a message into text, embedded charts, mermaid diagrams, and audit logs
 function renderMessageContent(text) {
   if (!text) return null;
   // Match markdown images: ![alt](src) — supports data URIs and http URLs
@@ -25,32 +79,65 @@ function renderMessageContent(text) {
     parts.push({ type: 'text', content: text.slice(lastIndex) });
   }
 
-  // New logic: Split by Mermaid tokens
-  const finalParts = [];
+  // Chain of parsers: Mermaid -> Audit -> Data
+  const mermaidParts = [];
   parts.forEach(p => {
     if (p.type === 'text') {
       const merRegex = /__MERMAID_START__([\s\S]*?)__MERMAID_END__/g;
       let lastMIndex = 0;
       let mMatch;
       while ((mMatch = merRegex.exec(p.content)) !== null) {
-        if (mMatch.index > lastMIndex) {
-          finalParts.push({ type: 'text', content: p.content.slice(lastMIndex, mMatch.index) });
-        }
-        finalParts.push({ type: 'mermaid', content: mMatch[1].trim() });
+        if (mMatch.index > lastMIndex) mermaidParts.push({ type: 'text', content: p.content.slice(lastMIndex, mMatch.index) });
+        mermaidParts.push({ type: 'mermaid', content: mMatch[1].trim() });
         lastMIndex = mMatch.index + mMatch[0].length;
       }
-      if (lastMIndex < p.content.length) {
-        finalParts.push({ type: 'text', content: p.content.slice(lastMIndex) });
+      if (lastMIndex < p.content.length) mermaidParts.push({ type: 'text', content: p.content.slice(lastMIndex) });
+    } else mermaidParts.push(p);
+  });
+
+  const auditParts = [];
+  mermaidParts.forEach(p => {
+    if (p.type === 'text') {
+      const auditRegex = /__AUDIT_LOG_START__([\s\S]*?)__AUDIT_LOG_END__/g;
+      let lastAIndex = 0;
+      let aMatch;
+      while ((aMatch = auditRegex.exec(p.content)) !== null) {
+        if (aMatch.index > lastAIndex) auditParts.push({ type: 'text', content: p.content.slice(lastAIndex, aMatch.index) });
+        auditParts.push({ type: 'audit', content: aMatch[1].trim() });
+        lastAIndex = aMatch.index + aMatch[0].length;
       }
-    } else {
-      finalParts.push(p);
-    }
+      if (lastAIndex < p.content.length) auditParts.push({ type: 'text', content: p.content.slice(lastAIndex) });
+    } else auditParts.push(p);
+  });
+
+  const finalParts = [];
+  auditParts.forEach(p => {
+    if (p.type === 'text') {
+      const dataRegex = /__PRC_DATA_START__([\s\S]*?)__PRC_DATA_END__/g;
+      let lastDIndex = 0;
+      let dMatch;
+      while ((dMatch = dataRegex.exec(p.content)) !== null) {
+        if (dMatch.index > lastDIndex) finalParts.push({ type: 'text', content: p.content.slice(lastDIndex, dMatch.index) });
+        finalParts.push({ type: 'data', content: dMatch[1].trim() });
+        lastDIndex = dMatch.index + dMatch[0].length;
+      }
+      if (lastDIndex < p.content.length) finalParts.push({ type: 'text', content: p.content.slice(lastDIndex) });
+    } else finalParts.push(p);
   });
 
   if (finalParts.length === 0) return <p className="whitespace-pre-wrap font-serif leading-[1.75]">{text}</p>;
   return finalParts.map((part, i) => {
     if (part.type === 'img') return <img key={i} src={part.src} alt={part.alt || 'PRC Chart'} className="w-full rounded-xl border border-yellow-900/30 my-3 shadow-lg" />;
     if (part.type === 'mermaid') return <Mermaid key={i} content={part.content} />;
+    if (part.type === 'data') return <PetrophysicalTable key={i} content={part.content} />;
+    if (part.type === 'audit') return (
+      <div key={i} className="my-4 p-4 bg-yellow-950/20 border-l-4 border-yellow-600 rounded-r-xl shadow-inner font-mono text-[13px] text-yellow-100/90">
+        <div className="flex items-center gap-2 mb-2 text-yellow-500 font-black tracking-widest text-[10px] uppercase">
+          <Database className="w-3 h-3" /> Engineering Audit Ledger
+        </div>
+        <div className="whitespace-pre-wrap leading-relaxed opacity-80">{part.content}</div>
+      </div>
+    );
     return part.content.trim() ? <p key={i} className="whitespace-pre-wrap font-serif leading-[1.75]">{part.content}</p> : null;
   });
 }

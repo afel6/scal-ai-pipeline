@@ -1,0 +1,63 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: prc-postgres
+    restart: always
+    environment:
+      POSTGRES_USER: ${DB_POSTGRES_USER:-prc_user}
+      POSTGRES_PASSWORD: ${DB_POSTGRES_PASSWORD:-prc_password_1509}
+      POSTGRES_DB: ${DB_POSTGRES_DATABASE:-prc_hub}
+    volumes:
+      - prc_db_data:/var/lib/postgresql/data
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U prc_user -d prc_hub"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - prc-net
+
+  n8n:
+    image: docker.n8n.io/n8nio/n8n:latest
+    container_name: prc-n8n
+    restart: always
+    ports:
+      - "5678:5678"
+    environment:
+      - DB_TYPE=postgresdb
+      - DB_POSTGRESDB_HOST=postgres
+      - DB_POSTGRESDB_PORT=5432
+      - DB_POSTGRESDB_DATABASE=${DB_POSTGRES_DATABASE:-prc_hub}
+      - DB_POSTGRESDB_USER=${DB_POSTGRES_USER:-prc_user}
+      - DB_POSTGRESDB_PASSWORD=${DB_POSTGRES_PASSWORD:-prc_password_1509}
+      - N8N_ENCRYPTION_KEY=${N8N_ENCRYPTION_KEY:-prc_secret_key_1509}
+      - N8N_HOST=localhost
+      - N8N_PORT=5678
+      - N8N_PROTOCOL=http
+      - WEBHOOK_URL=http://localhost:5678/
+    volumes:
+      - n8n_data:/home/node/.n8n
+    depends_on:
+      - postgres
+    networks:
+      - prc-net
+
+  tunnel:
+    image: cloudflare/cloudflared:latest
+    container_name: prc-tunnel
+    command: tunnel --url http://n8n:5678
+    restart: always
+    depends_on:
+      - n8n
+    networks:
+      - prc-net
+
+networks:
+  prc-net:
+    driver: bridge
+
+volumes:
+  prc_db_data:
+  n8n_data:

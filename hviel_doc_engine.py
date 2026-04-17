@@ -66,6 +66,14 @@ LIGHT_GRAY_RGB = RGBColor(0x99, 0x99, 0x99)
 RED_RGB        = RGBColor(0xC0, 0x39, 0x2B)
 
 
+import io
+import matplotlib
+matplotlib.use('Agg')
+import matplotlib.pyplot as plt
+
+# PRC brand colour palette for multi-curve plots
+_PRC_COLORS = ['#1e3a8a', '#E31E24', '#F59E0B', '#16a34a', '#7c3aed', '#0891b2']
+
 # ═══════════════════════════════════════════════════════
 # MAIN ENGINE CLASS
 # ═══════════════════════════════════════════════════════
@@ -80,6 +88,44 @@ class HvielDocEngine:
         self.api_key    = api_key
         self.output_dir = output_dir
         os.makedirs(output_dir, exist_ok=True)
+
+    def _draw_chart_for_doc(self, data: dict) -> io.BytesIO | None:
+        """Creates a chart image buffer suitable for injection into DOC/PPT/PDF."""
+        try:
+            fig, ax = plt.subplots(figsize=(7, 4.5), dpi=150)
+            plt.style.use('bmh')
+            # Use professional white background for reports
+            fig.patch.set_facecolor('white')
+            ax.set_facecolor('#fdfdfd')
+            
+            title  = data.get('title', 'PRC Analysis')
+            xlabel = data.get('x_label', 'X')
+            ylabel = data.get('y_label', 'Y')
+
+            curves = data.get('curves')
+            if curves and isinstance(curves, list):
+                for i, curve in enumerate(curves):
+                    ax.plot(curve.get('x', []), curve.get('y', []),
+                            marker='o', linestyle='-', linewidth=2.5, markersize=7,
+                            color=_PRC_COLORS[i % len(_PRC_COLORS)], label=curve.get('label', f'Series {i+1}'))
+                ax.legend(fontsize=9, framealpha=0.85)
+            else:
+                ax.plot(data.get('x', []), data.get('y', []),
+                        marker='o', linestyle='-', color='#1e3a8a', linewidth=2.5, markersize=8)
+
+            ax.set_title(title, fontsize=15, fontweight='bold', color='#1B3A5C')
+            ax.set_xlabel(xlabel, fontsize=11, fontweight='bold')
+            ax.set_ylabel(ylabel, fontsize=11, fontweight='bold')
+            ax.grid(True, linestyle='--', alpha=0.4)
+            
+            buf = io.BytesIO()
+            fig.savefig(buf, format='png', bbox_inches='tight')
+            plt.close(fig)
+            buf.seek(0)
+            return buf
+        except Exception as e:
+            print(f"[HvielDocEngine] Chart Error: {e}")
+            return None
 
     # ─────────────────────────────────────────
     # PUBLIC: Build from pre-fetched JSON content
@@ -416,6 +462,30 @@ class HvielDocEngine:
 
             for para in sec.get('paragraphs', []):
                 para_str = str(para)
+                
+                # Plot detection — triggers chart injection
+                if '__PRC_PLOT__' in para_str:
+                    try:
+                        # Extract the JSON payload for the plot
+                        plot_json_str = para_str.split('__PRC_PLOT__', 1)[1].strip()
+                        # Clean potential markdown fences
+                        plot_json_str = plot_json_str.replace('```json', '').replace('```', '').strip()
+                        chart_data = json.loads(plot_json_str)
+                        
+                        buf = self._draw_chart_for_doc(chart_data)
+                        if buf:
+                            p = doc.add_paragraph()
+                            p.alignment = WD_ALIGN_PARAGRAPH.CENTER
+                            p.add_run().add_picture(buf, width=Inches(6.0))
+                            # Add a professional caption
+                            cp = doc.add_paragraph()
+                            cp.alignment = WD_ALIGN_PARAGRAPH.CENTER
+                            cr = cp.add_run(f"Figure: {chart_data.get('title', 'Petrophysical Analysis')}")
+                            cr.italic = True; cr.font.size = Pt(9); cr.font.color.rgb = GRAY_RGB
+                            continue # Skip adding the raw JSON as a paragraph
+                    except Exception as pe:
+                        print(f"[HvielDocEngine] Skip plot injection: {pe}")
+
                 if '|' in para_str and '---' in para_str and '\n' in para_str.strip():
                     # Hallucination detected! Claude put a markdown table in a paragraph.
                     # Let's dynamically rescue it.
@@ -437,7 +507,7 @@ class HvielDocEngine:
                             continue  # Skip adding this as a paragraph!
                 
                 p = doc.add_paragraph()
-                p.paragraph_format.space_after = Pt(12)  # Increased from 6 for better breathing room
+                p.paragraph_format.space_after = Pt(12)
                 p.paragraph_format.line_spacing = 1.15
                 r = p.add_run(para_str)
                 r.font.name = 'Arial'; r.font.size = Pt(10.5); r.font.color.rgb = GRAY_RGB

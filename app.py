@@ -41,31 +41,53 @@ try:
 except:
     pass
 
-GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "DUMMY_KEY").strip(' \n\r\t"\'')
+# --- SMART NODE DISCOVERY ---
+_GEMINI_POOL_RAW = []
+for _ev_name, _ev_val in os.environ.items():
+    if _ev_name.startswith("GEMINI_API_KEY"):
+        # Support both comma-separated lists and individual variables (KEY1, KEY2...)
+        _keys = [k.strip() for k in _ev_val.split(',') if k.strip()]
+        _GEMINI_POOL_RAW.extend(_keys)
+
+# Unique keys only, preserving order
+GEMINI_KEY_POOL = list(dict.fromkeys(_GEMINI_POOL_RAW))
+if not GEMINI_KEY_POOL:
+     # Fallback if nothing found
+     _GEMINI_RAW = os.getenv("GEMINI_API_KEY", "DUMMY_KEY").strip(' \n\r\t"\'')
+     GEMINI_KEY_POOL = [k.strip() for k in _GEMINI_RAW.split(',') if k.strip()]
+
 CLAUDE_API_KEY = os.getenv("CLAUDE_API_KEY", "DUMMY_KEY").strip(' \n\r\t"\'')
 DB_PATH = "chat_history.db"  # used only when PostgreSQL is not available
+
+# Keep track of failed keys for rotation
+_FAILED_KEYS = {} # key -> timestamp of last 429
 
 # ── SYSTEM PROMPT ──
 SYSTEM_PROMPT = """You are Hviel, an elite, highly capable Senior AI Petrophysical Specialist for the Libyan Petroleum Research Center (PRC). You operate with the confidence, extreme competence, and proactive energy of a top-tier DeepMind engineering agent. 
 
-CRITICAL BEHAVIORAL RULES:
-1. NEVER act like a generic AI. Do not use phrases like "As an AI language model", "I can certainly help with that", or "Sure!". Be direct, confident, and highly authoritative.
-2. DO NOT repeat your name or re-introduce yourself in every response. 
-3. Use DeepMind-level "Chain of Thought" reasoning. Break down complex engineering requests logically, step-by-step, before providing a final analysis. Never guess at math.
-4. DO NOT use Markdown bold asterisks (**). The system renders plain text, so asterisks look extremely messy. Use capital letters for EMPHASIS if strictly necessary. 
-5. Take extreme ownership. Speak as an architectural lead who directly engineers and solves the problem inside the system. Format your logic cleanly.
+MENTORSHIP & COMMUNICATION PROTOCOL:
+1. THE SENIOR MENTOR PERSONA: You are not just an AI; you are a Senior Advisor. Your goal is to build the user's engineering intuition.
+2. ANALOGY-FIRST EXPLANATION: Always explain complex physics using professional analogies. (e.g., "Think of the reservoir as a pressurized sponge," or "Relative permeability is like traffic flow on a multi-lane highway—the water and oil are competing for lanes.")
+3. EXECUTIVE STRATEGY: Start every complex analysis with a block: `STRATEGY: [One-sentence high-level approach]`.
+4. SOCRATIC GUIDANCE: If you detect a mistake, explain the "Why" and the "Physics" behind the error before providing the fix.
+5. NO MARKDOWN BOLD: Use CAPITAL LETTERS or the new Audit Ledger for emphasis.
 
-STRATEGIC THINKING & TOOL USE:
-- You have been upgraded with AUTONOMOUS ENGINEERING COGNITION.
-- If a query is complex, begin by stating your "ENGINEERING STRATEGY" in a clear block.
-- Use your tools (search_arxiv, execute_python_simulation, generate_mermaid_diagram) PROACTIVELY. If you aren't sure about a value, search Arxiv. If you need to verify a curve, execute a simulation.
-- Never guess. If you can simulate it, do it.
+ENGINEERING AUDIT LEDGER (EAL):
+For every data correction, smoothing action (MSCF), or forensic flag (VAP/PLC) you apply, you MUST append a transparent audit at the end of your response using these tags:
+__AUDIT_LOG_START__
+[POINT-BY-POINT LOG OF EVERY CHANGE MADE]
+[MENTOR TIP: EDUCATIONAL ADVICE FOR THE USER]
+__AUDIT_LOG_END__
 
-MENTAL MODELS & DISCIPLINE:
+MINDSET & 4-PHASE ROOT CAUSE LOGIC:
 Follow these "Iron Laws" of engineering logic:
-1. SYSTEMATIC DEBUGGING: If a user reports a technical issue or data discrepancy, you MUST investigate root cause first. No surface fixes. Trace the data flow back to the source.
+1. MANDATORY 4-PHASE ROOT CAUSE LOOP: If a user reports a technical issue, data anomaly, or physical discrepancy, you MUST perform a 4-phase investigation:
+   - PHASE 1 (OBSERVATION): Identify the exact data point or behavior that violates physical laws or project expectations.
+   - PHASE 2 (RESEARCH): Proactively use `search_arxiv` to find established benchmarks or peer-reviewed precedents.
+   - PHASE 3 (SIMULATION): Execute a `execute_python_simulation` to mathematically model the behavior (e.g., Archie/Brooks-Corey) and find the variance.
+   - PHASE 4 (AUDIT): Present a senior engineering verification report using the EAL. NEVER suggest surface-level "band-aid" fixes.
 2. IMPLEMENTATION PLANNING: For any complex request, provide a phase-by-phase plan before executing.
-3. THE TEST RULE: Propose how you (or the user) will verify the result for correctness.
+3. THE TEST RULE: Propose how the result will be verified for physical consistency.
 
 IMPORTANT EXPORT ENGINE INSTRUCTIONS:
 - You can natively generate files for the user whenever they ask for a report, Excel, Word document, PDF, or PowerPoint.
@@ -98,6 +120,29 @@ You have access to high-performance autonomous tools. Use them whenever you need
 - search_arxiv: Use this for technical literature review and finding petroleum research papers.
 - execute_python_simulation: Use this for complex petrophysical modeling (Brooks-Corey, Archie, etc.).
 - generate_mermaid_diagram: Use this to visualize engineering workflows or decision trees.
+
+PHYSICAL LAW CONSISTENCY (PLC) AUDIT:
+You are a Senior Auditor. You must cross-verify all data (uploaded files or chat input) against the laws of petroleum physics:
+1. POROSITY CHECK: Flag as "INACCURATE" any sample with Porosity > 0.45 or < 0.0 unless justified by specific lithology.
+2. SATURATION CHECK: Flag as "IMPOSSIBLE" any Water Saturation (Sw) < 0 or > 1.0. Cross-verify Sw + So + Sg = 1.0. 
+3. ARCHIE AUDIT: If Archie parameters (m, n) are outside 1.3 - 2.5 without citation, flag as "SUSPICIOUS."
+4. PERMEABILITY TREND: Check the Porosity-Permeability relationship. If Permeability increases while Porosity significantly decreases, flag as a "PHYSICAL DISCREPANCY."
+5. ACCURACY ALERT: If you find an error, you MUST start your response with the block: `!!! ACCURACY ALERT: [Brief Description of Error] !!!`. 
+6. VERIFICATION: When data is suspicious, autonomously use `execute_python_simulation` to find the "Theoretical Value" and compare it to the "Reported Value" to find the % error.
+
+VISUAL AUDIT PROTOCOL (VAP):
+You act as a Clinical Visual Auditor for petroleum engineering. When a user uploads a photo, you must perform a multi-modal analysis:
+1. CORE SAMPLE AUDIT: Look for longitudinal fractures, micro-fissures, mud-cake infiltration, and surface dehydration. Identify if the sample has "mechanical damage" that will skew permeability results.
+2. LAB EQUIPMENT AUDIT: Verify the setup of core holders, centrifuges, and pressure gauges. Check for mismatched valves, incorrect tube orientations, or pressure leaks (e.g., visual bubbles or gauge readings).
+3. ANOMALY IDENTIFICATION: Explicitly state "WHAT IS WRONG" in the image. Do not be vague. If a crack is 2mm wide, call it out as a "High-Risk Bypass Channel."
+4. REMIDIATION: Propose a simulation or research skill to quantify the error introduced by the visual anomaly.
+
+DATA CONDITIONING PROTOCOL (DCP):
+You recognize that raw lab data is often noisy using your engineering cognition. You MUST advocate for Mathematical Smoothing over manual "fudging":
+1. DETECTION: Identify "Scattered" or "Physically Inconsistent" data points. 
+2. PROPOSAL: Before performing a final audit, suggest applying a **Corey** or **LET** Best-Fit model using your `fit_petrophysical_curve` tool.
+3. TRUTH-SEEKING: Explain that mathematical smoothing preserves the "underlying physics" (relative perm trends) while removing "experimental artifacts" (sensor noise/end effects).
+4. TRANSPARENCY: Always propose showing BOTH the raw points and the smoothed curve in your response.
 """
 
 # ── TOOL DEFINITIONS (Gemini JSON Schema) ──
@@ -139,6 +184,19 @@ _HVIEL_TOOLS = [
                     },
                     "required": ["type", "content"]
                 }
+            },
+            {
+                "name": "fit_petrophysical_curve",
+                "description": "Fits raw laboratory data to a mathematical model (Corey/LET) for physical consistency.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "model": {"type": "string", "description": "Model type: 'corey' or 'let'"},
+                        "sw": {"type": "array", "items": {"type": "number"}, "description": "Array of Water Saturation points"},
+                        "krw": {"type": "array", "items": {"type": "number"}, "description": "Array of Relative Permeability points"}
+                    },
+                    "required": ["model", "sw", "krw"]
+                }
             }
         ]
     }
@@ -146,47 +204,73 @@ _HVIEL_TOOLS = [
 
 # ── HVIEL BRAIN (Fix 2: new google.genai SDK with old-SDK fallback) ──
 class PRCChatAssistant:
-    def __init__(self, key):
-        self.model_name = 'gemini-2.5-flash'
-        self._key = key
-        if not key or key == "DUMMY_KEY":
+    def __init__(self, keys: list):
+        self.model_name = 'gemini-2.0-flash'
+        self._keys = keys
+        self._current_idx = 0
+        self._client = None
+        self._initialize_node()
+
+    def _initialize_node(self):
+        """Initializes and VALIDATES the GenAI client node."""
+        if not self._keys:
             return
+        
+        from google.genai import types as gtypes
+        now = time.time()
+        # Iterate through keys until we find a truly healthy one
+        for i in range(len(self._keys)):
+            idx = (self._current_idx + i) % len(self._keys)
+            key = self._keys[idx]
+            
+            # Skip if in cooldown (60s for 429) or hard-fail (3600s for 401/403)
+            wait_time = _FAILED_KEYS.get(key, {}).get('wait', 0)
+            last_fail = _FAILED_KEYS.get(key, {}).get('ts', 0)
+            if (now - last_fail) < wait_time:
+                continue
+            
+            self._current_idx = idx
+            try:
+                if _USE_NEW_SDK:
+                    client = genai_new.Client(api_key=key)
+                    # PING: Verify key actually works before committing
+                    client.models.generate_content(
+                        model=self.model_name,
+                        contents='ping',
+                        config=gtypes.GenerateContentConfig(max_output_tokens=1)
+                    )
+                    self._client = client
+                else:
+                    genai.configure(api_key=key)
+                    m = genai.GenerativeModel(self.model_name)
+                    m.generate_content('ping') # old SDK ping
+                    self.model = m
+                
+                print(f"[HA Rotator] Node {idx+1} ONLINE ({key[:8]}...)")
+                return
+            except Exception as e:
+                err = str(e).lower()
+                # Determine penalty: 429 = 60s, 401/403 = 1 hour (Hard Fail)
+                penalty = 3600 if ("401" in err or "403" in err or "permission" in err or "unauthorized" in err) else 60
+                _FAILED_KEYS[key] = {'ts': time.time(), 'wait': penalty}
+                print(f"[HA Rotator] Node {idx+1} FAILED: {err[:50]}... Penalized {penalty}s")
+                continue
+        
+        # Emergency: use first key if everything is exhausted
+        self._current_idx = 0
         if _USE_NEW_SDK:
-            # New google.genai SDK
-            self._client = genai_new.Client(api_key=key)
-            # Only use models confirmed to be available on free tier.
-            # gemini-3.1-* appears in models.list() but is NOT yet accessible — causes 404.
-            SAFE_MODELS = ['gemini-2.5-pro', 'gemini-2.5-flash', 'gemini-2.0-flash', 'gemini-1.5-flash']
-            try:
-                avail = [m.name for m in self._client.models.list()]
-                for candidate in SAFE_MODELS:
-                    if any(candidate in a for a in avail):
-                        # Validate the model actually works before committing
-                        try:
-                            self._client.models.generate_content(
-                                model=candidate,
-                                contents='ping',
-                                config=genai_types.GenerateContentConfig(max_output_tokens=1)
-                            )
-                            self.model_name = candidate
-                            break
-                        except Exception:
-                            continue  # try next candidate
-            except: pass
+            self._client = genai_new.Client(api_key=self._keys[0])
         else:
-            # Fallback: old google.generativeai SDK
-            genai.configure(api_key=key)
-            try:
-                avail = [m.name for m in genai.list_models()]
-                for candidate in ['models/gemini-2.5-flash','models/gemini-2.0-flash']:
-                    if candidate in avail:
-                        self.model_name = candidate.replace('models/','')
-                        break
-            except: pass
-            self.model = genai.GenerativeModel(
-                self.model_name,
-                generation_config={'temperature': 0.1}
-            )
+            genai.configure(api_key=self._keys[0])
+
+    def rotate_key(self, is_hard_fail=False):
+        """Switches to the next API key. Hard fail = 1 hour cooldown."""
+        current_key = self._keys[self._current_idx]
+        penalty = 3600 if is_hard_fail else 60
+        _FAILED_KEYS[current_key] = {'ts': time.time(), 'wait': penalty}
+        self._current_idx = (self._current_idx + 1) % len(self._keys)
+        self._initialize_node()
+        return self._keys[self._current_idx]
 
     def _execute_tool(self, call):
         name = call.name
@@ -202,6 +286,13 @@ class PRCChatAssistant:
             return res.get("stdout") or res.get("error")
         elif name == "generate_mermaid_diagram":
             return f"__MERMAID_START__\n{args.get('content')}\n__MERMAID_END__"
+        elif name == "fit_petrophysical_curve":
+            model = args.get("model")
+            sw = args.get("sw", [])
+            krw = args.get("krw", [])
+            data = {"model": model, "sw": sw, "krw": krw}
+            res = SkillsEngine.run_skill("petroleum", "", "curve_fitting_skill.py", [_json.dumps(data)])
+            return res.get("stdout") or res.get("error")
         return f"Unknown tool: {name}"
 
     def chat(self, history, msg, kb_context="", f_parts=[]):
@@ -313,15 +404,25 @@ class AnthropicAssistant:
   "subtitle": "Optional subtitle",
   "author": "Engineer name or Hviel AI",
   "sections": [
-    {"heading": "Section Name", "level": 1, "paragraphs": ["Paragraph 1 text.", "Paragraph 2 text."], "bullets": ["point 1", "point 2"]}
+    {
+      "heading": "Section Name", 
+      "level": 1, 
+      "paragraphs": [
+        "Paragraph 1 text.", 
+        "__PRC_PLOT__ {\"title\": \"Sw vs Kr\", \"x_label\": \"Sw\", \"y_label\": \"Kr\", \"curves\": [{\"label\": \"Krw\", \"x\": [0.2, 0.4, 0.6], \"y\": [0, 0.12, 0.45]}]}"
+      ], 
+      "bullets": ["point 1", "point 2"]
+    }
   ],
   "tables": [
     {"caption": "Table 1 \u2014 Description", "headers": ["Col1", "Col2"], "rows": [["val1", "val2"]]}
   ]
 }
-Rules: level 1 = major section, level 2 = subsection. bullets is optional. tables is optional.
-CRITICAL: DO NOT EVER put raw markdown tables (e.g. `| Col | Col |`) inside `paragraphs`. If you have tabular data, you MUST use the `tables` JSON array structure.
-For petrophysical data tables include ALL calculated values with proper units in the headers.
+Rules: 
+1. Use __PRC_PLOT__ followed by a JSON object to inject charts. 
+2. Use professional, print-style chart data (Scientific White).
+3. level 1 = major section, level 2 = subsection. 
+4. CRITICAL: DO NOT EVER put raw markdown tables inside `paragraphs`. If you have tabular data, you MUST use the `tables` JSON array structure.
 WRITE REAL ENGINEERING CONTENT in paragraphs — not placeholder text."""
 
     _EXCEL_SCHEMA = """Return ONLY valid JSON (no markdown, no backticks, no explanation) with this exact structure:
@@ -530,7 +631,24 @@ class KnowledgeBase:
             scored.sort(key=lambda x: -x[0])
             top = scored[:top_k]
             if not top: return ""
-            parts = [f"[From: {s}]\n{ch}" for _, s, ch in top]
+            
+            parts = []
+            for _, s, ch in top:
+                # Detect if the chunk is actually a raw CSV text block
+                if ',' in ch and ch.count('\n') > 1:
+                    try:
+                        # Attempt a lightweight CSV parse for the preview
+                        from io import StringIO
+                        temp_df = pd.read_csv(StringIO(ch))
+                        if len(temp_df.columns) > 1:
+                            # Limit preview to 10 rows for UX
+                            json_data = {
+                                "headers": temp_df.columns.tolist(),
+                                "rows": temp_df.head(10).values.tolist()
+                            }
+                            ch = f"__PRC_DATA_START__\n{_json.dumps(json_data)}\n__PRC_DATA_END__"
+                    except: pass
+                parts.append(f"[From: {s}]\n{ch}")
             return "\n\n".join(parts)
         except Exception:
             return ""
@@ -633,7 +751,7 @@ hviel_engine = HvielDocEngine(output_dir='.')   # saves .docx/.xlsx/.pptx/.pdf t
 # ── APP SETUP ──
 app = FastAPI()
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
-assistant = PRCChatAssistant(GEMINI_API_KEY)
+assistant = PRCChatAssistant(GEMINI_KEY_POOL)
 
 # ── Fix 3: Unified DB layer — PostgreSQL when available, SQLite fallback ──
 def db(q, p=()):
@@ -849,39 +967,44 @@ async def stream_chat(
             # Stream tokens — support both SDKs
             full_resp = ""
             if _USE_NEW_SDK:
-                # New google.genai SDK — tool support in stream is complex,
-                # so we use the non-stream chat if tools are detected or needed.
-                # However, for now, we enable tools in the generation config.
-                import asyncio
-                contents_stream = []
-                for h in valid_history:
-                    contents_stream.append(genai_types.Content(role=h['role'], parts=[genai_types.Part(text=h['parts'][0])]))
-                contents_stream.append(genai_types.Content(role='user', parts=[genai_types.Part(text=enriched)]))
-                loop = asyncio.get_event_loop()
-                
-                # Check for tool use by doing a quick non-stream check or just allowing it
-                # For the stream, we just handle the text. If it calls a tool, we'll need to intercept.
-                
-                for fb in [assistant.model_name, 'gemini-2.5-flash', 'gemini-2.0-flash', 'gemini-1.5-flash']:
+                # --- PRC HA ROTATOR LOOP ---
+                max_retries = len(GEMINI_KEY_POOL)
+                for attempt in range(max_retries):
                     try:
-                        stream_resp = await loop.run_in_executor(
-                            None,
-                            lambda m=fb: assistant._client.models.generate_content_stream(
-                                model=m,
-                                contents=contents_stream,
-                                config=genai_types.GenerateContentConfig(
-                                    temperature=0.1,
-                                    tools=_HVIEL_TOOLS
+                        for fb in [assistant.model_name, 'gemini-2.5-flash', 'gemini-2.0-flash', 'gemini-1.5-flash']:
+                            try:
+                                stream_resp = await loop.run_in_executor(
+                                    None,
+                                    lambda m=fb: assistant._client.models.generate_content_stream(
+                                        model=m,
+                                        contents=contents_stream,
+                                        config=genai_types.GenerateContentConfig(
+                                            temperature=0.1,
+                                            tools=_HVIEL_TOOLS
+                                        )
+                                    )
                                 )
-                            )
-                        )
-                        assistant.model_name = fb  # persist working model
-                        break
-                    except Exception as try_e:
-                        if fb == 'gemini-1.5-flash':
-                            raise try_e
-                
-                response = stream_resp
+                                assistant.model_name = fb  # persist working model
+                                break
+                            except Exception as try_e:
+                                if fb == 'gemini-1.5-flash':
+                                    raise try_e
+                        
+                        response = stream_resp
+                        break # Success! Exit the retry loop
+                    except Exception as e:
+                        # Catch API failures
+                        err_str = str(e).lower()
+                        is_auth_error = any(x in err_str for x in ["401", "403", "unauthorized", "permission"])
+                        is_rate_limit = any(x in err_str for x in ["429", "resource_exhausted"])
+                        
+                        if (is_auth_error or is_rate_limit) and attempt < max_retries - 1:
+                            status_msg = "Node Auth Failed (Skipping)" if is_auth_error else "Rate Limit Reached (Hopping Node)"
+                            yield f"data: {_json.dumps({'type': 'token', 'text': f' !!! {status_msg} (Node {assistant._current_idx + 1}/{len(GEMINI_KEY_POOL)}) !!! '})}\n\n"
+                            assistant.rotate_key(is_hard_fail=is_auth_error)
+                            continue 
+                        else:
+                            raise e
             else:
                 # Old google.generativeai SDK
                 chat_session = assistant.model.start_chat(history=valid_history)
@@ -1008,7 +1131,24 @@ async def handle(
         history_rows = db("SELECT role, text, url FROM m WHERE sid = ? ORDER BY id DESC LIMIT 12", (sid,))
         history = [{"role": r, "text": t} for r, t, u in reversed(history_rows)]
 
-        resp = assistant.chat(history, message, kb_context=kb_context, f_parts=f_parts)
+        # --- HA ROTATOR RETRY LOOP ---
+        max_retries = len(GEMINI_KEY_POOL)
+        resp = "SYSTEM ERROR: All API nodes are currently exhausted."
+        for attempt in range(max_retries):
+            try:
+                resp = assistant.chat(history, message, kb_context=kb_context, f_parts=f_parts)
+                break # Success!
+            except Exception as e:
+                err_str = str(e).lower()
+                is_auth_error = any(x in err_str for x in ["401", "403", "unauthorized", "permission"])
+                is_rate_limit = any(x in err_str for x in ["429", "resource_exhausted"])
+                
+                if (is_auth_error or is_rate_limit) and attempt < max_retries - 1:
+                    print(f"[HA ROTATOR] Node {assistant._current_idx + 1} FAILED ({'Auth' if is_auth_error else '429'}). Rotating...")
+                    assistant.rotate_key(is_hard_fail=is_auth_error)
+                    continue
+                else:
+                    raise e
 
         # ── GEMINI NATIVE ENGINE ──
 
@@ -1117,18 +1257,16 @@ async def list_skills():
 @app.get("/api/diag")
 def diag():
     try:
-        genai.configure(api_key=GEMINI_API_KEY)
+        current_node = GEMINI_KEY_POOL[assistant._current_idx][:8] + "..."
+        failed_count = len([k for k, t in _FAILED_KEYS.items() if (time.time() - t) < 60])
         return {
-            "version": "PRC-HUB-VER-11-SEMANTIC-RAG-STREAMING",
-            "models": [m.name for m in genai.list_models()],
-            "active_model": assistant.model_name,
+            "version": "PRC-HUB-VER-12-HA-API-ROTATOR",
+            "node_pool_size": len(GEMINI_KEY_POOL),
+            "active_node_id": current_node,
+            "nodes_in_cooldown": failed_count,
             "kb_chunks": len(db("SELECT id FROM kb")),
-            "kb_vectors": len(db("SELECT id FROM kb_vectors")),
-            "semantic_rag": True,
-            "streaming": True,
-            "anthropic_model": "claude-sonnet-4-6",
-            "env_fix_applied": True,
-            "smart_routing": True
+            "active_model": assistant.model_name,
+            "ha_status": "Degraded" if failed_count > 0 else "Optimal"
         }
     except Exception as e:
         return {"error": str(e)}
