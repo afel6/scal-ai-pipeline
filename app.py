@@ -499,19 +499,28 @@ _EMBED_DIM   = 768  # text-embedding-004 output dimension
 
 class KnowledgeBase:
     CHUNK_SIZE = 600  # words per chunk
+    _cached_embed_client = None
+
+    @staticmethod
+    def _get_embed_client():
+        if KnowledgeBase._cached_embed_client is None and _USE_NEW_SDK:
+            # Use the first healthy key in the pool to instantiate ONE shared client
+            KnowledgeBase._cached_embed_client = genai_new.Client(api_key=GEMINI_KEY_POOL[0])
+        return KnowledgeBase._cached_embed_client
 
     @staticmethod
     def _embed(text: str):
-        """Return a numpy float32 embedding vector via Gemini (new + old SDK), or None."""
+        """Return a numpy float32 embedding vector via Gemini, or None."""
         try:
             if _USE_NEW_SDK:
-                client = genai_new.Client(api_key=GEMINI_API_KEY)
+                client = KnowledgeBase._get_embed_client()
                 result = client.models.embed_content(model=EMBED_MODEL, contents=text)
                 return np.array(result.embeddings[0].values, dtype=np.float32)
             else:
                 result = genai.embed_content(model=EMBED_MODEL, content=text, task_type='RETRIEVAL_DOCUMENT')
                 return np.array(result['embedding'], dtype=np.float32)
-        except Exception:
+        except Exception as e:
+            print(f"[RAG] Embed Error: {e}")
             return None
 
     @staticmethod
@@ -519,13 +528,13 @@ class KnowledgeBase:
         """Return a numpy float32 query embedding vector via Gemini, or None."""
         try:
             if _USE_NEW_SDK:
-                client = genai_new.Client(api_key=GEMINI_API_KEY)
+                client = KnowledgeBase._get_embed_client()
                 result = client.models.embed_content(model=EMBED_MODEL, contents=text)
                 return np.array(result.embeddings[0].values, dtype=np.float32)
             else:
                 result = genai.embed_content(model=EMBED_MODEL, content=text, task_type='RETRIEVAL_QUERY')
                 return np.array(result['embedding'], dtype=np.float32)
-        except Exception:
+        except Exception as e:
             return None
 
     @staticmethod
@@ -800,35 +809,40 @@ def health():
 
 @app.on_event("startup")  # TODO: migrate to lifespan= when fully on FastAPI 0.103+
 async def startup_event():
-    import PyPDF2
-    print("[SYSTEM] Running PRC Auto-Hydration Engine for Permanent Books...")
-    books_dir = "books"
-    if not os.path.exists(books_dir):
-        return
+    import threading
+    def _hydrate_background():
+        import PyPDF2
+        print("[SYSTEM] Running PRC Auto-Hydration Engine for Permanent Books in background...")
+        books_dir = "books"
+        if not os.path.exists(books_dir):
+            return
 
-    for filename in os.listdir(books_dir):
-        filepath = os.path.join(books_dir, filename)
-        count_result = db("SELECT COUNT(*) FROM kb WHERE source = ?", (filename,))
-        count = count_result[0][0] if count_result else 0
-        if count == 0:
-            print(f"[BOOK] Auto-Hydrating: {filename} into RAG + Vector DB...")
-            try:
-                full_text = ""
-                if filename.lower().endswith(".pdf"):
-                    with open(filepath, 'rb') as f:
-                        reader = PyPDF2.PdfReader(f)
-                        for page in reader.pages:
-                            text = page.extract_text()
-                            if text: full_text += text + " "
+        for filename in os.listdir(books_dir):
+            filepath = os.path.join(books_dir, filename)
+            count_result = db("SELECT COUNT(*) FROM kb WHERE source = ?", (filename,))
+            count = count_result[0][0] if count_result else 0
+            if count == 0:
+                print(f"[BOOK] Auto-Hydrating: {filename} into RAG + Vector DB...")
+                try:
+                    full_text = ""
+                    if filename.lower().endswith(".pdf"):
+                        with open(filepath, 'rb') as f:
+                            reader = PyPDF2.PdfReader(f)
+                            for page in reader.pages:
+                                text = page.extract_text()
+                                if text: full_text += text + " "
 
-                if full_text:
-                    chunks = KnowledgeBase.chunk_text(full_text, filename)
-                    KnowledgeBase.ingest_chunks_with_embeddings(chunks)
-                    print(f"[SUCCESS] Injected {len(chunks)} knowledge blocks + embeddings from {filename}")
-            except Exception as e:
-                print(f"[ERROR] Failed to hydrate {filename}: {e}")
+                    if full_text:
+                        chunks = KnowledgeBase.chunk_text(full_text, filename)
+                        KnowledgeBase.ingest_chunks_with_embeddings(chunks)
+                        print(f"[SUCCESS] Injected {len(chunks)} knowledge blocks + embeddings from {filename}")
+                except Exception as e:
+                    print(f"[ERROR] Failed to hydrate {filename}: {e}")
 
-    print("[OK] Auto-Hydration Complete. PRC Hub ONLINE.")
+        print("[OK] Auto-Hydration Complete. PRC Hub ONLINE.")
+
+    # Run hydration in background so the web server boots up immediately (prevents Render timeout/OOM)
+    threading.Thread(target=_hydrate_background, daemon=True).start()
 
 # ── ROUTES: SESSIONS ──
 @app.get("/api/sessions")
