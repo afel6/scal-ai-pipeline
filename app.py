@@ -329,7 +329,19 @@ class PRCChatAssistant:
             user_parts = [genai_types.Part(text=enriched)]
             for data, mime in f_parts:
                 if mime in SUPPORTED:
-                    user_parts.append(genai_types.Part(inline_data=genai_types.Blob(mime_type=mime, data=data)))
+                    import tempfile, os
+                    with tempfile.NamedTemporaryFile(delete=False) as tf:
+                        tf.write(data)
+                        tmp_path = tf.name
+                    try:
+                        # Upload file natively to prevent Base64 JSON memory explosion (saves ~40MB RAM for 8MB PDFs)
+                        uploaded_file = self._client.files.upload(file=tmp_path, config={'mime_type': mime})
+                        user_parts.append(genai_types.Part(
+                            file_data=genai_types.FileData(file_uri=uploaded_file.uri, mime_type=mime)
+                        ))
+                    finally:
+                        try: os.unlink(tmp_path)
+                        except: pass
             contents.append(genai_types.Content(role='user', parts=user_parts))
             try:
                 # First attempt with tool support
