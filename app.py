@@ -329,13 +329,19 @@ class PRCChatAssistant:
             user_parts = [genai_types.Part(text=enriched)]
             for data, mime in f_parts:
                 if mime in SUPPORTED:
-                    import tempfile, os
+                    import tempfile, os, time as _t
                     with tempfile.NamedTemporaryFile(delete=False) as tf:
                         tf.write(data)
                         tmp_path = tf.name
                     try:
                         # Upload file natively to prevent Base64 JSON memory explosion (saves ~40MB RAM for 8MB PDFs)
                         uploaded_file = self._client.files.upload(file=tmp_path, config={'mime_type': mime})
+                        # Wait for file to become ACTIVE (Google processes asynchronously)
+                        for _wait in range(30):
+                            if uploaded_file.state and str(uploaded_file.state).upper().endswith('ACTIVE'):
+                                break
+                            _t.sleep(1)
+                            uploaded_file = self._client.files.get(name=uploaded_file.name)
                         user_parts.append(genai_types.Part(
                             file_data=genai_types.FileData(file_uri=uploaded_file.uri, mime_type=mime)
                         ))
@@ -378,7 +384,7 @@ class PRCChatAssistant:
                             )
                             return final_resp.text
 
-                return resp.text
+                return resp.text or "I received your document but could not generate a detailed response. Please try rephrasing your question."
             except Exception as e:
                 # Fallback chain on 404 or quota errors
                 for fb in ['gemini-2.5-flash', 'gemini-1.5-flash']:
@@ -1192,6 +1198,9 @@ async def handle(
                     raise e
 
         # ── GEMINI NATIVE ENGINE ──
+        # Safety: Gemini can return None for blocked or empty responses
+        if not resp:
+            resp = "I was unable to generate a response for this request. Please try rephrasing your question or uploading a smaller file."
 
         # Handle Graphs — iterate over ALL __PRC_PLOT__ tokens in one response
         _plot_attempts = 0
