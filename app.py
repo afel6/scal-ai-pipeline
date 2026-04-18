@@ -7,6 +7,7 @@ import pandas as pd
 from typing import Optional
 from hviel_doc_engine import HvielDocEngine
 from skills_engine import SkillsEngine
+from docx import Document
 import keepalive
 
 # ── Fix 2: Google Gemini SDK Migration (google-generativeai → google.genai) ──
@@ -920,11 +921,29 @@ async def kb_ingest(file: UploadFile = File(...), password: str = Form(...)):
         if len(text) < 100:
             return {"status": "error", "message": "File too short or unreadable"}
 
+        # BUG FIX 1: chunk_text was never called — NameError on 'chunks' would crash uploads
+        chunks = KnowledgeBase.chunk_text(text, name)
+
         # Clear old data for this source using the unified db() layer
         old_ids = [r[0] for r in db("SELECT id FROM kb WHERE source = ?", (name,))]
         if old_ids:
-            placeholders = ','.join(['?' ] * len(old_ids))
-            db(f"DELETE FROM kb_vectors WHERE chunk_id IN ({placeholders})", tuple(old_ids))
+            # BUG FIX 4: Build safe parameterised IN clause — works for both SQLite (?) and PostgreSQL (%s)
+            # The db() helper converts standalone ? to %s, but dynamic lists need manual handling
+            if _PG_AVAILABLE:
+                placeholders = ','.join(['%s'] * len(old_ids))
+            else:
+                placeholders = ','.join(['?'] * len(old_ids))
+            if _PG_AVAILABLE:
+                import psycopg2
+                conn = psycopg2.connect(DATABASE_URL)
+                cur = conn.cursor()
+                cur.execute(f"DELETE FROM kb_vectors WHERE chunk_id IN ({placeholders})", tuple(old_ids))
+                conn.commit(); cur.close(); conn.close()
+            else:
+                import sqlite3 as _sq
+                conn = _sq.connect(DB_PATH)
+                conn.execute(f"DELETE FROM kb_vectors WHERE chunk_id IN ({placeholders})", tuple(old_ids))
+                conn.commit(); conn.close()
         db("DELETE FROM kb WHERE source = ?", (name,))
         # Ingest with embeddings
         KnowledgeBase.ingest_chunks_with_embeddings(chunks)
@@ -1132,7 +1151,8 @@ async def handle(
             
             # --- TEXT DOCUMENTS ---
             elif fname.endswith('.docx'):
-                doc = Document(pd.io.common.BytesIO(f_bytes))
+                from io import BytesIO as _BytesIO
+                doc = Document(_BytesIO(f_bytes))
                 doc_text = "\n".join([p.text for p in doc.paragraphs if p.text.strip()])
                 message += f"\n[WORD DOC — {fname}]:\n{doc_text[:15000]}"
             elif fname.endswith('.txt'):
@@ -1297,9 +1317,10 @@ async def list_skills():
     return {
         "skills": [
             {"name": "search_arxiv", "category": "Research", "desc": "Academic literature discovery (Petrophysics, Geology)"},
-            {"name": "execute_python_simulation", "category": "Simulation", "desc": "Brooks-Corey, Archie, and fluid modeling"},
-            {"name": "generate_mermaid_diagram", "category": "Visualization", "desc": "Engineering workflows and logic trees"},
-            {"name": "systematic-debugging", "category": "Reasoning", "desc": "4-phase root cause investigation methodology"}
+            {"name": "execute_python_simulation", "category": "Simulation", "desc": "Brooks-Corey, Archie, and fluid flow modeling"},
+            {"name": "fit_petrophysical_curve", "category": "Curve Fitting", "desc": "Corey model optimization — fits raw lab Kr data to mathematical best-fit"},
+            {"name": "generate_mermaid_diagram", "category": "Visualization", "desc": "Engineering workflows, decision trees, and sequence diagrams"},
+            {"name": "systematic-debugging", "category": "Reasoning", "desc": "Mandatory 4-phase root cause investigation: Observe → Research → Simulate → Audit"}
         ]
     }
 
@@ -1308,13 +1329,18 @@ async def list_skills():
 def diag():
     try:
         current_node = GEMINI_KEY_POOL[assistant._current_idx][:8] + "..."
-        failed_count = len([k for k, t in _FAILED_KEYS.items() if (time.time() - t) < 60])
+        # BUG FIX 2: _FAILED_KEYS stores {'ts': ..., 'wait': ...} dicts, not raw timestamps
+        now = time.time()
+        failed_count = len([
+            k for k, v in _FAILED_KEYS.items()
+            if isinstance(v, dict) and (now - v.get('ts', 0)) < v.get('wait', 0)
+        ])
         return {
-            "version": "PRC-HUB-VER-12-HA-API-ROTATOR",
+            "version": "PRC-HUB-VER-13-PROD-READY",
             "node_pool_size": len(GEMINI_KEY_POOL),
             "active_node_id": current_node,
             "nodes_in_cooldown": failed_count,
-            "kb_chunks": len(db("SELECT id FROM kb")),
+            "kb_chunks": db("SELECT COUNT(*) FROM kb")[0][0],
             "active_model": assistant.model_name,
             "ha_status": "Degraded" if failed_count > 0 else "Optimal"
         }
@@ -1351,4 +1377,4 @@ async def dl(filename: str):
     )
 
 @app.get("/")
-def root(): return {"v": "PRC-HUB-VER-11-SEMANTIC-RAG-STREAMING", "model": assistant.model_name}
+def root(): return {"v": "PRC-HUB-VER-13-PROD-READY", "model": assistant.model_name, "status": "online"}
