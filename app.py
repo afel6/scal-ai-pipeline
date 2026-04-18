@@ -208,7 +208,7 @@ _HVIEL_TOOLS = [
 # ── HVIEL BRAIN (Fix 2: new google.genai SDK with old-SDK fallback) ──
 class PRCChatAssistant:
     def __init__(self, keys: list):
-        self.model_name = 'gemini-2.0-flash'
+        self.model_name = 'gemini-2.5-flash'
         self._keys = keys
         self._current_idx = 0
         self._client = None
@@ -381,7 +381,7 @@ class PRCChatAssistant:
                 return resp.text
             except Exception as e:
                 # Fallback chain on 404 or quota errors
-                for fb in ['gemini-2.5-flash', 'gemini-2.0-flash', 'gemini-1.5-flash']:
+                for fb in ['gemini-2.5-flash', 'gemini-1.5-flash']:
                     if fb == self.model_name: continue
                     try:
                         resp = self._client.models.generate_content(model=fb, contents=contents,
@@ -403,7 +403,7 @@ class PRCChatAssistant:
             try:
                 return _safe_text(self.model.start_chat(history=valid_history).send_message(c))
             except Exception as e:
-                for fb in ['gemini-2.0-flash', 'gemini-1.5-flash']:
+                for fb in ['gemini-2.5-flash', 'gemini-1.5-flash']:
                     try:
                         self.model = genai.GenerativeModel(fb)
                         return _safe_text(self.model.start_chat(history=valid_history).send_message(c))
@@ -1007,7 +1007,7 @@ async def stream_chat(
                 max_retries = len(GEMINI_KEY_POOL)
                 for attempt in range(max_retries):
                     try:
-                        for fb in [assistant.model_name, 'gemini-2.5-flash', 'gemini-2.0-flash', 'gemini-1.5-flash']:
+                        for fb in [assistant.model_name, 'gemini-2.5-flash', 'gemini-1.5-flash']:
                             try:
                                 stream_resp = await loop.run_in_executor(
                                     None,
