@@ -233,10 +233,6 @@ function App() {
   }, [refreshSessions]);
 
   const handleNewChat = async () => {
-    if (sessionId) {
-      try { await axios.delete(`${API_URL}/api/session/${sessionId}`); } catch {}
-      await refreshSessions();
-    }
     setSessionId('');
     localStorage.removeItem('prc_session_id');
     setMessages([WELCOME_MSG]);
