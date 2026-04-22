@@ -204,18 +204,6 @@ _HVIEL_TOOLS = [
                 }
             },
             {
-                "name": "vision_audit",
-                "description": "Performs a visual audit of a laboratory device against its manual. Required when a user uploads a photo of equipment.",
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "image_path": {"type": "string", "description": "The path to the uploaded equipment photo."},
-                        "query": {"type": "string", "description": "What the user wants to audit or troubleshoot."}
-                    },
-                    "required": ["image_path", "query"]
-                }
-            },
-            {
                 "name": "agentic_history_matching",
                 "description": "Uses Simulated Annealing to perform history matching on SCAL lab data, automatically finding the optimal Brooks-Corey parameters that match experimental curves.",
                 "parameters": {
@@ -326,11 +314,6 @@ class PRCChatAssistant:
             krw = args.get("krw", [])
             data = {"model": model, "sw": sw, "krw": krw}
             res = SkillsEngine.run_skill("petroleum", "", "curve_fitting_skill.py", [_json.dumps(data)])
-            return res.get("stdout") or res.get("error")
-        elif name == "vision_audit":
-            # First, fetch manual context from RAG
-            kb_context = KnowledgeBase.search(args.get("query"), top_k=8)
-            res = SkillsEngine.run_skill("maintenance", "auditor", "vision_auditor.py", [args.get('image_path'), kb_context, args.get('query')])
             return res.get("stdout") or res.get("error")
         elif name == "agentic_history_matching":
             sw = args.get("sw", [])
