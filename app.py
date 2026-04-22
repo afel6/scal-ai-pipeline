@@ -128,7 +128,7 @@ If the user asks you to export data to Petrel, Eclipse, or KAPPA, include the ex
 
 AUTONOMOUS SKILLS & TOOLS:
 You have access to high-performance autonomous tools. Use them whenever you need external data, complex math, or technical diagrams.
-- search_arxiv: Use this for technical literature review and finding petroleum research papers.
+(Note: Internet search has been disabled by the System Architect. You MUST rely exclusively on the provided Knowledge Base context for manuals and books.)
 - execute_python_simulation: Use this for complex petrophysical modeling (Brooks-Corey, LET, etc.).
   * CRITICAL RULE: If the user requests a simulation (e.g. "Run a 2D flood") but does not provide specific parameters (like Swr, Sor, krw_max, etc.), YOU MUST INVENT REALISTIC DEFAULTS and run the tool immediately. DO NOT ASK the user for parameters unless they specifically ask to be prompted. Just execute the tool to show the result.
 - agentic_history_matching: Use this to automatically find optimal Brooks-Corey parameters that match raw SCAL lab data. After finding the parameters, you MUST immediately output a __PRC_PLOT__ showing both the original raw lab data and the smooth optimal curves.
@@ -162,18 +162,6 @@ You recognize that raw lab data is often noisy using your engineering cognition.
 _HVIEL_TOOLS = [
     {
         "function_declarations": [
-            {
-                "name": "search_arxiv",
-                "description": "Search arXiv for academic papers. Use this for literature reviews or technical research.",
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "query": {"type": "string", "description": "The search query (e.g., 'Relative Permeability Carbonates')"},
-                        "max_results": {"type": "integer", "description": "Number of results to return (max 10)"}
-                    },
-                    "required": ["query"]
-                }
-            },
             {
                 "name": "execute_python_simulation",
                 "description": "Executes an advanced numerical SCAL simulation (Brooks-Corey/LET). Replaces legacy SENDRA workflows.",
@@ -317,10 +305,7 @@ class PRCChatAssistant:
     def _execute_tool(self, call):
         name = call.name
         args = call.args
-        if name == "search_arxiv":
-            res = SkillsEngine.run_skill("research", "arxiv", "search_arxiv.py", [args.get("query"), "--max", str(args.get("max_results", 5))])
-            return res.get("stdout") or res.get("error")
-        elif name == "execute_python_simulation":
+        if name == "execute_python_simulation":
             model = args.get("model")
             mode = args.get("mode", "1d")
             p = args.get("params", {})
@@ -1374,7 +1359,6 @@ async def list_skills():
     """Returns a list of active autonomous skills for the UI."""
     return {
         "skills": [
-            {"name": "search_arxiv", "category": "Research", "desc": "Academic literature discovery (Petrophysics, Geology)"},
             {"name": "execute_python_simulation", "category": "Simulation", "desc": "Brooks-Corey, Archie, and fluid flow modeling"},
             {"name": "fit_petrophysical_curve", "category": "Curve Fitting", "desc": "Corey model optimization — fits raw lab Kr data to mathematical best-fit"},
             {"name": "generate_mermaid_diagram", "category": "Visualization", "desc": "Engineering workflows, decision trees, and sequence diagrams"},
