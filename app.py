@@ -131,6 +131,7 @@ You have access to high-performance autonomous tools. Use them whenever you need
 - search_arxiv: Use this for technical literature review and finding petroleum research papers.
 - execute_python_simulation: Use this for complex petrophysical modeling (Brooks-Corey, LET, etc.).
   * CRITICAL RULE: If the user requests a simulation (e.g. "Run a 2D flood") but does not provide specific parameters (like Swr, Sor, krw_max, etc.), YOU MUST INVENT REALISTIC DEFAULTS and run the tool immediately. DO NOT ASK the user for parameters unless they specifically ask to be prompted. Just execute the tool to show the result.
+- agentic_history_matching: Use this to automatically find optimal Brooks-Corey parameters that match raw SCAL lab data. After finding the parameters, you MUST immediately output a __PRC_PLOT__ showing both the original raw lab data and the smooth optimal curves.
 - generate_mermaid_diagram: Use this to visualize engineering workflows or decision trees.
 
 PHYSICAL LAW CONSISTENCY (PLC) AUDIT:
@@ -224,6 +225,19 @@ _HVIEL_TOOLS = [
                         "query": {"type": "string", "description": "What the user wants to audit or troubleshoot."}
                     },
                     "required": ["image_path", "query"]
+                }
+            },
+            {
+                "name": "agentic_history_matching",
+                "description": "Uses Simulated Annealing to perform history matching on SCAL lab data, automatically finding the optimal Brooks-Corey parameters that match experimental curves.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "sw": {"type": "array", "items": {"type": "number"}, "description": "Array of Water Saturation (Sw) points"},
+                        "krw": {"type": "array", "items": {"type": "number"}, "description": "Array of Relative Permeability to Water (Krw) points"},
+                        "kro": {"type": "array", "items": {"type": "number"}, "description": "Array of Relative Permeability to Oil (Kro) points"}
+                    },
+                    "required": ["sw", "krw", "kro"]
                 }
             }
         ]
@@ -332,6 +346,13 @@ class PRCChatAssistant:
             # First, fetch manual context from RAG
             kb_context = KnowledgeBase.search(args.get("query"), top_k=8)
             res = SkillsEngine.run_skill("maintenance", "auditor", "vision_auditor.py", [args.get('image_path'), kb_context, args.get('query')])
+            return res.get("stdout") or res.get("error")
+        elif name == "agentic_history_matching":
+            sw = args.get("sw", [])
+            krw = args.get("krw", [])
+            kro = args.get("kro", [])
+            data = {"sw": sw, "krw": krw, "kro": kro}
+            res = SkillsEngine.run_skill("petroleum", "simulator", "history_matching_skill.py", [_json.dumps(data)])
             return res.get("stdout") or res.get("error")
         return f"Unknown tool: {name}"
         return f"Unknown tool: {name}"
