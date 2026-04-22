@@ -1,9 +1,11 @@
 import React, { useState, useRef, useEffect, useCallback, startTransition } from 'react';
-import { Send, Paperclip, Bot, User, Download, FileText, Database, Circle, PlusCircle, Trash2, MessageSquare, X, Wifi, WifiOff, Loader, LogOut, Menu, BookOpen, Upload, CheckCircle } from 'lucide-react';
+import { Send, Paperclip, Bot, User, Download, FileText, Database, Circle, PlusCircle, Trash2, MessageSquare, X, Wifi, WifiOff, Loader, LogOut, Menu, BookOpen, Upload, CheckCircle, Camera, RefreshCw, Layers } from 'lucide-react';
 import axios from 'axios';
 import SidebarTabs from './SidebarTabs';
 import Mermaid from './Mermaid';
 import VisualAudit from './VisualAudit';
+import SimulationHeatmap from './SimulationHeatmap';
+import PetrophysicalTable from './PetrophysicalTable';
 
 const API_URL = import.meta.env.VITE_API_URL || 'http://localhost:8000';
 
@@ -126,11 +128,27 @@ function renderMessageContent(text) {
     } else finalParts.push(p);
   });
 
-  if (finalParts.length === 0) return <p className="whitespace-pre-wrap font-serif leading-[1.75]">{text}</p>;
-  return finalParts.map((part, i) => {
+  const simParts = [];
+  finalParts.forEach(p => {
+    if (p.type === 'text') {
+      const simRegex = /__SIMULATION_START__([\s\S]*?)__SIMULATION_END__/g;
+      let lastSIndex = 0;
+      let sMatch;
+      while ((sMatch = simRegex.exec(p.content)) !== null) {
+        if (sMatch.index > lastSIndex) simParts.push({ type: 'text', content: p.content.slice(lastSIndex, sMatch.index) });
+        simParts.push({ type: 'simulation', content: sMatch[1].trim() });
+        lastSIndex = sMatch.index + sMatch[0].length;
+      }
+      if (lastSIndex < p.content.length) simParts.push({ type: 'text', content: p.content.slice(lastSIndex) });
+    } else simParts.push(p);
+  });
+
+  if (simParts.length === 0) return <p className="whitespace-pre-wrap font-serif leading-[1.75]">{text}</p>;
+  return simParts.map((part, i) => {
     if (part.type === 'img') return <img key={i} src={part.src} alt={part.alt || 'PRC Chart'} className="w-full rounded-xl border border-yellow-900/30 my-3 shadow-lg" />;
     if (part.type === 'mermaid') return <Mermaid key={i} content={part.content} />;
     if (part.type === 'data') return <PetrophysicalTable key={i} content={part.content} />;
+    if (part.type === 'simulation') return <SimulationHeatmap key={i} content={part.content} />;
     if (part.type === 'audit') return (
       <div key={i} className="my-4 p-4 bg-yellow-950/20 border-l-4 border-yellow-600 rounded-r-xl shadow-inner font-mono text-[13px] text-yellow-100/90">
         <div className="flex items-center gap-2 mb-2 text-yellow-500 font-black tracking-widest text-[10px] uppercase">

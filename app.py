@@ -313,7 +313,11 @@ class PRCChatAssistant:
             p['mode'] = mode
             # Route to the new simulation_core.py
             res = SkillsEngine.run_skill("petroleum", "simulator", "simulation_core.py", [_json.dumps(p)])
-            return res.get("stdout") or res.get("error")
+            
+            output = res.get("stdout") or res.get("error")
+            if mode == "2d" and output and "success" in output:
+                return f"__SIMULATION_START__\n{output}\n__SIMULATION_END__"
+            return output
         elif name == "generate_mermaid_diagram":
             return f"__MERMAID_START__\n{args.get('content')}\n__MERMAID_END__"
         elif name == "fit_petrophysical_curve":
