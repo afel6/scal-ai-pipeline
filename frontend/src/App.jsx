@@ -5,7 +5,6 @@ import SidebarTabs from './SidebarTabs';
 import Mermaid from './Mermaid';
 import VisualAudit from './VisualAudit';
 import SimulationHeatmap from './SimulationHeatmap';
-import PetrophysicalTable from './PetrophysicalTable';
 
 const API_URL = import.meta.env.VITE_API_URL || 'http://localhost:8000';
 

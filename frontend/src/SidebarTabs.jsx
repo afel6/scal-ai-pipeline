@@ -89,6 +89,8 @@ export default function SidebarTabs({ sessionId, sessions, handleLoadSession, ha
           onClick={() => setTab('library')}
           className={`flex-1 py-2.5 text-[11px] font-bold tracking-widest uppercase flex items-center justify-center gap-1.5 transition-all
             ${tab === 'library' ? 'text-yellow-400 border-b-2 border-yellow-500' : 'text-slate-500 hover:text-slate-300'}`}
+        >
+          <Database className="w-3.5 h-3.5" /> Library
         </button>
         <button
           onClick={() => setTab('audit')}
