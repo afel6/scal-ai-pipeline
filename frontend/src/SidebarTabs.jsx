@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { MessageSquare, Trash2, BookOpen, Upload, CheckCircle, Loader, FileText, Zap } from 'lucide-react';
+import { MessageSquare, Trash2, BookOpen, Upload, CheckCircle, Loader, FileText, Zap, Camera } from 'lucide-react';
 import axios from 'axios';
 
 const API_URL = import.meta.env.VITE_API_URL || 'http://localhost:8000';
@@ -11,8 +11,8 @@ function timeAgo(ts) {
   return `${Math.floor(diff / 86400)}d ago`;
 }
 
-export default function SidebarTabs({ sessionId, sessions, handleLoadSession, handleDeleteSession }) {
-  const [tab, setTab] = useState('chats');
+export default function SidebarTabs({ sessionId, sessions, handleLoadSession, handleDeleteSession, tab, setTab }) {
+
   const [books, setBooks] = useState([]);
   const [skills, setSkills] = useState([]);
   const [uploading, setUploading] = useState(false);
@@ -89,8 +89,13 @@ export default function SidebarTabs({ sessionId, sessions, handleLoadSession, ha
           onClick={() => setTab('library')}
           className={`flex-1 py-2.5 text-[11px] font-bold tracking-widest uppercase flex items-center justify-center gap-1.5 transition-all
             ${tab === 'library' ? 'text-yellow-400 border-b-2 border-yellow-500' : 'text-slate-500 hover:text-slate-300'}`}
+        </button>
+        <button
+          onClick={() => setTab('audit')}
+          className={`flex-1 py-2.5 text-[11px] font-bold tracking-widest uppercase flex items-center justify-center gap-1.5 transition-all
+            ${tab === 'audit' ? 'text-yellow-400 border-b-2 border-yellow-500' : 'text-slate-500 hover:text-slate-300'}`}
         >
-          <BookOpen className="w-3.5 h-3.5" /> Library
+          <Camera className="w-3.5 h-3.5" /> Auditor
         </button>
       </div>
 

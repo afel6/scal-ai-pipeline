@@ -3,6 +3,7 @@ import { Send, Paperclip, Bot, User, Download, FileText, Database, Circle, PlusC
 import axios from 'axios';
 import SidebarTabs from './SidebarTabs';
 import Mermaid from './Mermaid';
+import VisualAudit from './VisualAudit';
 
 const API_URL = import.meta.env.VITE_API_URL || 'http://localhost:8000';
 
@@ -167,6 +168,7 @@ function App() {
   const [sessions, setSessions] = useState([]);
   const [sidebarOpen, setSidebarOpen] = useState(false); // default closed on mobile
   const [serverStatus, setServerStatus] = useState('waking');
+  const [activeTab, setActiveTab] = useState('chats');
   const messagesEndRef = useRef(null);
   const inputRef = useRef(null);
 
@@ -452,7 +454,14 @@ function App() {
         </div>
 
         {/* Tabs + Session list + Library — handled by SidebarTabs */}
-        <SidebarTabs sessionId={sessionId} sessions={sessions} handleLoadSession={handleLoadSession} handleDeleteSession={handleDeleteSession} />
+        <SidebarTabs 
+          sessionId={sessionId} 
+          sessions={sessions} 
+          handleLoadSession={handleLoadSession} 
+          handleDeleteSession={handleDeleteSession} 
+          tab={activeTab}
+          setTab={setActiveTab}
+        />
 
         <div className="p-4 border-t border-slate-800/60 shrink-0">
           <p className="text-[10px] text-slate-700 font-mono tracking-widest uppercase text-center">Petroleum Research Center · Libya</p>
@@ -499,176 +508,172 @@ function App() {
           </div>
         </header>
 
-        {/* Wake banner */}
-        {serverStatus === 'waking' && (
-          <div className="bg-yellow-950/40 border-b border-yellow-800/30 px-4 py-2 flex items-center gap-2 shrink-0">
-            <Loader className="w-3.5 h-3.5 text-yellow-500 animate-spin shrink-0" />
-            <p className="text-xs text-yellow-400/80">Waking up the AI server — please wait ~30 seconds…</p>
-          </div>
-        )}
-
-        {/* Chat log */}
-        <main className="flex-1 overflow-y-auto px-3 py-4 md:px-6 md:py-6 space-y-4">
-          {messages.map((msg, idx) => (
-            <div key={idx} className={`flex gap-3 ${msg.role === 'user' ? 'flex-row-reverse' : ''} max-w-2xl ${msg.role === 'user' ? 'ml-auto' : 'mr-auto'} w-full`}>
-              {/* Avatar */}
-              <div className={`w-8 h-8 rounded-full flex items-center justify-center shrink-0 border
-                ${msg.role === 'user'
-                  ? 'bg-slate-800 border-slate-700'
-                  : 'bg-yellow-950 border-yellow-800/50'
-                }`}>
-                {msg.role === 'user'
-                  ? <User className="w-3.5 h-3.5 text-slate-300" />
-                  : <Bot className="w-3.5 h-3.5 text-yellow-400" />
-                }
+        {/* Main Content Area */}
+        {activeTab === 'chats' ? (
+          <>
+            {/* Wake banner */}
+            {serverStatus === 'waking' && (
+              <div className="bg-yellow-950/40 border-b border-yellow-800/30 px-4 py-2 flex items-center gap-2 shrink-0">
+                <Loader className="w-3.5 h-3.5 text-yellow-500 animate-spin shrink-0" />
+                <p className="text-xs text-yellow-400/80">Waking up the AI server — please wait ~30 seconds…</p>
               </div>
-              {/* Bubble */}
-              <div className={`px-4 py-3 rounded-2xl text-sm md:text-[15px] leading-relaxed shadow-lg max-w-[85%]
-                ${msg.role === 'user'
-                  ? 'bg-slate-800 text-slate-200 rounded-tr-none border border-slate-700/50'
-                  : 'bg-[#111116] text-yellow-50/90 rounded-tl-none border border-yellow-900/30'
-                }`}>
-                {msg.fileName && (
-                  <div className="flex items-center gap-2 mb-2 bg-black/40 p-2 rounded-lg border border-slate-700/50 w-fit">
-                    <FileText className="w-3.5 h-3.5 text-yellow-400 shrink-0" />
-                    <span className="text-xs font-mono text-yellow-300 truncate max-w-[160px]">{msg.fileName}</span>
+            )}
+
+            {/* Chat log */}
+            <main className="flex-1 overflow-y-auto px-3 py-4 md:px-6 md:py-6 space-y-4">
+              {messages.map((msg, idx) => (
+                <div key={idx} className={`flex gap-3 ${msg.role === 'user' ? 'flex-row-reverse' : ''} max-w-2xl ${msg.role === 'user' ? 'ml-auto' : 'mr-auto'} w-full`}>
+                  {/* Avatar */}
+                  <div className={`w-8 h-8 rounded-full flex items-center justify-center shrink-0 border
+                    ${msg.role === 'user'
+                      ? 'bg-slate-800 border-slate-700'
+                      : 'bg-yellow-950 border-yellow-800/50'
+                    }`}>
+                    {msg.role === 'user'
+                      ? <User className="w-3.5 h-3.5 text-slate-300" />
+                      : <Bot className="w-3.5 h-3.5 text-yellow-400" />
+                    }
                   </div>
-                )}
-                {renderMessageContent(msg.text)}
-                {/* Fix 4: "Export as PRC Report" button on chart messages */}
-                {msg.role === 'model' && !msg.download_url && msg.text?.includes('data:image/png;base64,') && (
-                  <button
-                    onClick={() => handleSend({ text: 'generate document', files: [] })}
-                    disabled={loading}
-                    className="mt-3 w-full bg-gradient-to-r from-yellow-900/40 to-amber-900/30 hover:from-yellow-800/50 hover:to-amber-800/40 border border-yellow-600/50 text-yellow-200 font-bold tracking-widest uppercase px-4 py-3 rounded-xl flex items-center justify-center gap-2 text-xs transition-all active:scale-95 disabled:opacity-30 shadow-lg"
-                  >
-                    {loading ? <Loader className="w-4 h-4 animate-spin" /> : <FileText className="w-4 h-4" />}
-                    {loading ? 'GENERATING REPORT…' : 'EXPORT AS PRC REPORT'}
-                  </button>
-                )}
-                {msg.download_url && (
-                  <button onClick={() => {
-                    const dlUrl = `${API_URL}${msg.download_url}`;
-                    window.open(dlUrl, "_self");
-                  }}
-                    className="mt-4 w-full bg-yellow-600/20 hover:bg-yellow-600/40 border border-yellow-500/50 text-yellow-300 font-bold tracking-widest uppercase px-4 py-3 rounded-xl flex items-center justify-center gap-2 text-xs transition-all active:scale-95">
-                    <Download className="w-4 h-4" /> Download {msg.doc_type === 'pptx' ? 'PowerPoint Presentation' : msg.doc_type === 'pdf' ? 'PDF Evaluation' : msg.doc_type === 'excel' ? 'Excel Spreadsheet' : 'Word Document'}
-                  </button>
-                )}
-                {/* Bug 1 fix: clickable "Generate Chart" button — no typing required */}
-                {msg.isDocEngineError && (
-                  <button
-                    onClick={() => handleSend({ text: 'generate document', files: [] })}
-                    disabled={loading}
-                    className="mt-3 w-full bg-yellow-600/20 hover:bg-yellow-600/35 border border-yellow-500/50 text-yellow-300 font-bold tracking-widest uppercase text-[10px] py-2.5 rounded-lg flex items-center justify-center gap-2 transition-all active:scale-95 disabled:opacity-30"
-                  >
-                    {loading ? <Loader className="w-3 h-3 animate-spin" /> : <Download className="w-3 h-3" />}
-                    {loading ? 'GENERATING…' : 'GENERATE CHART / DOCUMENT'}
-                  </button>
-                )}
-                {/* Bug 2 fix: accurate label — was "Wait 3 Minutes" but cooldown is only 15s */}
-                {msg.isError && !msg.isDocEngineError && lastMessage && (
-                  <button onClick={() => handleSend(lastMessage)} disabled={loading || retryCooldown > 0}
-                    className="mt-3 w-full bg-amber-950/20 hover:bg-amber-950/40 border border-amber-600/50 text-amber-300 font-bold tracking-widest uppercase text-[10px] py-2.5 rounded-lg flex items-center justify-center gap-2 transition-all active:scale-95 disabled:opacity-30">
-                    {loading ? <Loader className="w-3 h-3 animate-spin" /> : <Wifi className="w-3 h-3 text-yellow-500" />}
-                    {loading ? 'RETRYING...' : retryCooldown > 0 ? `RE-TRY IN ${retryCooldown}s…` : 'RE-TRY REQUEST'}
-                  </button>
-                )}
-              </div>
-            </div>
-          ))}
-
-          {/* Typing indicator */}
-          {loading && (
-            <div className="flex gap-3 max-w-2xl w-full">
-              <div className="w-8 h-8 rounded-full flex items-center justify-center shrink-0 bg-yellow-950 border border-yellow-800/50">
-                <Bot className="w-3.5 h-3.5 text-yellow-400" />
-              </div>
-              <div className="bg-[#111116] px-4 py-3 rounded-2xl rounded-tl-none border border-yellow-900/30 flex items-center gap-2">
-                {uploadStatus === 'uploading' ? (
-                  <>
-                    <Loader className="w-4 h-4 text-yellow-400 animate-spin shrink-0" />
-                    <span className="text-sm text-yellow-300/80 font-serif">Uploading file…</span>
-                  </>
-                ) : (
-                  <>
-                    <span className="w-2 h-2 bg-yellow-500 rounded-full animate-bounce" />
-                    <span className="w-2 h-2 bg-yellow-500 rounded-full animate-bounce [animation-delay:0.15s]" />
-                    <span className="w-2 h-2 bg-yellow-500 rounded-full animate-bounce [animation-delay:0.3s]" />
-                  </>
-                )}
-              </div>
-            </div>
-          )}
-          <div ref={messagesEndRef} />
-        </main>
-
-        {/* Input Footer */}
-        <footer className="p-3 md:p-4 bg-[#050505] border-t border-slate-800/60 shrink-0">
-          {/* File chips — one per selected file */}
-          {files.length > 0 && (
-            <div className="mb-2 flex flex-wrap gap-2">
-              {files.map((f, i) => (
-                <div key={i} className="flex items-center gap-1.5 bg-yellow-950/30 border border-yellow-800/40 rounded-xl px-3 py-1.5">
-                  <FileText className="w-3 h-3 text-yellow-400 shrink-0" />
-                  <span className="text-xs font-mono text-yellow-300 truncate max-w-[140px]">{f.name}</span>
-                  <button
-                    onClick={() => setFiles(prev => prev.filter((_, idx) => idx !== i))}
-                    className="ml-1 text-slate-500 hover:text-red-400 transition-colors"
-                  >
-                    <X className="w-3 h-3" />
-                  </button>
+                  {/* Bubble */}
+                  <div className={`px-4 py-3 rounded-2xl text-sm md:text-[15px] leading-relaxed shadow-lg max-w-[85%]
+                    ${msg.role === 'user'
+                      ? 'bg-slate-800 text-slate-200 rounded-tr-none border border-slate-700/50'
+                      : 'bg-[#111116] text-yellow-50/90 rounded-tl-none border border-yellow-900/30'
+                    }`}>
+                    {msg.fileName && (
+                      <div className="flex items-center gap-2 mb-2 bg-black/40 p-2 rounded-lg border border-slate-700/50 w-fit">
+                        <FileText className="w-3.5 h-3.5 text-yellow-400 shrink-0" />
+                        <span className="text-xs font-mono text-yellow-300 truncate max-w-[160px]">{msg.fileName}</span>
+                      </div>
+                    )}
+                    {renderMessageContent(msg.text)}
+                    {msg.role === 'model' && !msg.download_url && msg.text?.includes('data:image/png;base64,') && (
+                      <button
+                        onClick={() => handleSend({ text: 'generate document', files: [] })}
+                        disabled={loading}
+                        className="mt-3 w-full bg-gradient-to-r from-yellow-900/40 to-amber-900/30 hover:from-yellow-800/50 hover:to-amber-800/40 border border-yellow-600/50 text-yellow-200 font-bold tracking-widest uppercase px-4 py-3 rounded-xl flex items-center justify-center gap-2 text-xs transition-all active:scale-95 disabled:opacity-30 shadow-lg"
+                      >
+                        {loading ? <Loader className="w-4 h-4 animate-spin" /> : <FileText className="w-4 h-4" />}
+                        {loading ? 'GENERATING REPORT…' : 'EXPORT AS PRC REPORT'}
+                      </button>
+                    )}
+                    {msg.download_url && (
+                      <button onClick={() => {
+                        const dlUrl = `${API_URL}${msg.download_url}`;
+                        window.open(dlUrl, "_self");
+                      }}
+                        className="mt-4 w-full bg-yellow-600/20 hover:bg-yellow-600/40 border border-yellow-500/50 text-yellow-300 font-bold tracking-widest uppercase px-4 py-3 rounded-xl flex items-center justify-center gap-2 text-xs transition-all active:scale-95">
+                        <Download className="w-4 h-4" /> Download {msg.doc_type === 'pptx' ? 'PowerPoint Presentation' : msg.doc_type === 'pdf' ? 'PDF Evaluation' : msg.doc_type === 'excel' ? 'Excel Spreadsheet' : 'Word Document'}
+                      </button>
+                    )}
+                    {msg.isDocEngineError && (
+                      <button
+                        onClick={() => handleSend({ text: 'generate document', files: [] })}
+                        disabled={loading}
+                        className="mt-3 w-full bg-yellow-600/20 hover:bg-yellow-600/35 border border-yellow-500/50 text-yellow-300 font-bold tracking-widest uppercase text-[10px] py-2.5 rounded-lg flex items-center justify-center gap-2 transition-all active:scale-95 disabled:opacity-30"
+                      >
+                        {loading ? <Loader className="w-3 h-3 animate-spin" /> : <Download className="w-3 h-3" />}
+                        {loading ? 'GENERATING…' : 'GENERATE CHART / DOCUMENT'}
+                      </button>
+                    )}
+                    {msg.isError && !msg.isDocEngineError && lastMessage && (
+                      <button onClick={() => handleSend(lastMessage)} disabled={loading || retryCooldown > 0}
+                        className="mt-3 w-full bg-amber-950/20 hover:bg-amber-950/40 border border-amber-600/50 text-amber-300 font-bold tracking-widest uppercase text-[10px] py-2.5 rounded-lg flex items-center justify-center gap-2 transition-all active:scale-95 disabled:opacity-30">
+                        {loading ? <Loader className="w-3 h-3 animate-spin" /> : <Wifi className="w-3 h-3 text-yellow-500" />}
+                        {loading ? 'RETRYING...' : retryCooldown > 0 ? `RE-TRY IN ${retryCooldown}s…` : 'RE-TRY REQUEST'}
+                      </button>
+                    )}
+                  </div>
                 </div>
               ))}
-            </div>
-          )}
-          <div className="flex items-center gap-2 bg-[#111116] border border-slate-800 rounded-2xl p-2 pl-4 focus-within:border-yellow-500/40 transition-all">
-            <label className="cursor-pointer shrink-0 p-1.5 hover:bg-slate-800 rounded-xl transition-colors">
-              <input
-                type="file"
-                multiple
-                accept=".txt,.pdf,.csv,.xlsx,.xls,.doc,.docx,image/jpeg,image/png,image/gif,image/webp"
-                className="hidden"
-                onChange={(e) => {
-                  const newFiles = Array.from(e.target.files);
-                  setFiles(prev => {
-                    const existingNames = prev.map(f => f.name);
-                    const deduped = newFiles.filter(f => !existingNames.includes(f.name));
-                    return [...prev, ...deduped];
-                  });
-                  e.target.value = '';
-                }}
-              />
-              <Paperclip className={`w-5 h-5 ${files.length > 0 ? 'text-yellow-400' : 'text-slate-500'}`} />
-            </label>
-            <textarea
-              ref={inputRef}
-              value={input}
-              onChange={(e) => {
-                setInput(e.target.value);
-                e.target.style.height = 'auto';
-                e.target.style.height = `${Math.min(e.target.scrollHeight, 250)}px`;
-              }}
-              onKeyDown={(e) => {
-                if (e.key === 'Enter' && !e.shiftKey) {
-                  e.preventDefault();
-                  if (input.trim() || files.length > 0) handleSend();
-                }
-              }}
-              rows={1}
-              disabled={serverStatus === 'waking'}
-              placeholder={serverStatus === 'waking' ? 'Connecting to server...' : 'Ask Hviel or paste lab data...'}
-              className="flex-1 bg-transparent border-none outline-none text-yellow-50 placeholder-slate-600 text-sm md:text-[15px] font-serif disabled:opacity-50 resize-none overflow-y-auto py-2.5 min-h-[44px] leading-relaxed block"
-            />
-            <button
-              onClick={() => handleSend()}
-              disabled={loading || serverStatus === 'waking' || (!input.trim() && files.length === 0)}
-              className="bg-yellow-600 hover:bg-yellow-500 text-black p-3 rounded-xl shrink-0 transition-all active:scale-95 disabled:opacity-30 disabled:cursor-not-allowed"
-            >
-              <Send className="w-4 h-4" />
-            </button>
+
+              {/* Typing indicator */}
+              {loading && (
+                <div className="flex gap-3 max-w-2xl w-full">
+                  <div className="w-8 h-8 rounded-full flex items-center justify-center shrink-0 bg-yellow-950 border border-yellow-800/50">
+                    <Bot className="w-3.5 h-3.5 text-yellow-400" />
+                  </div>
+                  <div className="bg-[#111116] px-4 py-3 rounded-2xl rounded-tl-none border border-yellow-900/30 flex items-center gap-2">
+                    {uploadStatus === 'uploading' ? (
+                      <>
+                        <Loader className="w-4 h-4 text-yellow-400 animate-spin shrink-0" />
+                        <span className="text-sm text-yellow-300/80 font-serif">Uploading file…</span>
+                      </>
+                    ) : (
+                      <>
+                        <span className="w-2 h-2 bg-yellow-500 rounded-full animate-bounce" />
+                        <span className="w-2 h-2 bg-yellow-500 rounded-full animate-bounce [animation-delay:0.15s]" />
+                        <span className="w-2 h-2 bg-yellow-500 rounded-full animate-bounce [animation-delay:0.3s]" />
+                      </>
+                    )}
+                  </div>
+                </div>
+              )}
+              <div ref={messagesEndRef} />
+            </main>
+
+            {/* Input Footer */}
+            <footer className="p-3 md:p-4 bg-[#050505] border-t border-slate-800/60 shrink-0">
+              {/* File chips */}
+              {files.length > 0 && (
+                <div className="mb-2 flex flex-wrap gap-2">
+                  {files.map((f, i) => (
+                    <div key={i} className="flex items-center gap-1.5 bg-yellow-950/30 border border-yellow-800/40 rounded-xl px-3 py-1.5">
+                      <FileText className="w-3 h-3 text-yellow-400 shrink-0" />
+                      <span className="text-xs font-mono text-yellow-300 truncate max-w-[140px]">{f.name}</span>
+                      <button onClick={() => setFiles(prev => prev.filter((_, idx) => idx !== i))} className="ml-1 text-slate-500 hover:text-red-400">
+                        <X className="w-3 h-3" />
+                      </button>
+                    </div>
+                  ))}
+                </div>
+              )}
+              <div className="flex items-center gap-2 bg-[#111116] border border-slate-800 rounded-2xl p-2 pl-4 focus-within:border-yellow-500/40 transition-all">
+                <label className="cursor-pointer shrink-0 p-1.5 hover:bg-slate-800 rounded-xl transition-colors">
+                  <input type="file" multiple accept=".txt,.pdf,.csv,.xlsx,.xls,.doc,.docx,image/jpeg,image/png,image/gif,image/webp" className="hidden"
+                    onChange={(e) => {
+                      const newFiles = Array.from(e.target.files);
+                      setFiles(prev => {
+                        const existingNames = prev.map(f => f.name);
+                        const deduped = newFiles.filter(f => !existingNames.includes(f.name));
+                        return [...prev, ...deduped];
+                      });
+                      e.target.value = '';
+                    }} />
+                  <Paperclip className={`w-5 h-5 ${files.length > 0 ? 'text-yellow-400' : 'text-slate-500'}`} />
+                </label>
+                <textarea
+                  ref={inputRef}
+                  value={input}
+                  onChange={(e) => {
+                    setInput(e.target.value);
+                    e.target.style.height = 'auto';
+                    e.target.style.height = `${Math.min(e.target.scrollHeight, 250)}px`;
+                  }}
+                  onKeyDown={(e) => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); if (input.trim() || files.length > 0) handleSend(); } }}
+                  rows={1}
+                  disabled={serverStatus === 'waking'}
+                  placeholder={serverStatus === 'waking' ? 'Connecting to server...' : 'Ask Hviel or paste lab data...'}
+                  className="flex-1 bg-transparent border-none outline-none text-yellow-50 placeholder-slate-600 text-sm md:text-[15px] font-serif disabled:opacity-50 resize-none overflow-y-auto py-2.5 min-h-[44px] leading-relaxed block"
+                />
+                <button
+                  onClick={() => handleSend()}
+                  disabled={loading || serverStatus === 'waking' || (!input.trim() && files.length === 0)}
+                  className="bg-yellow-600 hover:bg-yellow-500 text-black p-3 rounded-xl shrink-0 transition-all active:scale-95 disabled:opacity-30 disabled:cursor-not-allowed"
+                >
+                  <Send className="w-4 h-4" />
+                </button>
+              </div>
+            </footer>
+          </>
+        ) : activeTab === 'audit' ? (
+          <VisualAudit />
+        ) : (
+          <div className="flex-1 flex flex-col items-center justify-center bg-[#0c0c10] text-slate-600">
+            <BookOpen className="w-12 h-12 mb-4 opacity-20" />
+            <p className="text-sm font-mono tracking-widest uppercase opacity-40">Library Mode — Use Sidebar to Manage Data</p>
           </div>
-        </footer>
+        )}
       </div>
     </div>
   );

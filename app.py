@@ -101,6 +101,13 @@ IMPORTANT EXPORT ENGINE INSTRUCTIONS:
 - IF Word document requested: Start your response EXACTLY with `__PRC_DOCX__` followed IMMEDIATELY by a raw JSON string (no explanation text) matching this schema exactly: {"title": "Report Title", "author": "Hviel AI", "sections": [{"heading": "Section Name", "level": 1, "paragraphs": ["Paragraph text here."], "bullets": []}], "tables": [{"caption": "Table 1", "headers": ["Column A", "Column B"], "rows": [["Value 1", "Value 2"]]}]}
 - IF Excel spreadsheet requested: Start your response EXACTLY with `__PRC_EXCEL__` followed IMMEDIATELY by a raw JSON string (no explanation text). You MUST populate the sheets with actual real data values extracted from the conversation context and uploaded files. NEVER produce an empty rows array. The JSON must match this schema: {"title": "Spreadsheet Title", "sheets": [{"name": "Sheet Name", "headers": ["Sample ID", "Depth (ft)", "Porosity (%)", "Permeability (mD)"], "rows": [["S-01", "8210.0", "18.3", "5.46"], ["S-02", "8215.5", "13.4", "2.11"]], "column_widths": [15, 15, 18, 20]}]}
 
+VISION AUDITOR PROTOCOL:
+- You have the ability to perform visual audits of laboratory equipment.
+- When a user uploads a photo of a device or setup, you must analyze it against the technical manuals in your Knowledge Base.
+- If you detect a configuration error (e.g., wrong valve position, loose connection), you must flag it with 'ERROR DETECTED' in the audit ledger.
+- You must always provide the 'Next Step' to correct the state based on the manual.
+
+
 
 GRAPHING & VISUALIZATION ENGINE:
 If the user asks you to plot a graph, draw a curve, or visualize data, you MUST include the exact sequence __PRC_PLOT__ followed immediately by a raw JSON object containing the plot parameters. DO NOT wrap the JSON in markdown code blocks.
@@ -167,14 +174,18 @@ _HVIEL_TOOLS = [
             },
             {
                 "name": "execute_python_simulation",
-                "description": "Executes a Python-based petrophysical simulation. Returns data and parameters.",
+                "description": "Executes an advanced numerical SCAL simulation (Brooks-Corey/LET). Replaces legacy SENDRA workflows.",
                 "parameters": {
                     "type": "object",
                     "properties": {
-                        "model": {"type": "string", "description": "Model type: 'brooks_corey' or 'archie'"},
-                        "params": {"type": "object", "description": "Parameters for the model (e.g., sw_start, entry_pressure, swr, etc.)"}
+                        "model": {"type": "string", "description": "Model type: 'brooks_corey' or 'let'"},
+                        "mode": {"type": "string", "description": "Simulation mode: '1d' (curves) or '2d' (spatial grid)"},
+                        "params": {
+                            "type": "object", 
+                            "description": "Parameters (swr, snr, krw_max, kro_max, nw, no). For 2D, add nx, ny, steps."
+                        }
                     },
-                    "required": ["model", "params"]
+                    "required": ["model", "mode", "params"]
                 }
             },
             {
@@ -200,6 +211,18 @@ _HVIEL_TOOLS = [
                         "krw": {"type": "array", "items": {"type": "number"}, "description": "Array of Relative Permeability points"}
                     },
                     "required": ["model", "sw", "krw"]
+                }
+            },
+            {
+                "name": "vision_audit",
+                "description": "Performs a visual audit of a laboratory device against its manual. Required when a user uploads a photo of equipment.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "image_path": {"type": "string", "description": "The path to the uploaded equipment photo."},
+                        "query": {"type": "string", "description": "What the user wants to audit or troubleshoot."}
+                    },
+                    "required": ["image_path", "query"]
                 }
             }
         ]
@@ -284,9 +307,12 @@ class PRCChatAssistant:
             return res.get("stdout") or res.get("error")
         elif name == "execute_python_simulation":
             model = args.get("model")
+            mode = args.get("mode", "1d")
             p = args.get("params", {})
-            # We can now run the specialized petroleum skill script
-            res = SkillsEngine.run_skill("petroleum", "scalskills", "petrophysics.py", [model, _json.dumps(dict(p) if p else {})])
+            p['model'] = model
+            p['mode'] = mode
+            # Route to the new simulation_core.py
+            res = SkillsEngine.run_skill("petroleum", "simulator", "simulation_core.py", [_json.dumps(p)])
             return res.get("stdout") or res.get("error")
         elif name == "generate_mermaid_diagram":
             return f"__MERMAID_START__\n{args.get('content')}\n__MERMAID_END__"
@@ -297,6 +323,12 @@ class PRCChatAssistant:
             data = {"model": model, "sw": sw, "krw": krw}
             res = SkillsEngine.run_skill("petroleum", "", "curve_fitting_skill.py", [_json.dumps(data)])
             return res.get("stdout") or res.get("error")
+        elif name == "vision_audit":
+            # First, fetch manual context from RAG
+            kb_context = KnowledgeBase.search(args.get("query"), top_k=8)
+            res = SkillsEngine.run_skill("maintenance", "auditor", "vision_auditor.py", [args.get('image_path'), kb_context, args.get('query')])
+            return res.get("stdout") or res.get("error")
+        return f"Unknown tool: {name}"
         return f"Unknown tool: {name}"
 
     def chat(self, history, msg, kb_context="", f_parts=[]):
@@ -1375,6 +1407,30 @@ async def dl(filename: str):
             "Cache-Control": "no-cache"
         }
     )
+
+# ── ROUTE: VISION AUDIT ──
+@app.post("/api/vision/audit")
+async def vision_audit(file: UploadFile = File(...), query: str = Form(...), session_id: str = Form("")):
+    """Explicit endpoint for manual vision audits."""
+    try:
+        content = await file.read()
+        filename = f"audit_{int(time.time())}_{file.filename}"
+        img_path = os.path.join("uploads", filename)
+        os.makedirs("uploads", exist_ok=True)
+        with open(img_path, "wb") as f:
+            f.write(content)
+            
+        # 1. Fetch relevant manual context
+        kb_context = KnowledgeBase.search(query, top_k=8)
+        
+        # 2. Run the vision auditor skill
+        res = assistant.skills.run_skill("maintenance", "auditor", "vision_auditor.py", [img_path, kb_context, query])
+        
+        # Parse result
+        audit_res = _json.loads(res.get("stdout", "{}"))
+        return {"status": "success", "result": audit_res.get("result", "Audit execution failed.")}
+    except Exception as e:
+        return {"status": "error", "message": str(e)}
 
 @app.get("/")
 def root(): return {"v": "PRC-HUB-VER-13-PROD-READY", "model": assistant.model_name, "status": "online"}
