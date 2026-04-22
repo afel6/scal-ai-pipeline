@@ -476,8 +476,18 @@ function App() {
           setTab={setActiveTab}
         />
 
-        <div className="p-4 border-t border-slate-800/60 shrink-0">
-          <p className="text-[10px] text-slate-700 font-mono tracking-widest uppercase text-center">Petroleum Research Center · Libya</p>
+        <div 
+          className="p-4 border-t border-slate-800/60 shrink-0 flex flex-col items-center justify-center group cursor-pointer relative overflow-hidden"
+          onClick={() => window.location.href = 'mailto:a.elkabir@prclibya.com'}
+        >
+          <p className="text-[10px] text-slate-700 font-mono tracking-widest uppercase text-center group-hover:opacity-0 group-hover:translate-y-4 transition-all duration-500">
+            Petroleum Research Center · Libya
+          </p>
+          <div className="absolute inset-0 flex flex-col items-center justify-center opacity-0 -translate-y-4 group-hover:opacity-100 group-hover:translate-y-0 transition-all duration-500 pointer-events-none">
+            <p className="text-[8px] text-yellow-600/70 font-mono tracking-widest uppercase">System Architect</p>
+            <p className="text-[10px] text-yellow-500/90 font-serif italic">Raouf Elkabir</p>
+            <p className="text-[7.5px] text-slate-500 font-mono tracking-widest mt-0.5">a.elkabir@prclibya.com</p>
+          </div>
         </div>
       </aside>
 
