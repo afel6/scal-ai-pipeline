@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { MessageSquare, Trash2, BookOpen, Upload, CheckCircle, Loader, FileText, Zap, Camera } from 'lucide-react';
+import { MessageSquare, Trash2, BookOpen, Upload, CheckCircle, Loader, FileText, Zap, Camera, Database } from 'lucide-react';
 import axios from 'axios';
 
 const API_URL = import.meta.env.VITE_API_URL || 'http://localhost:8000';
