@@ -5,6 +5,7 @@ import SidebarTabs from './SidebarTabs';
 import Mermaid from './Mermaid';
 import VisualAudit from './VisualAudit';
 import SimulationHeatmap from './SimulationHeatmap';
+import KrPlot from './KrPlot';
 
 const API_URL = import.meta.env.VITE_API_URL || 'http://localhost:8000';
 
@@ -142,12 +143,30 @@ function renderMessageContent(text) {
     } else simParts.push(p);
   });
 
-  if (simParts.length === 0) return <p className="whitespace-pre-wrap font-serif leading-[1.75]">{text}</p>;
-  return simParts.map((part, i) => {
+  // Parse __PRC_PLOT__ JSON blocks into interactive charts
+  const plotParts = [];
+  simParts.forEach(p => {
+    if (p.type === 'text') {
+      // Match either __PRC_PLOT__ token followed by JSON, or raw JSON with "curves" key
+      const plotRegex = /(?:__PRC_PLOT__\s*)?({\s*"curves"[\s\S]*?}(?=\s*(?:__|$|\n\n)))/g;
+      let lastPIndex = 0;
+      let pMatch;
+      while ((pMatch = plotRegex.exec(p.content)) !== null) {
+        if (pMatch.index > lastPIndex) plotParts.push({ type: 'text', content: p.content.slice(lastPIndex, pMatch.index) });
+        plotParts.push({ type: 'plot', content: pMatch[1].trim() });
+        lastPIndex = pMatch.index + pMatch[0].length;
+      }
+      if (lastPIndex < p.content.length) plotParts.push({ type: 'text', content: p.content.slice(lastPIndex) });
+    } else plotParts.push(p);
+  });
+
+  if (plotParts.length === 0) return <p className="whitespace-pre-wrap font-serif leading-[1.75]">{text}</p>;
+  return plotParts.map((part, i) => {
     if (part.type === 'img') return <img key={i} src={part.src} alt={part.alt || 'PRC Chart'} className="w-full rounded-xl border border-yellow-900/30 my-3 shadow-lg" />;
     if (part.type === 'mermaid') return <Mermaid key={i} content={part.content} />;
     if (part.type === 'data') return <PetrophysicalTable key={i} content={part.content} />;
     if (part.type === 'simulation') return <SimulationHeatmap key={i} content={part.content} />;
+    if (part.type === 'plot') return <KrPlot key={i} content={part.content} />;
     if (part.type === 'audit') return (
       <div key={i} className="my-4 p-4 bg-yellow-950/20 border-l-4 border-yellow-600 rounded-r-xl shadow-inner font-mono text-[13px] text-yellow-100/90">
         <div className="flex items-center gap-2 mb-2 text-yellow-500 font-black tracking-widest text-[10px] uppercase">
