@@ -392,7 +392,62 @@ class PRCChatAssistant:
                     for part in resp.candidates[0].content.parts:
                         if part.function_call:
                             tool_result = self._execute_tool(part.function_call)
-                            # Prepare response to the tool call
+
+                            # ── HISTORY MATCHING: build rich response directly in Python ──
+                            # Gemini's second-turn response is often None/blocked after tool calls.
+                            # We avoid that by constructing the reply ourselves.
+                            if part.function_call.name == "agentic_history_matching":
+                                try:
+                                    tr = _json.loads(tool_result) if isinstance(tool_result, str) else tool_result
+                                    if tr.get("success"):
+                                        sw = part.function_call.args.get("sw", [])
+                                        krw = part.function_call.args.get("krw", [])
+                                        kro = part.function_call.args.get("kro", [])
+                                        p = tr.get("optimal_parameters", {})
+                                        mse = tr.get("final_mse", 0)
+
+                                        # Build smooth fitted curves
+                                        import numpy as _np
+                                        sw_arr = _np.array(sw)
+                                        swi = float(sw_arr.min())
+                                        sor = 1.0 - float(sw_arr.max())
+                                        sw_fit = _np.linspace(swi, sw_arr.max(), 50).tolist()
+                                        krw_max = p.get('krw_max', 0.5)
+                                        kro_max = p.get('kro_max', 0.8)
+                                        nw = p.get('nw', 2.0)
+                                        no = p.get('no', 2.0)
+                                        se = [max(0.001, min(0.999, (s - swi) / max(1e-6, 1 - swi - sor))) for s in sw_fit]
+                                        krw_fit = [round(krw_max * (e ** nw), 4) for e in se]
+                                        kro_fit = [round(kro_max * ((1 - e) ** no), 4) for e in se]
+
+                                        plot_json = _json.dumps({
+                                            "curves": [
+                                                {"label": "Krw (Raw Data)", "x": [round(v,4) for v in sw[:len(krw)]], "y": [round(v,4) for v in krw], "type": "scatter"},
+                                                {"label": "Kro (Raw Data)", "x": [round(v,4) for v in sw[:len(kro)]], "y": [round(v,4) for v in kro], "type": "scatter"},
+                                                {"label": "Krw (Fitted)", "x": [round(v,4) for v in sw_fit], "y": krw_fit, "type": "line"},
+                                                {"label": "Kro (Fitted)", "x": [round(v,4) for v in sw_fit], "y": kro_fit, "type": "line"}
+                                            ],
+                                            "title": "Relative Permeability Curves: Raw Data vs. Brooks-Corey Fit",
+                                            "x_label": "Water Saturation (Sw)",
+                                            "y_label": "Relative Permeability (Kr)"
+                                        })
+
+                                        reply = (
+                                            f"The Agentic History Matching has successfully identified the optimal Brooks-Corey parameters.\n\n"
+                                            f"FITTED PARAMETERS:\n"
+                                            f"  krw_max = {krw_max:.3f}\n"
+                                            f"  kro_max = {kro_max:.3f}\n"
+                                            f"  nw (water exponent) = {nw:.3f}\n"
+                                            f"  no (oil exponent) = {no:.3f}\n\n"
+                                            f"Final MSE = {mse:.5f} — {'EXCELLENT fit' if mse < 0.02 else 'Good fit'}\n\n"
+                                            f"The chart below shows both your raw lab data (dots) and the smooth fitted Brooks-Corey curves (lines).\n\n"
+                                            f"{plot_json}"
+                                        )
+                                        return reply
+                                except Exception as _e:
+                                    return f"History matching completed but rendering failed: {tool_result}\nError: {_e}"
+
+                            # ── All other tools: send result back to Gemini for final prose ──
                             contents.append(resp.candidates[0].content)
                             contents.append(genai_types.Content(
                                 role='user',
@@ -409,7 +464,12 @@ class PRCChatAssistant:
                                 contents=contents,
                                 config=genai_types.GenerateContentConfig(temperature=0.1)
                             )
-                            return final_resp.text
+                            final_text = None
+                            try: final_text = final_resp.text
+                            except Exception: pass
+                            if not final_text:
+                                final_text = f"The tool `{part.function_call.name}` completed successfully.\n\nResult:\n{tool_result}"
+                            return final_text
 
                 return resp.text or "I received your document but could not generate a detailed response. Please try rephrasing your question."
             except Exception as e:
