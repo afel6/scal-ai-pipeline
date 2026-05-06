@@ -1,4 +1,5 @@
 from fastapi import FastAPI, UploadFile, File, Form
+from contextlib import asynccontextmanager
 from fastapi.responses import FileResponse, StreamingResponse
 from fastapi.middleware.cors import CORSMiddleware
 import os, uuid, time, re, json as _json
@@ -9,22 +10,13 @@ from hviel_doc_engine import HvielDocEngine
 from skills_engine import SkillsEngine
 from docx import Document
 import keepalive
+# Fix 2: Google Gemini SDK Migration (google-generativeai -> google.genai)
+from google import genai as genai_new
+from google.genai import types as genai_types
+_USE_NEW_SDK = True
+genai = None # Removed legacy SDK import
 
-# ── Fix 2: Google Gemini SDK Migration (google-generativeai → google.genai) ──
-try:
-    from google import genai as genai_new
-    from google.genai import types as genai_types
-    _USE_NEW_SDK = True
-except ImportError:
-    import google.generativeai as genai  # old SDK
-    _USE_NEW_SDK = False
-
-# Ensure 'genai' name is always available for legacy fallbacks
-if _USE_NEW_SDK:
-    try: import google.generativeai as genai
-    except ImportError: genai = None
-
-# ── Fix 3: PostgreSQL + SQLite unified DB layer ──
+# â”€â”€ Fix 3: PostgreSQL + SQLite unified DB layer â”€â”€
 DATABASE_URL = os.getenv("DATABASE_URL", "").strip()
 _PG_AVAILABLE = False
 if DATABASE_URL:
@@ -38,7 +30,7 @@ if not _PG_AVAILABLE:
     import sqlite3
 
 
-# ── CONFIG ──
+# â”€â”€ CONFIG â”€â”€
 try:
     from dotenv import load_dotenv
     load_dotenv()
@@ -66,12 +58,12 @@ DB_PATH = "chat_history.db"  # used only when PostgreSQL is not available
 # Keep track of failed keys for rotation
 _FAILED_KEYS = {} # key -> timestamp of last 429
 
-# ── SYSTEM PROMPT ──
+# â”€â”€ SYSTEM PROMPT â”€â”€
 SYSTEM_PROMPT = """You are Hviel, an elite, highly capable Senior AI Petrophysical Specialist for the Libyan Petroleum Research Center (PRC). You operate with the confidence, extreme competence, and proactive energy of a top-tier DeepMind engineering agent. 
 
 MENTORSHIP & COMMUNICATION PROTOCOL:
 1. THE SENIOR MENTOR PERSONA: You are not just an AI; you are a Senior Advisor. Your goal is to build the user's engineering intuition.
-2. ANALOGY-FIRST EXPLANATION: Always explain complex physics using professional analogies. (e.g., "Think of the reservoir as a pressurized sponge," or "Relative permeability is like traffic flow on a multi-lane highway—the water and oil are competing for lanes.")
+2. ANALOGY-FIRST EXPLANATION: Always explain complex physics using professional analogies. (e.g., "Think of the reservoir as a pressurized sponge," or "Relative permeability is like traffic flow on a multi-lane highwayâ€”the water and oil are competing for lanes.")
 3. EXECUTIVE STRATEGY: Start every complex analysis with a block: `STRATEGY: [One-sentence high-level approach]`.
 4. SOCRATIC GUIDANCE: If you detect a mistake, explain the "Why" and the "Physics" behind the error before providing the fix.
 5. NO MARKDOWN BOLD: Use CAPITAL LETTERS or the new Audit Ledger for emphasis.
@@ -112,18 +104,18 @@ VISION AUDITOR PROTOCOL:
 GRAPHING & VISUALIZATION ENGINE:
 If the user asks you to plot a graph, draw a curve, or visualize data, you MUST include the exact sequence __PRC_PLOT__ followed immediately by a raw JSON object containing the plot parameters. DO NOT wrap the JSON in markdown code blocks.
 
-For a SINGLE curve (legacy format — still supported):
+For a SINGLE curve (legacy format â€” still supported):
 __PRC_PLOT__
 {"x": [0.0, 0.2, 0.4, 0.6, 0.8, 1.0], "y": [1.0, 0.6, 0.3, 0.1, 0.01, 0.0], "title": "Relative Permeability", "x_label": "Sw", "y_label": "Kr", "type": "line"}
 
-For MULTIPLE curves on the SAME axis (preferred for SCAL — e.g. Krw + Kro, drainage + imbibition):
+For MULTIPLE curves on the SAME axis (preferred for SCAL â€” e.g. Krw + Kro, drainage + imbibition):
 __PRC_PLOT__
 {"curves": [{"label": "Krw", "x": [0.0, 0.2, 0.4, 0.6, 0.8, 1.0], "y": [0.0, 0.05, 0.15, 0.35, 0.65, 1.0]}, {"label": "Kro", "x": [0.0, 0.2, 0.4, 0.6, 0.8, 1.0], "y": [1.0, 0.75, 0.45, 0.2, 0.04, 0.0]}], "title": "Relative Permeability Curves", "x_label": "Water Saturation (Sw)", "y_label": "Relative Permeability (Kr)"}
 
 Always use the multi-curve format when showing more than one data series. You can emit multiple __PRC_PLOT__ blocks in one response (e.g. one for Kr, one for Pc).
 
 PETREL XML EXPORTER:
-ONLY use this if the user EXPLICITLY mentions Petrel, Eclipse, or KAPPA software by name. Do NOT use this for regular Excel or spreadsheet requests — those must use `__PRC_EXCEL__` instead.
+ONLY use this if the user EXPLICITLY mentions Petrel, Eclipse, or KAPPA software by name. Do NOT use this for regular Excel or spreadsheet requests â€” those must use `__PRC_EXCEL__` instead.
 If the user asks you to export data to Petrel, Eclipse, or KAPPA, include the exact sequence __PETREL_EXPORT__ at the very start of your response, followed by structured, cleaned tabular data. The backend will automatically package it into a reservoir-compatible XML schematic file for them to download.
 
 AUTONOMOUS SKILLS & TOOLS:
@@ -158,7 +150,7 @@ You recognize that raw lab data is often noisy using your engineering cognition.
 4. TRANSPARENCY: Always propose showing BOTH the raw points and the smoothed curve in your response.
 """
 
-# ── TOOL DEFINITIONS (Gemini JSON Schema) ──
+# â”€â”€ TOOL DEFINITIONS (Gemini JSON Schema) â”€â”€
 _HVIEL_TOOLS = [
     {
         "function_declarations": [
@@ -220,7 +212,7 @@ _HVIEL_TOOLS = [
     }
 ]
 
-# ── HVIEL BRAIN (Fix 2: new google.genai SDK with old-SDK fallback) ──
+# â”€â”€ HVIEL BRAIN (Fix 2: new google.genai SDK with old-SDK fallback) â”€â”€
 class PRCChatAssistant:
     def __init__(self, keys: list):
         self.model_name = 'gemini-2.5-flash'
@@ -348,7 +340,7 @@ class PRCChatAssistant:
             valid_history.pop()
 
         if _USE_NEW_SDK:
-            # ── New google.genai SDK path ──
+            # â”€â”€ New google.genai SDK path â”€â”€
             SUPPORTED = ['application/pdf', 'image/jpeg', 'image/png', 'image/gif', 'image/webp']
             contents = []
             for h in valid_history:
@@ -393,7 +385,7 @@ class PRCChatAssistant:
                         if part.function_call:
                             tool_result = self._execute_tool(part.function_call)
 
-                            # ── HISTORY MATCHING: build rich response directly in Python ──
+                            # â”€â”€ HISTORY MATCHING: build rich response directly in Python â”€â”€
                             # Gemini's second-turn response is often None/blocked after tool calls.
                             # We avoid that by constructing the reply ourselves.
                             if part.function_call.name == "agentic_history_matching":
@@ -439,7 +431,7 @@ class PRCChatAssistant:
                                             f"  kro_max = {kro_max:.3f}\n"
                                             f"  nw (water exponent) = {nw:.3f}\n"
                                             f"  no (oil exponent) = {no:.3f}\n\n"
-                                            f"Final MSE = {mse:.5f} — {'EXCELLENT fit' if mse < 0.02 else 'Good fit'}\n\n"
+                                            f"Final MSE = {mse:.5f} â€” {'EXCELLENT fit' if mse < 0.02 else 'Good fit'}\n\n"
                                             f"The chart below shows both your raw lab data (dots) and the smooth fitted Brooks-Corey curves (lines).\n\n"
                                             f"{plot_json}"
                                         )
@@ -447,7 +439,7 @@ class PRCChatAssistant:
                                 except Exception as _e:
                                     return f"History matching completed but rendering failed: {tool_result}\nError: {_e}"
 
-                            # ── All other tools: send result back to Gemini for final prose ──
+                            # â”€â”€ All other tools: send result back to Gemini for final prose â”€â”€
                             contents.append(resp.candidates[0].content)
                             contents.append(genai_types.Content(
                                 role='user',
@@ -484,7 +476,7 @@ class PRCChatAssistant:
                     except: continue
                 raise e
         else:
-            # ── Old google.generativeai SDK fallback ──
+            # â”€â”€ Old google.generativeai SDK fallback â”€â”€
             c = [enriched]
             SUPPORTED = ['application/pdf', 'image/jpeg', 'image/png', 'image/gif', 'image/webp']
             for data, mime in f_parts:
@@ -492,7 +484,7 @@ class PRCChatAssistant:
                     c.append({'mime_type': mime, 'data': data})
             def _safe_text(response):
                 try: return response.text
-                except ValueError: return "The model returned an empty response — retry or rephrase."
+                except ValueError: return "The model returned an empty response â€” retry or rephrase."
             try:
                 return _safe_text(self.model.start_chat(history=valid_history).send_message(c))
             except Exception as e:
@@ -505,7 +497,7 @@ class PRCChatAssistant:
 
 
 class AnthropicAssistant:
-    # JSON schema prompts — Claude returns structured data, never raw markdown
+    # JSON schema prompts â€” Claude returns structured data, never raw markdown
     _DOCX_SCHEMA = """Return ONLY valid JSON (no markdown, no backticks, no explanation) with this exact structure:
 {
   "title": "Document Title",
@@ -531,7 +523,7 @@ Rules:
 2. Use professional, print-style chart data (Scientific White).
 3. level 1 = major section, level 2 = subsection. 
 4. CRITICAL: DO NOT EVER put raw markdown tables inside `paragraphs`. If you have tabular data, you MUST use the `tables` JSON array structure.
-WRITE REAL ENGINEERING CONTENT in paragraphs — not placeholder text."""
+WRITE REAL ENGINEERING CONTENT in paragraphs â€” not placeholder text."""
 
     _EXCEL_SCHEMA = """Return ONLY valid JSON (no markdown, no backticks, no explanation) with this exact structure:
 {
@@ -598,7 +590,7 @@ Create multiple sheets if appropriate (e.g. one for raw data, one for computed r
         return response.content[0].text
 
 
-# ── RAG ──
+# â”€â”€ RAG â”€â”€
 EMBED_MODEL = 'models/text-embedding-004'
 _EMBED_DIM   = 768  # text-embedding-004 output dimension
 
@@ -708,7 +700,7 @@ class KnowledgeBase:
                 _fetch = lambda: cur.fetchall()
                 _close = lambda: conn.close()
 
-            # ── Try semantic search ──
+            # â”€â”€ Try semantic search â”€â”€
             _exec("SELECT COUNT(*) FROM kb_vectors")
             vec_count = _fetch()[0][0]
             if vec_count > 0:
@@ -732,7 +724,7 @@ class KnowledgeBase:
                         parts   = [f"[From: {sources[i]}]\n{texts[i]}" for i in top_idx if scores[i] > 0.3]
                         return "\n\n".join(parts)
 
-            # ── Keyword fallback ──
+            # â”€â”€ Keyword fallback â”€â”€
             keywords = [w.lower() for w in re.split(r'\W+', query) if len(w) > 3]
             if not keywords:
                 _close()
@@ -770,7 +762,7 @@ class KnowledgeBase:
         except Exception:
             return ""
 
-# ── VISUALIZER ──
+# â”€â”€ VISUALIZER â”€â”€
 import io, base64
 import matplotlib
 matplotlib.use('Agg')
@@ -793,7 +785,7 @@ class Visualizer:
 
             curves = data.get('curves')  # new multi-curve schema
             if curves and isinstance(curves, list):
-                # ── Multi-curve mode ──
+                # â”€â”€ Multi-curve mode â”€â”€
                 for i, curve in enumerate(curves):
                     cx = curve.get('x', [])
                     cy = curve.get('y', [])
@@ -809,7 +801,7 @@ class Visualizer:
                             linewidth=2.5, markersize=7, label=lbl)
                 ax.legend(fontsize=10, framealpha=0.85)
             else:
-                # ── Legacy single-curve mode ──
+                # â”€â”€ Legacy single-curve mode â”€â”€
                 x = data.get('x', [])
                 y = data.get('y', [])
                 
@@ -838,7 +830,7 @@ class Visualizer:
         except Exception as e:
             return f"\n*(Failed to generate plot: {str(e)[:100]})*\n"
 
-# ── PETREL EXPORTER ──
+# â”€â”€ PETREL EXPORTER â”€â”€
 class PetrelExporter:
     @staticmethod
     def build_xml(well, data_str):
@@ -861,59 +853,13 @@ class PetrelExporter:
             f.write(xml)
         return fname
 
-# ── REPORTING ENGINE (HvielDocEngine — Claude's architecture) ──
-# from document_engines import DocumentEngines  # legacy — superseded by HvielDocEngine
+# â”€â”€ REPORTING ENGINE (HvielDocEngine â€” Claude's architecture) â”€â”€
+# from document_engines import DocumentEngines  # legacy â€” superseded by HvielDocEngine
 hviel_engine = HvielDocEngine(output_dir='.')   # saves .docx/.xlsx/.pptx/.pdf to working dir
 
-# ── APP SETUP ──
-app = FastAPI()
-app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
-assistant = PRCChatAssistant(GEMINI_KEY_POOL)
-
-# ── Fix 3: Unified DB layer — PostgreSQL when available, SQLite fallback ──
-def db(q, p=()):
-    if _PG_AVAILABLE:
-        import psycopg2
-        # Translate SQLite-style ? placeholders to PostgreSQL %s
-        pg_q = q.replace('?', '%s')
-        conn = psycopg2.connect(DATABASE_URL)
-        cur = conn.cursor()
-        cur.execute(pg_q, p)
-        try: res = cur.fetchall()
-        except: res = []
-        conn.commit()
-        cur.close()
-        conn.close()
-        return res
-    else:
-        conn = sqlite3.connect(DB_PATH)
-        c = conn.cursor()
-        c.execute(q, p)
-        res = c.fetchall()
-        conn.commit()
-        conn.close()
-        return res
-
-# Init tables — works for both PostgreSQL and SQLite
-if _PG_AVAILABLE:
-    # PostgreSQL uses SERIAL instead of INTEGER PRIMARY KEY
-    db('CREATE TABLE IF NOT EXISTS m (id SERIAL PRIMARY KEY, sid TEXT, role TEXT, text TEXT, url TEXT, ts REAL)')
-    db('CREATE TABLE IF NOT EXISTS kb (id SERIAL PRIMARY KEY, source TEXT, chunk TEXT)')
-    db('CREATE TABLE IF NOT EXISTS kb_vectors (id SERIAL PRIMARY KEY, chunk_id INTEGER UNIQUE, embedding BYTEA)')
-else:
-    db('CREATE TABLE IF NOT EXISTS m (id INTEGER PRIMARY KEY, sid TEXT, role TEXT, text TEXT, url TEXT, ts REAL)')
-    db('CREATE TABLE IF NOT EXISTS kb (id INTEGER PRIMARY KEY, source TEXT, chunk TEXT)')
-    db('CREATE TABLE IF NOT EXISTS kb_vectors (id INTEGER PRIMARY KEY, chunk_id INTEGER UNIQUE, embedding BLOB)')
-
-# ── Fix 1: Start keep-alive self-ping ──
-keepalive.start()
-
-@app.get('/health')
-def health():
-    return {'status': 'ok', 'db': 'postgres' if _PG_AVAILABLE else 'sqlite', 'sdk': 'google.genai' if _USE_NEW_SDK else 'google-generativeai'}
-
-@app.on_event("startup")  # TODO: migrate to lifespan= when fully on FastAPI 0.103+
-async def startup_event():
+# â”€â”€ APP SETUP â”€â”€
+@asynccontextmanager
+async def lifespan(app: FastAPI):
     import threading
     def _hydrate_background():
         import PyPDF2
@@ -948,18 +894,96 @@ async def startup_event():
 
     # Run hydration in background so the web server boots up immediately (prevents Render timeout/OOM)
     threading.Thread(target=_hydrate_background, daemon=True).start()
+    yield
 
-# ── ROUTES: SESSIONS ──
+app = FastAPI(lifespan=lifespan)
+app.add_middleware(
+    CORSMiddleware, 
+    allow_origins=[
+        "http://localhost:5173", 
+        "http://localhost:3000",
+        "https://prc-scal-ai-pipeline.vercel.app", 
+        "https://scal-hub.vercel.app"
+    ], 
+    allow_credentials=True,
+    allow_methods=["GET", "POST", "DELETE", "OPTIONS"], 
+    allow_headers=["*"]
+)
+assistant = PRCChatAssistant(GEMINI_KEY_POOL)
+
+# â”€â”€ Fix 3: Unified DB layer â€” PostgreSQL when available, SQLite fallback â”€â”€
+def db(q, p=()):
+    if _PG_AVAILABLE:
+        import psycopg2
+        # Translate SQLite-style ? placeholders to PostgreSQL %s
+        pg_q = q.replace('?', '%s')
+        conn = psycopg2.connect(DATABASE_URL)
+        cur = conn.cursor()
+        cur.execute(pg_q, p)
+        try: res = cur.fetchall()
+        except: res = []
+        conn.commit()
+        cur.close()
+        conn.close()
+        return res
+    else:
+        conn = sqlite3.connect(DB_PATH)
+        c = conn.cursor()
+        c.execute(q, p)
+        res = c.fetchall()
+        conn.commit()
+        conn.close()
+        return res
+
+# Init tables â€” works for both PostgreSQL and SQLite
+if _PG_AVAILABLE:
+    # PostgreSQL uses SERIAL instead of INTEGER PRIMARY KEY
+    db('CREATE TABLE IF NOT EXISTS m (id SERIAL PRIMARY KEY, sid TEXT, role TEXT, text TEXT, url TEXT, ts REAL)')
+    try: db('ALTER TABLE m ADD COLUMN user_email TEXT')
+    except: pass
+    db('CREATE TABLE IF NOT EXISTS kb (id SERIAL PRIMARY KEY, source TEXT, chunk TEXT)')
+    db('CREATE TABLE IF NOT EXISTS kb_vectors (id SERIAL PRIMARY KEY, chunk_id INTEGER UNIQUE, embedding BYTEA)')
+    db('CREATE TABLE IF NOT EXISTS users (id SERIAL PRIMARY KEY, email TEXT UNIQUE, name TEXT, created_at REAL)')
+    db('CREATE TABLE IF NOT EXISTS feedback (id SERIAL PRIMARY KEY, user_email TEXT, bug_report TEXT, ts REAL)')
+    db('CREATE TABLE IF NOT EXISTS analytics_events (id SERIAL PRIMARY KEY, user_email TEXT, event_type TEXT, event_data TEXT, ts REAL)')
+else:
+    db('CREATE TABLE IF NOT EXISTS m (id INTEGER PRIMARY KEY, sid TEXT, role TEXT, text TEXT, url TEXT, ts REAL)')
+    try: db('ALTER TABLE m ADD COLUMN user_email TEXT')
+    except: pass
+    db('CREATE TABLE IF NOT EXISTS kb (id INTEGER PRIMARY KEY, source TEXT, chunk TEXT)')
+    db('CREATE TABLE IF NOT EXISTS kb_vectors (id INTEGER PRIMARY KEY, chunk_id INTEGER UNIQUE, embedding BLOB)')
+    db('CREATE TABLE IF NOT EXISTS users (id INTEGER PRIMARY KEY, email TEXT UNIQUE, name TEXT, created_at REAL)')
+    db('CREATE TABLE IF NOT EXISTS feedback (id INTEGER PRIMARY KEY, user_email TEXT, bug_report TEXT, ts REAL)')
+    db('CREATE TABLE IF NOT EXISTS analytics_events (id INTEGER PRIMARY KEY, user_email TEXT, event_type TEXT, event_data TEXT, ts REAL)')
+
+# â”€â”€ Fix 1: Start keep-alive self-ping â”€â”€
+keepalive.start()
+
+# ── Register extra routes (feedback, analytics, user mgmt) ──
+from extra_routes import register_extra_routes
+register_extra_routes(app, db)
+
+@app.get('/health')
+def health():
+    return {'status': 'ok', 'db': 'postgres' if _PG_AVAILABLE else 'sqlite', 'sdk': 'google.genai' if _USE_NEW_SDK else 'google-generativeai'}
+
+# â”€â”€ ROUTES: SESSIONS â”€â”€
 @app.get("/api/sessions")
-def get_sessions():
+def get_sessions(email: str = None):
     try:
-        rows = db("SELECT sid, MIN(ts), text FROM m WHERE role='user' GROUP BY sid ORDER BY MIN(ts) DESC")
+        if email:
+            rows = db("SELECT sid, MIN(ts), text FROM m WHERE role='user' AND user_email=? GROUP BY sid ORDER BY MAX(ts) DESC", (email,))
+        else:
+            rows = db("SELECT sid, MIN(ts), text FROM m WHERE role='user' GROUP BY sid ORDER BY MAX(ts) DESC")
         return [{"id": r[0], "title": r[2].split('\n')[0][:40] + '...', "created_at": r[1]} for r in rows]
     except Exception as e: return []
 
 @app.delete("/api/session/{sid}")
-def del_session(sid: str):
-    db("DELETE FROM m WHERE sid = ?", (sid,))
+def del_session(sid: str, email: str = None):
+    if email:
+        db("DELETE FROM m WHERE sid = ? AND user_email = ?", (sid, email))
+    else:
+        db("DELETE FROM m WHERE sid = ?", (sid,))
     return {"status": "ok"}
 
 @app.get("/api/session/{sid}")
@@ -970,7 +994,7 @@ def get_session(sid: str):
         return {"status": "ok", "messages": [{"role": r, "text": t, "download_url": u, "ts": ts} for r, t, u, ts in rows]}
     except Exception as e: return {"status": "error"}
 
-# ── ROUTE: KNOWLEDGE BASE STATUS ──
+# â”€â”€ ROUTE: KNOWLEDGE BASE STATUS â”€â”€
 @app.get("/api/kb/status")
 def kb_status():
     try:
@@ -978,7 +1002,7 @@ def kb_status():
         return {"total_chunks": db("SELECT COUNT(*) FROM kb")[0][0], "books": [{"name": r[0], "chunks": r[1]} for r in rows]}
     except Exception as e: return {"error": str(e)}
 
-# ── ROUTE: KNOWLEDGE BASE INGESTION ──
+# â”€â”€ ROUTE: KNOWLEDGE BASE INGESTION â”€â”€
 @app.post("/api/kb/ingest")
 async def kb_ingest(file: UploadFile = File(...), password: str = Form(...)):
     if password != "1509":
@@ -1007,13 +1031,13 @@ async def kb_ingest(file: UploadFile = File(...), password: str = Form(...)):
         if len(text) < 100:
             return {"status": "error", "message": "File too short or unreadable"}
 
-        # BUG FIX 1: chunk_text was never called — NameError on 'chunks' would crash uploads
+        # BUG FIX 1: chunk_text was never called â€” NameError on 'chunks' would crash uploads
         chunks = KnowledgeBase.chunk_text(text, name)
 
         # Clear old data for this source using the unified db() layer
         old_ids = [r[0] for r in db("SELECT id FROM kb WHERE source = ?", (name,))]
         if old_ids:
-            # BUG FIX 4: Build safe parameterised IN clause — works for both SQLite (?) and PostgreSQL (%s)
+            # BUG FIX 4: Build safe parameterised IN clause â€” works for both SQLite (?) and PostgreSQL (%s)
             # The db() helper converts standalone ? to %s, but dynamic lists need manual handling
             if _PG_AVAILABLE:
                 placeholders = ','.join(['%s'] * len(old_ids))
@@ -1037,12 +1061,13 @@ async def kb_ingest(file: UploadFile = File(...), password: str = Form(...)):
     except Exception as e:
         return {"status": "error", "message": str(e)[:100]}
 
-# ── ROUTE: SSE STREAMING CHAT ──
+# â”€â”€ ROUTE: SSE STREAMING CHAT â”€â”€
 @app.get("/api/chat/stream")
 async def stream_chat(
     message: str,
     session_id: str = "",
-    engineer_name: str = "PRC Engineer"
+    engineer_name: str = "PRC Engineer",
+    user_email: str = None
 ):
     """Server-Sent Events endpoint for real-time Gemini token streaming."""
     async def event_generator():
@@ -1101,10 +1126,14 @@ async def stream_chat(
             if valid_history and valid_history[-1]['role'] == 'user':
                 valid_history.pop()
 
-            db("INSERT INTO m (sid, role, text, ts) VALUES (?, ?, ?, ?)",
-               (sid, "user", message, time.time()))
+            if user_email:
+                db("INSERT INTO m (sid, role, text, ts, user_email) VALUES (?, ?, ?, ?, ?)",
+                   (sid, "user", message, time.time(), user_email))
+            else:
+                db("INSERT INTO m (sid, role, text, ts) VALUES (?, ?, ?, ?)",
+                   (sid, "user", message, time.time()))
 
-            # Stream tokens — support both SDKs
+            # Stream tokens â€” support both SDKs
             full_resp = ""
             import asyncio
             loop = asyncio.get_event_loop()
@@ -1198,8 +1227,12 @@ async def stream_chat(
                     # BUG FIX: use json.dumps for correct escaping of all chars (\n, \t, ", \\, etc.)
                     yield f"data: {_json.dumps({'type': 'token', 'text': token})}\n\n"
 
-            db("INSERT INTO m (sid, role, text, ts) VALUES (?, ?, ?, ?)",
-               (sid, "model", full_resp.split("__PRC_")[0] if "__PRC_" in full_resp else full_resp, time.time()))
+            if user_email:
+                db("INSERT INTO m (sid, role, text, ts, user_email) VALUES (?, ?, ?, ?, ?)",
+                   (sid, "model", full_resp.split("__PRC_")[0] if "__PRC_" in full_resp else full_resp, time.time(), user_email))
+            else:
+                db("INSERT INTO m (sid, role, text, ts) VALUES (?, ?, ?, ?)",
+                   (sid, "model", full_resp.split("__PRC_")[0] if "__PRC_" in full_resp else full_resp, time.time()))
             yield f"data: {_json.dumps({'type': 'done'})}\n\n"
 
         except Exception as e:
@@ -1209,12 +1242,13 @@ async def stream_chat(
     return StreamingResponse(event_generator(), media_type="text/event-stream",
                              headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
 
-# ── ROUTE: CHAT ──
+# â”€â”€ ROUTE: CHAT â”€â”€
 @app.post("/api/chat")
 async def handle(
     message: str = Form(...),
     session_id: Optional[str] = Form(None),
     engineer_name: str = Form("PRC Engineer"),
+    user_email: Optional[str] = Form(None),
     files: list[UploadFile] = File(default=[])
 ):
     try:
@@ -1230,19 +1264,19 @@ async def handle(
             # --- STRUCTURED DATA ---
             if fname.endswith(('.xlsx', '.xls')) or "sheet" in mime:
                 df = pd.read_excel(pd.io.common.BytesIO(f_bytes))
-                message += f"\n[EXCEL — {fname}]:\n{df.head(10).to_string()}"
+                message += f"\n[EXCEL â€” {fname}]:\n{df.head(10).to_string()}"
             elif fname.endswith('.csv'):
                 df = pd.read_csv(pd.io.common.BytesIO(f_bytes))
-                message += f"\n[CSV — {fname}]:\n{df.head(10).to_string()}"
+                message += f"\n[CSV â€” {fname}]:\n{df.head(10).to_string()}"
             
             # --- TEXT DOCUMENTS ---
             elif fname.endswith('.docx'):
                 from io import BytesIO as _BytesIO
                 doc = Document(_BytesIO(f_bytes))
                 doc_text = "\n".join([p.text for p in doc.paragraphs if p.text.strip()])
-                message += f"\n[WORD DOC — {fname}]:\n{doc_text[:15000]}"
+                message += f"\n[WORD DOC â€” {fname}]:\n{doc_text[:15000]}"
             elif fname.endswith('.txt'):
-                message += f"\n[TEXT FILE — {fname}]:\n{f_bytes.decode('utf-8', errors='ignore')[:15000]}"
+                message += f"\n[TEXT FILE â€” {fname}]:\n{f_bytes.decode('utf-8', errors='ignore')[:15000]}"
             
             # --- BINARY (VISION / NATIVE PDF) ---
             else:
@@ -1273,7 +1307,10 @@ async def handle(
             kb_context = KnowledgeBase.search(message)
 
         # SAVE USER MESSAGE TO DB
-        db("INSERT INTO m (sid, role, text, ts) VALUES (?, ?, ?, ?)", (sid, "user", message, time.time()))
+        if user_email:
+            db("INSERT INTO m (sid, role, text, ts, user_email) VALUES (?, ?, ?, ?, ?)", (sid, "user", message, time.time(), user_email))
+        else:
+            db("INSERT INTO m (sid, role, text, ts) VALUES (?, ?, ?, ?)", (sid, "user", message, time.time()))
 
         # Limit history heavily to speed up the prompt evaluation
         history_rows = db("SELECT role, text, url FROM m WHERE sid = ? ORDER BY id DESC LIMIT 12", (sid,))
@@ -1303,12 +1340,12 @@ async def handle(
                 else:
                     raise e
 
-        # ── GEMINI NATIVE ENGINE ──
+        # â”€â”€ GEMINI NATIVE ENGINE â”€â”€
         # Safety: Gemini can return None for blocked or empty responses
         if not resp:
             resp = "I was unable to generate a response for this request. Please try rephrasing your question or uploading a smaller file."
 
-        # Handle Graphs — iterate over ALL __PRC_PLOT__ tokens in one response
+        # Handle Graphs â€” iterate over ALL __PRC_PLOT__ tokens in one response
         _plot_attempts = 0
         while '__PRC_PLOT__' in resp and _plot_attempts < 10:
             _plot_attempts += 1
@@ -1326,7 +1363,7 @@ async def handle(
                     import json
                     plot_data, end_idx = json.JSONDecoder().raw_decode(after_stripped)
                 except json.JSONDecodeError:
-                    # No valid JSON object after this token — strip the dangling token and stop
+                    # No valid JSON object after this token â€” strip the dangling token and stop
                     resp = before + "\n" + after_stripped
                     break
                 
@@ -1409,7 +1446,18 @@ async def list_skills():
         ]
     }
 
-# ── DIAG ──
+
+# â”€â”€ ROUTE: ANALYTICS â”€â”€
+@app.post("/api/analytics/event")
+async def track_event(
+    user_email: str = Form(""),
+    event_type: str = Form(...),
+    event_data: str = Form("")
+):
+    db("INSERT INTO analytics_events (user_email, event_type, event_data, ts) VALUES (?, ?, ?, ?)", (user_email, event_type, event_data, time.time()))
+    return {"status": "ok"}
+
+# â”€â”€ DIAG â”€â”€
 @app.get("/api/diag")
 def diag():
     try:
@@ -1461,7 +1509,7 @@ async def dl(filename: str):
         }
     )
 
-# ── ROUTE: VISION AUDIT ──
+# â”€â”€ ROUTE: VISION AUDIT â”€â”€
 @app.post("/api/vision/audit")
 async def vision_audit(file: UploadFile = File(...), query: str = Form(...), session_id: str = Form("")):
     """Explicit endpoint for manual vision audits."""
@@ -1487,3 +1535,4 @@ async def vision_audit(file: UploadFile = File(...), query: str = Form(...), ses
 
 @app.get("/")
 def root(): return {"v": "PRC-HUB-VER-13-PROD-READY", "model": assistant.model_name, "status": "online"}
+

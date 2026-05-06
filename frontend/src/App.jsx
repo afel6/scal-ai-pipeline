@@ -1,11 +1,14 @@
 import React, { useState, useRef, useEffect, useCallback, startTransition } from 'react';
+import { AlertTriangle, Shield, Cookie as CookieIcon, Bug, BarChart3 } from 'lucide-react';
 import { Send, Paperclip, Bot, User, Download, FileText, Database, Circle, PlusCircle, Trash2, MessageSquare, X, Wifi, WifiOff, Loader, LogOut, Menu, BookOpen, Upload, CheckCircle, Camera, RefreshCw, Layers } from 'lucide-react';
 import axios from 'axios';
 import SidebarTabs from './SidebarTabs';
 import Mermaid from './Mermaid';
 import VisualAudit from './VisualAudit';
+import { FeedbackModal, PrivacyModal, TermsModal, CookieConsent, trackEvent } from './PrcModals';
 import SimulationHeatmap from './SimulationHeatmap';
 import KrPlot from './KrPlot';
+import AdminDashboard from './AdminDashboard';
 
 const API_URL = import.meta.env.VITE_API_URL || 'http://localhost:8000';
 
@@ -42,7 +45,7 @@ function PetrophysicalTable({ content }) {
                   <tr key={i} className="hover:bg-yellow-900/5 transition-colors group">
                     {values.map((v, j) => (
                       <td key={j} className={`px-4 py-3 text-xs font-serif ${v === null || v === 'NaN' || v === 'nan' ? 'text-slate-700 italic' : 'text-slate-300'}`}>
-                        {v === null || v === 'NaN' || v === 'nan' ? '—' : (typeof v === 'number' ? v.toFixed(3) : v)}
+                        {v === null || v === 'NaN' || v === 'nan' ? 'â€”' : (typeof v === 'number' ? v.toFixed(3) : v)}
                       </td>
                     ))}
                   </tr>
@@ -66,7 +69,7 @@ function PetrophysicalTable({ content }) {
 // Splits a message into text, embedded charts, mermaid diagrams, and audit logs
 function renderMessageContent(text) {
   if (!text) return null;
-  // Match markdown images: ![alt](src) — supports data URIs and http URLs
+  // Match markdown images: ![alt](src) â€” supports data URIs and http URLs
   const imgRegex = /!\[([^\]]*)\]\((data:[^)]+|https?:[^)]+)\)/g;
   const parts = [];
   let lastIndex = 0;
@@ -202,9 +205,16 @@ function App() {
   const [lastMessage, setLastMessage] = useState(null);
   const [retryCooldown, setRetryCooldown] = useState(0);
   const [sessions, setSessions] = useState([]);
-  const [sidebarOpen, setSidebarOpen] = useState(false); // default closed on mobile
+  const [sidebarOpen, setSidebarOpen] = useState(false);
+  const [showFeedback, setShowFeedback] = useState(false);
+  const [showPrivacy, setShowPrivacy] = useState(false);
+  const [showTerms, setShowTerms] = useState(false); // default closed on mobile
   const [serverStatus, setServerStatus] = useState('waking');
   const [activeTab, setActiveTab] = useState('chats');
+  const [showAdmin, setShowAdmin] = useState(false);
+  const [showAdminGate, setShowAdminGate] = useState(false);
+  const [adminPin, setAdminPin] = useState('');
+  const [adminPinError, setAdminPinError] = useState(false);
   const messagesEndRef = useRef(null);
   const inputRef = useRef(null);
 
@@ -246,7 +256,7 @@ function App() {
 
   useEffect(() => {
     refreshSessions();
-    // Poll every 8s instead of 5s — reduces server overhead by 37%
+    // Poll every 8s instead of 5s â€” reduces server overhead by 37%
     const interval = setInterval(refreshSessions, 8000);
     return () => clearInterval(interval);
   }, [refreshSessions]);
@@ -311,20 +321,21 @@ function App() {
 
     setLoading(true);
 
-    // ── Smart Route Logic ──
+    // â”€â”€ Smart Route Logic â”€â”€
     // Bug fix: added 'plot','chart','graph','curve','generate' so visualization
     // requests correctly route to the Document Engine (not SSE which can't handle them)
     const triggerWords = ['document', 'report', 'excel', 'word', 'docx', 'xlsx',
       'spreadsheet', 'matrix', 'download', 'plot', 'chart', 'graph', 'curve', 'generate'];
     const isDocRequest = triggerWords.some(w => msgText.toLowerCase().includes(w));
 
-    // ── SSE Streaming path: plain text, no files, no document generation requests ──
+    // â”€â”€ SSE Streaming path: plain text, no files, no document generation requests â”€â”€
     if (msgFiles.length === 0 && !retryObj && !isDocRequest) {
       setUploadStatus('thinking');
       const params = new URLSearchParams({
         message: msgText,
         session_id: sessionId,
         engineer_name: user?.name || 'PRC Engineer',
+        user_email: user?.email || '',
       });
       const es = new EventSource(`${API_URL}/api/chat/stream?${params}`);
       let streamedText = '';
@@ -341,7 +352,7 @@ function App() {
             setMessages(prev => {
               const next = [...prev];
               if (streamMsgIdx === null) {
-                // First token — append a new bubble
+                // First token â€” append a new bubble
                 streamMsgIdx = next.length;
                 next.push({ role: 'model', text: streamedText });
               } else {
@@ -361,7 +372,7 @@ function App() {
             const isDocEngineError = data.msg?.includes('generate document') || data.msg?.includes('Document Engine');
             setMessages(prev => [...prev, {
               role: 'model',
-              text: `❌ ${data.msg}`,
+              text: `âŒ ${data.msg}`,
               isError: true,
               isDocEngineError,
             }]);
@@ -374,14 +385,14 @@ function App() {
 
       es.onerror = () => {
         if (streamedText) {
-          // We got a partial response — the SSE just closed cleanly
+          // We got a partial response â€” the SSE just closed cleanly
           es.close();
           setLoading(false);
           setUploadStatus('');
           refreshSessions();
         } else {
           es.close();
-          setMessages(prev => [...prev, { role: 'model', text: '❌ Connection error. I am unable to reach the PRC Hub at this moment.', isError: true }]);
+          setMessages(prev => [...prev, { role: 'model', text: 'âŒ Connection error. I am unable to reach the PRC Hub at this moment.', isError: true }]);
           setLoading(false);
           setUploadStatus('');
           setServerStatus('offline');
@@ -390,11 +401,12 @@ function App() {
       return;
     }
 
-    // ── Blocking POST path: files or retries ──
+    // â”€â”€ Blocking POST path: files or retries â”€â”€
     const formData = new FormData();
     formData.append('message', msgText);
     formData.append('session_id', sessionId);
     formData.append('engineer_name', user?.name || 'PRC Engineer');
+    formData.append('user_email', user?.email || '');
     msgFiles.forEach(f => formData.append('files', f));
     setUploadStatus(msgFiles.length > 0 ? 'uploading' : 'thinking');
     try {
@@ -412,14 +424,14 @@ function App() {
           doc_type: response.data.doc_type || 'docx'
         }]);
       } else {
-        setMessages(prev => [...prev, { role: 'model', text: `❌ ${response.data.reply}`, isError: true }]);
+        setMessages(prev => [...prev, { role: 'model', text: `âŒ ${response.data.reply}`, isError: true }]);
       }
       await refreshSessions();
     } catch (err) {
       if (err.code === 'ECONNABORTED') {
-        setMessages(prev => [...prev, { role: 'model', text: '❌ Generation timed out. Deep AI analysis or massive document generation can take up to 4 minutes. Please try again or submit a smaller dataset.', isError: true }]);
+        setMessages(prev => [...prev, { role: 'model', text: 'âŒ Generation timed out. Deep AI analysis or massive document generation can take up to 4 minutes. Please try again or submit a smaller dataset.', isError: true }]);
       } else {
-        setMessages(prev => [...prev, { role: 'model', text: '❌ Connection error. I am unable to reach the PRC Hub at this moment.', isError: true }]);
+        setMessages(prev => [...prev, { role: 'model', text: 'âŒ Connection error. I am unable to reach the PRC Hub at this moment.', isError: true }]);
       }
       setServerStatus('offline');
     } finally {
@@ -436,7 +448,7 @@ function App() {
     }
   }, [retryCooldown]);
 
-  // Hoisted outside render cycle via useMemo — avoids object recreation on every render (Vercel perf skill)
+  // Hoisted outside render cycle via useMemo â€” avoids object recreation on every render (Vercel perf skill)
   const status = React.useMemo(() => ({
     waking:  { icon: <Loader className="w-3 h-3 animate-spin" />, text: 'Connecting...', color: 'text-yellow-500' },
     online:  { icon: <Circle className="w-2 h-2 fill-green-500" />, text: 'Online',   color: 'text-green-400' },
@@ -450,9 +462,53 @@ function App() {
     }} />;
   }
 
+  if (showAdmin) {
+    return <AdminDashboard onBack={() => setShowAdmin(false)} />;
+  }
+
   return (
     <div className="flex h-screen w-screen bg-[#09090b] text-slate-100 overflow-hidden relative font-sans">
       
+      {/* Admin PIN Gate Modal */}
+      {showAdminGate && (
+        <div className="fixed inset-0 bg-black/70 z-50 flex items-center justify-center backdrop-blur-sm" onClick={() => setShowAdminGate(false)}>
+          <div className="bg-[#0c0c10] border border-amber-900/30 rounded-2xl p-8 w-80 shadow-2xl" onClick={e => e.stopPropagation()}>
+            <div className="flex items-center gap-3 mb-5">
+              <div className="p-2 rounded-xl bg-amber-950/30 border border-amber-900/20">
+                <Shield className="w-5 h-5 text-amber-400" />
+              </div>
+              <div>
+                <h3 className="text-sm font-black text-white tracking-tight">Admin Access</h3>
+                <p className="text-[10px] text-slate-600 font-mono uppercase tracking-widest">Enter PIN to continue</p>
+              </div>
+            </div>
+            <input
+              type="password"
+              maxLength={4}
+              value={adminPin}
+              onChange={e => { setAdminPin(e.target.value); setAdminPinError(false); }}
+              onKeyDown={e => {
+                if (e.key === 'Enter') {
+                  if (adminPin === '0608') { setShowAdminGate(false); setShowAdmin(true); }
+                  else { setAdminPinError(true); }
+                }
+              }}
+              placeholder="••••"
+              autoFocus
+              className={`auth-input text-center text-2xl tracking-[0.5em] mb-3 ${adminPinError ? 'border-red-500/60 shake' : ''}`}
+            />
+            {adminPinError && <p className="text-xs text-red-400 text-center mb-3">Incorrect PIN</p>}
+            <button
+              onClick={() => {
+                if (adminPin === '0608') { setShowAdminGate(false); setShowAdmin(true); }
+                else { setAdminPinError(true); }
+              }}
+              className="auth-button text-sm"
+            >Authenticate</button>
+          </div>
+        </div>
+      )}
+
       {/* Mobile overlay backdrop */}
       {sidebarOpen && (
         <div
@@ -485,7 +541,7 @@ function App() {
           </div>
         </div>
 
-        {/* Tabs + Session list + Library — handled by SidebarTabs */}
+        {/* Tabs + Session list + Library â€” handled by SidebarTabs */}
         <SidebarTabs 
           sessionId={sessionId} 
           sessions={sessions} 
@@ -496,7 +552,7 @@ function App() {
         />
 
         <div className="p-4 border-t border-slate-800/60 shrink-0">
-          <p className="text-[10px] text-slate-700 font-mono tracking-widest uppercase text-center">Petroleum Research Center · Libya</p>
+          <button onClick={() => setShowFeedback(true)} className="w-full mb-2 flex items-center justify-center gap-1.5 text-[10px] text-slate-500 hover:text-yellow-400 border border-slate-800 hover:border-yellow-800 py-1.5 rounded-lg transition-all uppercase tracking-widest font-mono"><span>Report Bug</span></button><p className="text-[10px] text-slate-700 font-mono tracking-widest uppercase text-center">Petroleum Research Center · Libya</p>
         </div>
       </aside>
 
@@ -531,6 +587,13 @@ function App() {
                 <p className="text-xs text-white font-serif italic truncate max-w-[120px]">{user.name}</p>
               </div>
               <button
+                onClick={() => { setShowAdminGate(true); setAdminPin(''); setAdminPinError(false); }}
+                className="p-2 hover:bg-yellow-950/30 text-slate-500 hover:text-amber-400 rounded-lg transition-colors"
+                title="Admin Dashboard"
+              >
+                <BarChart3 className="w-4 h-4" />
+              </button>
+              <button
                 onClick={() => { localStorage.removeItem('prc_user'); setUser(null); }}
                 className="p-2 hover:bg-yellow-950/30 text-slate-500 hover:text-yellow-400 rounded-lg transition-colors"
               >
@@ -547,7 +610,7 @@ function App() {
             {serverStatus === 'waking' && (
               <div className="bg-yellow-950/40 border-b border-yellow-800/30 px-4 py-2 flex items-center gap-2 shrink-0">
                 <Loader className="w-3.5 h-3.5 text-yellow-500 animate-spin shrink-0" />
-                <p className="text-xs text-yellow-400/80">Waking up the AI server — please wait ~30 seconds…</p>
+                <p className="text-xs text-yellow-400/80">Waking up the AI server â€” please wait ~30 secondsâ€¦</p>
               </div>
             )}
 
@@ -586,7 +649,7 @@ function App() {
                         className="mt-3 w-full bg-gradient-to-r from-yellow-900/40 to-amber-900/30 hover:from-yellow-800/50 hover:to-amber-800/40 border border-yellow-600/50 text-yellow-200 font-bold tracking-widest uppercase px-4 py-3 rounded-xl flex items-center justify-center gap-2 text-xs transition-all active:scale-95 disabled:opacity-30 shadow-lg"
                       >
                         {loading ? <Loader className="w-4 h-4 animate-spin" /> : <FileText className="w-4 h-4" />}
-                        {loading ? 'GENERATING REPORT…' : 'EXPORT AS PRC REPORT'}
+                        {loading ? 'GENERATING REPORTâ€¦' : 'EXPORT AS PRC REPORT'}
                       </button>
                     )}
                     {msg.download_url && (
@@ -605,14 +668,14 @@ function App() {
                         className="mt-3 w-full bg-yellow-600/20 hover:bg-yellow-600/35 border border-yellow-500/50 text-yellow-300 font-bold tracking-widest uppercase text-[10px] py-2.5 rounded-lg flex items-center justify-center gap-2 transition-all active:scale-95 disabled:opacity-30"
                       >
                         {loading ? <Loader className="w-3 h-3 animate-spin" /> : <Download className="w-3 h-3" />}
-                        {loading ? 'GENERATING…' : 'GENERATE CHART / DOCUMENT'}
+                        {loading ? 'GENERATINGâ€¦' : 'GENERATE CHART / DOCUMENT'}
                       </button>
                     )}
                     {msg.isError && !msg.isDocEngineError && lastMessage && (
                       <button onClick={() => handleSend(lastMessage)} disabled={loading || retryCooldown > 0}
                         className="mt-3 w-full bg-amber-950/20 hover:bg-amber-950/40 border border-amber-600/50 text-amber-300 font-bold tracking-widest uppercase text-[10px] py-2.5 rounded-lg flex items-center justify-center gap-2 transition-all active:scale-95 disabled:opacity-30">
                         {loading ? <Loader className="w-3 h-3 animate-spin" /> : <Wifi className="w-3 h-3 text-yellow-500" />}
-                        {loading ? 'RETRYING...' : retryCooldown > 0 ? `RE-TRY IN ${retryCooldown}s…` : 'RE-TRY REQUEST'}
+                        {loading ? 'RETRYING...' : retryCooldown > 0 ? `RE-TRY IN ${retryCooldown}sâ€¦` : 'RE-TRY REQUEST'}
                       </button>
                     )}
                   </div>
@@ -629,7 +692,7 @@ function App() {
                     {uploadStatus === 'uploading' ? (
                       <>
                         <Loader className="w-4 h-4 text-yellow-400 animate-spin shrink-0" />
-                        <span className="text-sm text-yellow-300/80 font-serif">Uploading file…</span>
+                        <span className="text-sm text-yellow-300/80 font-serif">Uploading fileâ€¦</span>
                       </>
                     ) : (
                       <>
@@ -703,10 +766,14 @@ function App() {
         ) : (
           <div className="flex-1 flex flex-col items-center justify-center bg-[#0c0c10] text-slate-600">
             <BookOpen className="w-12 h-12 mb-4 opacity-20" />
-            <p className="text-sm font-mono tracking-widest uppercase opacity-40">Library Mode — Use Sidebar to Manage Data</p>
+            <p className="text-sm font-mono tracking-widest uppercase opacity-40">Library Mode â€” Use Sidebar to Manage Data</p>
           </div>
         )}
       </div>
+      {showFeedback && <FeedbackModal userEmail={user?.email} onClose={() => setShowFeedback(false)} />}
+      {showPrivacy && <PrivacyModal onClose={() => setShowPrivacy(false)} />}
+      {showTerms && <TermsModal onClose={() => setShowTerms(false)} />}
+      <CookieConsent />
     </div>
   );
 }
@@ -714,11 +781,14 @@ function App() {
 function Login({ onLogin }) {
   const [id, setId] = useState('');
   const [name, setName] = useState('');
+  const [email, setEmail] = useState('');
   const [error, setError] = useState('');
 
   const handleAuth = () => {
     if (id === '1509') {
-      onLogin({ name, id });
+      const fd = new FormData(); fd.append('email', email); fd.append('name', name);
+      fetch((import.meta.env.VITE_API_URL || 'http://localhost:8000') + '/api/register', {method:'POST', body: fd}).catch(()=>{});
+      onLogin({ name, id, email });
     } else {
       setError('Invalid MFA Credentials. Access Denied.');
       setId('');
@@ -753,6 +823,12 @@ function Login({ onLogin }) {
                 placeholder="e.g. Eng. Ahmed Al-Lafi" className="auth-input" />
             </div>
             <div className="space-y-2">
+              <label className="text-[10px] font-bold text-slate-400 uppercase tracking-widest ml-2">Email Address</label>
+              <input type="email" value={email} onChange={(e) => setEmail(e.target.value)}
+                onKeyDown={(e) => e.key === 'Enter' && name && email && id && handleAuth()}
+                placeholder="e.g. ahmed@prc.ly" className="auth-input" />
+            </div>
+            <div className="space-y-2">
               <label className="text-[10px] font-bold text-slate-400 uppercase tracking-widest ml-2">PRC Access Code</label>
               <input type="password" value={id} onChange={(e) => { setId(e.target.value); setError(''); }}
                 onKeyDown={(e) => e.key === 'Enter' && name && id && handleAuth()}
@@ -760,9 +836,15 @@ function Login({ onLogin }) {
             </div>
           </div>
           {error && <p className="text-yellow-500 text-[10px] text-center font-bold tracking-widest uppercase">{error}</p>}
-          <button onClick={handleAuth} disabled={!name || !id} className="auth-button">
+                    <button onClick={handleAuth} disabled={!name || !id || !email} className="auth-button">
             Authenticate Session
           </button>
+          
+          <div className="flex justify-center gap-4 mt-6 text-[10px] text-slate-500 font-mono tracking-widest uppercase">
+            <button onClick={() => setShowPrivacy(true)} className="hover:text-yellow-500 transition-colors">Privacy Policy</button>
+            <span className="opacity-30">|</span>
+            <button onClick={() => setShowTerms(true)} className="hover:text-yellow-500 transition-colors">Terms of Service</button>
+          </div>
         </div>
       </div>
     </div>
@@ -770,3 +852,11 @@ function Login({ onLogin }) {
 }
 
 export default App;
+
+
+
+
+
+
+
+
