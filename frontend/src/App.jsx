@@ -497,16 +497,18 @@ function App() {
 
 
   const refreshSessions = useCallback(async () => {
-
     try {
-
-      const { data } = await axios.get(`${API_URL}/api/sessions`);
+      const emailParam = user?.email ? `?email=${user.email}` : '';
+      const { data } = await axios.get(`${API_URL}/api/sessions${emailParam}`);
+  useEffect(() => {
+    if (user?.email && !sessionId && sessions.length > 0) {
+      handleLoadSession(sessions[0].id);
+    }
+  }, [user, sessionId, sessions]);
 
       setSessions(data);
-
     } catch {}
-
-  }, []);
+  }, [user]);
 
 
 

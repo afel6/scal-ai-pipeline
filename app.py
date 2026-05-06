@@ -1421,7 +1421,7 @@ async def handle(
 
         if doc_type:
             url = f"/api/download/{path}"
-            db("INSERT INTO m (sid, role, text, url, ts) VALUES (?, ?, ?, ?, ?)", (sid, "model", clean_resp, url, time.time()))
+            db("INSERT INTO m (sid, role, text, url, ts, user_email) VALUES (?, ?, ?, ?, ?, ?)", (sid, "model", clean_resp, url, time.time(), user_email))
             return {"status": "success", "is_report_ready": True, "download_url": url, "doc_type": doc_type, "session_id": sid, "reply": clean_resp}
 
         # Handle Petrel Exports
@@ -1429,10 +1429,10 @@ async def handle(
             clean_resp = resp.replace('__PETREL_EXPORT__', '').strip()
             path = PetrelExporter.build_xml(f"Study_{int(time.time())}", clean_resp)
             url = f"/api/download/{path}"
-            db("INSERT INTO m (sid, role, text, url, ts) VALUES (?, ?, ?, ?, ?)", (sid, "model", clean_resp, url, time.time()))
+            db("INSERT INTO m (sid, role, text, url, ts, user_email) VALUES (?, ?, ?, ?, ?, ?)", (sid, "model", clean_resp, url, time.time(), user_email))
             return {"status": "success", "is_report_ready": True, "download_url": url, "session_id": sid, "reply": clean_resp}
 
-        db("INSERT INTO m (sid, role, text, ts) VALUES (?, ?, ?, ?)", (sid, "model", resp, time.time()))
+        db("INSERT INTO m (sid, role, text, ts, user_email) VALUES (?, ?, ?, ?, ?)", (sid, "model", resp, time.time(), user_email))
         return {"status": "success", "session_id": sid, "reply": resp}
 
     except Exception as e:
@@ -1562,3 +1562,15 @@ def serve_frontend(filename: str):
     if os.path.exists(index):
         return FileResponse(index, media_type="text/html")
     return {"error": "not found"}
+
+@app.get("/api/chat/history")
+async def get_chat_history(email: str):
+    """Fetch all messages for a specific user email."""
+    if not email: return {"messages": []}
+    rows = db("SELECT role, text, url, ts FROM m WHERE user_email = ? ORDER BY ts ASC", (email.lower().strip(),))
+    return {
+        "messages": [
+            {"role": r[0], "text": r[1], "download_url": r[2], "ts": r[3]} 
+            for r in rows
+        ]
+    }
