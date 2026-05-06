@@ -2,7 +2,7 @@ import React, { useState, useEffect } from 'react';
 import { Users, MessageSquare, BarChart3, Bug, Database, Activity, ArrowLeft, RefreshCw, Clock, Mail, ChevronDown, ChevronUp } from 'lucide-react';
 import axios from 'axios';
 
-const API_URL = import.meta.env.VITE_API_URL || 'http://localhost:8000';
+const API_URL = import.meta.env.VITE_API_URL || '';
 
 /* ── Stat Card ─────────────────────────────────────────────────────────── */
 function StatCard({ icon: Icon, label, value, color, delay = 0 }) {

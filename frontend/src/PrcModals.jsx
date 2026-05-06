@@ -2,7 +2,7 @@ import React, { useState, useEffect } from 'react';
 import { X, Bug, Shield, FileText } from 'lucide-react';
 import axios from 'axios';
 
-const API_URL = import.meta.env.VITE_API_URL || 'http://localhost:8000';
+const API_URL = import.meta.env.VITE_API_URL || '';
 
 // ── FEEDBACK MODAL ──
 export function FeedbackModal({ userEmail, onClose }) {

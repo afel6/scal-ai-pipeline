@@ -898,15 +898,17 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(lifespan=lifespan)
 app.add_middleware(
-    CORSMiddleware, 
+    CORSMiddleware,
     allow_origins=[
-        "http://localhost:5173", 
+        "http://localhost:5173",
         "http://localhost:3000",
-        "https://prc-scal-ai-pipeline.vercel.app", 
-        "https://scal-hub.vercel.app"
-    ], 
+        "https://prc-scal-ai-pipeline.vercel.app",
+        "https://scal-hub.vercel.app",
+        "https://scal-ai-pipeline.onrender.com",
+        "https://scal-ai-backend.onrender.com",
+    ],
     allow_credentials=True,
-    allow_methods=["GET", "POST", "DELETE", "OPTIONS"], 
+    allow_methods=["GET", "POST", "DELETE", "OPTIONS"],
     allow_headers=["*"]
 )
 assistant = PRCChatAssistant(GEMINI_KEY_POOL)
@@ -1534,5 +1536,27 @@ async def vision_audit(file: UploadFile = File(...), query: str = Form(...), ses
         return {"status": "error", "message": str(e)}
 
 @app.get("/")
-def root(): return {"v": "PRC-HUB-VER-13-PROD-READY", "model": assistant.model_name, "status": "online"}
+def root():
+    # Serve frontend index.html if dist exists, otherwise return API status
+    dist_index = os.path.join(os.path.dirname(__file__), "frontend", "dist", "index.html")
+    if os.path.exists(dist_index):
+        return FileResponse(dist_index, media_type="text/html")
+    return {"v": "PRC-HUB-VER-13-PROD-READY", "model": assistant.model_name, "status": "online"}
 
+# -- Serve frontend static assets from dist --
+from fastapi.staticfiles import StaticFiles
+_dist_dir = os.path.join(os.path.dirname(__file__), "frontend", "dist")
+if os.path.isdir(os.path.join(_dist_dir, "assets")):
+    app.mount("/assets", StaticFiles(directory=os.path.join(_dist_dir, "assets")), name="frontend-assets")
+
+# Serve any other static files from dist (favicon, icons, images)
+@app.get("/{filename:path}")
+def serve_frontend(filename: str):
+    filepath = os.path.join(_dist_dir, filename)
+    if os.path.isfile(filepath):
+        return FileResponse(filepath)
+    # SPA fallback: return index.html for client-side routing
+    index = os.path.join(_dist_dir, "index.html")
+    if os.path.exists(index):
+        return FileResponse(index, media_type="text/html")
+    return {"error": "not found"}

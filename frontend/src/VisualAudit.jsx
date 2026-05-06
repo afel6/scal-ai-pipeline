@@ -2,7 +2,7 @@ import React, { useState, useRef } from 'react';
 import { Camera, Upload, ShieldCheck, AlertTriangle, ArrowRight, Loader, Zap } from 'lucide-react';
 import axios from 'axios';
 
-const API_URL = import.meta.env.VITE_API_URL || 'http://localhost:8000';
+const API_URL = import.meta.env.VITE_API_URL || '';
 
 export default function VisualAudit() {
   const [file, setFile] = useState(null);
