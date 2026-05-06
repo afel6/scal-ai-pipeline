@@ -1,6 +1,7 @@
 """
 Extra API Routes: Feedback, Analytics, User Registration
 """
+import os
 import time
 from fastapi import Form
 
@@ -95,5 +96,6 @@ def register_extra_routes(app, db):
             "total_events": total_events,
             "total_messages": total_messages,
             "total_sessions": total_sessions,
-            "total_kb_chunks": total_kb
+            "total_kb_chunks": total_kb,
+            "storage_type": "PostgreSQL (Permanent)" if os.getenv("DATABASE_URL") else "SQLite (Temporary)"
         }

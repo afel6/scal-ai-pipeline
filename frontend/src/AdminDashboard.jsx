@@ -144,7 +144,17 @@ export default function AdminDashboard({ onBack }) {
               </p>
             </div>
           </div>
-          <button
+          <div className="flex items-center gap-4">
+            {summary?.storage_type && (
+              <div className={`px-3 py-1 rounded-full text-[10px] font-bold tracking-tighter uppercase border ${
+                summary.storage_type.includes('PostgreSQL') 
+                  ? 'bg-emerald-500/10 text-emerald-400 border-emerald-500/20' 
+                  : 'bg-amber-500/10 text-amber-400 border-amber-500/20'
+              }`}>
+                {summary.storage_type}
+              </div>
+            )}
+            <button
             onClick={fetchAll}
             disabled={loading}
             className="flex items-center gap-2 px-4 py-2 rounded-xl border border-amber-900/30 bg-amber-950/20 text-amber-400 text-xs font-bold tracking-wider uppercase hover:bg-amber-950/40 transition-colors disabled:opacity-50"
