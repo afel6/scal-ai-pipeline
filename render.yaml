@@ -1,6 +1,6 @@
 services:
   - type: web
-    name: scal-ai-backend
+    name: scal-ai
     env: python
     plan: standard
     buildCommand: "pip install --no-cache-dir -r requirements.txt"
