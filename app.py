@@ -906,6 +906,8 @@ app.add_middleware(
         "https://scal-hub.vercel.app",
         "https://scal-ai-pipeline.onrender.com",
         "https://scal-ai-backend.onrender.com",
+        "https://scal-ai.onrender.com",
+        "https://*.onrender.com"
     ],
     allow_credentials=True,
     allow_methods=["GET", "POST", "DELETE", "OPTIONS"],
