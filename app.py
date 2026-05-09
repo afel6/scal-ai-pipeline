@@ -12,7 +12,6 @@ from bs4 import BeautifulSoup
 from hviel_doc_engine import HvielDocEngine
 from skills_engine import SkillsEngine
 from docx import Document
-import keepalive
 from google import genai as genai_new
 from google.genai import types as genai_types
 
