@@ -17,16 +17,25 @@ if ($LASTEXITCODE -eq 0) {
 }
 
 # 2. Database Snapshot (Chat History & Workflows)
-Write-Host "🗄️  Extracting PostgreSQL Database..." -ForegroundColor Gray
-if (docker ps -q -f name=prc-postgres) {
+Write-Host "🗄️  Extracting Database..." -ForegroundColor Gray
+if ($env:DATABASE_URL) {
+    Write-Host "🌍  Found DATABASE_URL. Backing up remote production DB..." -ForegroundColor Cyan
+    # Assumes pg_dump is in PATH
+    pg_dump "$env:DATABASE_URL" > "$BackupDir\production_db_dump.sql"
+    if ($LASTEXITCODE -eq 0) {
+        Write-Host "✅ Remote Production Database Secured." -ForegroundColor Green
+    } else {
+        Write-Error "❌ Remote Database Dump Failed. Make sure pg_dump is installed."
+    }
+} elseif (docker ps -q -f name=prc-postgres) {
     docker exec prc-postgres pg_dump -U prc_user -d prc_hub > "$BackupDir\chat_history_dump.sql"
     if ($LASTEXITCODE -eq 0) {
-        Write-Host "✅ Database Snapshot Secured." -ForegroundColor Green
+        Write-Host "✅ Local Database Snapshot Secured." -ForegroundColor Green
     } else {
-        Write-Error "❌ Database Dump Failed."
+        Write-Error "❌ Local Database Dump Failed."
     }
 } else {
-    Write-Warning "⚠️  prc-postgres container not running. Attempting SQLite fallback..."
+    Write-Warning "⚠️  No DATABASE_URL or prc-postgres container. Attempting SQLite fallback..."
     if (Test-Path "chat_history.db") {
         Copy-Item "chat_history.db" -Destination "$BackupDir\chat_history_local_fallback.db"
         Write-Host "✅ SQLite Fallback Secured." -ForegroundColor Green
