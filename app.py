@@ -17,7 +17,7 @@ from google.genai import types as genai_types
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(name)s: %(message)s")
 _logger = logging.getLogger("PRC-Hub")
 
-# â”€â”€ Fix 3: PostgreSQL + SQLite unified DB layer â”€â”€
+# -- Fix 3: PostgreSQL + SQLite unified DB layer --
 DATABASE_URL = os.getenv("DATABASE_URL", "").strip()
 _PG_AVAILABLE = False
 if DATABASE_URL:
@@ -31,7 +31,7 @@ if not _PG_AVAILABLE:
     import sqlite3
 
 
-# â”€â”€ CONFIG â”€â”€
+# -- CONFIG --
 try:
     from dotenv import load_dotenv
     load_dotenv()
@@ -59,7 +59,7 @@ DB_PATH = "chat_history.db"  # used only when PostgreSQL is not available
 # Keep track of failed keys for rotation
 _FAILED_KEYS = {} # key -> timestamp of last 429
 
-# â”€â”€ SYSTEM PROMPT â”€â”€
+# -- SYSTEM PROMPT --
 SYSTEM_PROMPT = """# SYSTEM PROMPT: SCAL Data Visualization Agent
 
 ## 1. Role and Objective
@@ -268,7 +268,7 @@ SELF_SCORE_NOTES:
 ===GRADE_BLOCK_END===
 """
 
-# â”€â”€ TOOL DEFINITIONS (Gemini JSON Schema) â”€â”€
+# -- TOOL DEFINITIONS (Gemini JSON Schema) --
 _HVIEL_TOOLS = [
     {
         "function_declarations": [
@@ -330,7 +330,7 @@ _HVIEL_TOOLS = [
     }
 ]
 
-# â”€â”€ HVIEL BRAIN (Fix 2: new google.genai SDK with old-SDK fallback) â”€â”€
+# -- HVIEL BRAIN (Fix 2: new google.genai SDK with old-SDK fallback) --
 class PRCChatAssistant:
     def __init__(self, keys: list):
         self.model_name = 'gemini-2.5-flash'
@@ -504,7 +504,7 @@ class PRCChatAssistant:
                         if part.function_call:
                             tool_result = self._execute_tool(part.function_call)
 
-                            # â”€â”€ HISTORY MATCHING: build rich response directly in Python â”€â”€
+                            # -- HISTORY MATCHING: build rich response directly in Python --
                             # Gemini's second-turn response is often None/blocked after tool calls.
                             # We avoid that by constructing the reply ourselves.
                             if part.function_call.name == "agentic_history_matching":
@@ -638,11 +638,11 @@ class PRCChatAssistant:
                     except: continue
                 raise e
         else:
-            raise RuntimeError(“Legacy google-generativeai SDK is no longer supported. Set _USE_NEW_SDK=True.”)
+            raise RuntimeError("Legacy google-generativeai SDK is no longer supported. Set _USE_NEW_SDK=True.")
 
 
 class AnthropicAssistant:
-    # JSON schema prompts â€” Claude returns structured data, never raw markdown
+    # JSON schema prompts -- Claude returns structured data, never raw markdown
     _DOCX_SCHEMA = """Return ONLY valid JSON (no markdown, no backticks, no explanation) with this exact structure:
 {
   "title": "Document Title",
@@ -660,7 +660,7 @@ class AnthropicAssistant:
     }
   ],
   "tables": [
-    {"caption": "Table 1 \u2014 Description", "headers": ["Col1", "Col2"], "rows": [["val1", "val2"]]}
+    {"caption": "Table 1 - Description", "headers": ["Col1", "Col2"], "rows": [["val1", "val2"]]}
   ]
 }
 Rules: 
@@ -735,7 +735,7 @@ Create multiple sheets if appropriate (e.g. one for raw data, one for computed r
         return response.content[0].text
 
 
-# â”€â”€ RAG â”€â”€
+# -- RAG --
 EMBED_MODEL = 'models/text-embedding-004'
 _EMBED_DIM   = 768  # text-embedding-004 output dimension
 
@@ -845,7 +845,7 @@ class KnowledgeBase:
                 _fetch = lambda: cur.fetchall()
                 _close = lambda: conn.close()
 
-            # â”€â”€ Try semantic search â”€â”€
+            # -- Try semantic search --
             _exec("SELECT COUNT(*) FROM kb_vectors")
             vec_count = _fetch()[0][0]
             if vec_count > 0:
@@ -869,7 +869,7 @@ class KnowledgeBase:
                         parts   = [f"[From: {sources[i]}]\n{texts[i]}" for i in top_idx if scores[i] > 0.3]
                         return "\n\n".join(parts)
 
-            # â”€â”€ Keyword fallback â”€â”€
+            # -- Keyword fallback --
             keywords = [w.lower() for w in re.split(r'\W+', query) if len(w) > 3]
             if not keywords:
                 _close()
@@ -907,7 +907,7 @@ class KnowledgeBase:
         except Exception:
             return ""
 
-# â”€â”€ VISUALIZER â”€â”€
+# -- VISUALIZER --
 import io, base64
 import matplotlib
 matplotlib.use('Agg')
@@ -930,7 +930,7 @@ class Visualizer:
 
             curves = data.get('curves')  # new multi-curve schema
             if curves and isinstance(curves, list):
-                # â”€â”€ Multi-curve mode â”€â”€
+                # -- Multi-curve mode --
                 for i, curve in enumerate(curves):
                     cx = curve.get('x', [])
                     cy = curve.get('y', [])
@@ -946,7 +946,7 @@ class Visualizer:
                             linewidth=2.5, markersize=7, label=lbl)
                 ax.legend(fontsize=10, framealpha=0.85)
             else:
-                # â”€â”€ Legacy single-curve mode â”€â”€
+                # -- Legacy single-curve mode --
                 x = data.get('x', [])
                 y = data.get('y', [])
                 
@@ -975,7 +975,7 @@ class Visualizer:
         except Exception as e:
             return f"\n*(Failed to generate plot: {str(e)[:100]})*\n"
 
-# â”€â”€ PETREL EXPORTER â”€â”€
+# -- PETREL EXPORTER --
 class PetrelExporter:
     @staticmethod
     def build_xml(well, data_str):
@@ -998,17 +998,17 @@ class PetrelExporter:
             f.write(xml)
         return fname
 
-# â”€â”€ REPORTING ENGINE (HvielDocEngine â€” Claude's architecture) â”€â”€
-# from document_engines import DocumentEngines  # legacy â€” superseded by HvielDocEngine
+# -- REPORTING ENGINE (HvielDocEngine - Claude's architecture) --
+# from document_engines import DocumentEngines  # legacy - superseded by HvielDocEngine
 hviel_engine = HvielDocEngine(output_dir='.')   # saves .docx/.xlsx/.pptx/.pdf to working dir
 
-# â”€â”€ APP SETUP â”€â”€
+# -- APP SETUP --
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     import threading
     def _hydrate_background():
         import PyPDF2
-        _logger.info("[SYSTEM] PRC Auto-Hydration Engine starting — scanning /books...")
+        _logger.info("[SYSTEM] PRC Auto-Hydration Engine starting - scanning /books...")
         books_dir = "books"
         if not os.path.exists(books_dir):
             return
@@ -1060,7 +1060,7 @@ app.add_middleware(
 )
 assistant = PRCChatAssistant(GEMINI_KEY_POOL)
 
-# â”€â”€ Fix 3: Unified DB layer â€” PostgreSQL when available, SQLite fallback â”€â”€
+# -- Fix 3: Unified DB layer - PostgreSQL when available, SQLite fallback --
 def db(q, p=()):
     if _PG_AVAILABLE:
         import psycopg2
@@ -1086,7 +1086,7 @@ def db(q, p=()):
         conn.close()
         return res
 
-# Init tables â€” works for both PostgreSQL and SQLite
+# Init tables - works for both PostgreSQL and SQLite
 if _PG_AVAILABLE:
     # PostgreSQL uses SERIAL instead of INTEGER PRIMARY KEY
     db('CREATE TABLE IF NOT EXISTS m (id SERIAL PRIMARY KEY, sid TEXT, role TEXT, text TEXT, url TEXT, ts REAL)')
@@ -1107,7 +1107,7 @@ else:
     db('CREATE TABLE IF NOT EXISTS feedback (id INTEGER PRIMARY KEY, user_email TEXT, bug_report TEXT, ts REAL)')
     db('CREATE TABLE IF NOT EXISTS analytics_events (id INTEGER PRIMARY KEY, user_email TEXT, event_type TEXT, event_data TEXT, ts REAL)')
 
-# â”€â”€ Fix 1: Start keep-alive self-ping â”€â”€
+# -- Fix 1: Start keep-alive self-ping --
 keepalive.start()
 
 # ── Register extra routes (feedback, analytics, user mgmt) ──
@@ -1118,7 +1118,7 @@ register_extra_routes(app, db)
 def health():
     return {'status': 'ok', 'db': 'postgres' if _PG_AVAILABLE else 'sqlite', 'sdk': 'google.genai' if _USE_NEW_SDK else 'google-generativeai'}
 
-# â”€â”€ ROUTES: SESSIONS â”€â”€
+# -- ROUTES: SESSIONS --
 @app.get("/api/sessions")
 def get_sessions(email: str = None):
     try:
@@ -1176,7 +1176,7 @@ def get_session(sid: str):
         return {"status": "ok", "messages": messages}
     except Exception as e: return {"status": "error"}
 
-# â”€â”€ ROUTE: KNOWLEDGE BASE STATUS â”€â”€
+# -- ROUTE: KNOWLEDGE BASE STATUS --
 @app.get("/api/kb/status")
 def kb_status():
     try:
@@ -1184,7 +1184,7 @@ def kb_status():
         return {"total_chunks": db("SELECT COUNT(*) FROM kb")[0][0], "books": [{"name": r[0], "chunks": r[1]} for r in rows]}
     except Exception as e: return {"error": str(e)}
 
-# â”€â”€ ROUTE: KNOWLEDGE BASE INGESTION â”€â”€
+# -- ROUTE: KNOWLEDGE BASE INGESTION --
 @app.post("/api/kb/ingest")
 async def kb_ingest(file: UploadFile = File(...), password: str = Form(...)):
     if password != "1509":
@@ -1216,13 +1216,13 @@ async def kb_ingest(file: UploadFile = File(...), password: str = Form(...)):
         if len(text) < 100:
             return {"status": "error", "message": "File too short or unreadable"}
 
-        # BUG FIX 1: chunk_text was never called â€” NameError on 'chunks' would crash uploads
+        # BUG FIX 1: chunk_text was never called - NameError on 'chunks' would crash uploads
         chunks = KnowledgeBase.chunk_text(text, name)
 
         # Clear old data for this source using the unified db() layer
         old_ids = [r[0] for r in db("SELECT id FROM kb WHERE source = ?", (name,))]
         if old_ids:
-            # BUG FIX 4: Build safe parameterised IN clause â€” works for both SQLite (?) and PostgreSQL (%s)
+            # BUG FIX 4: Build safe parameterised IN clause - works for both SQLite (?) and PostgreSQL (%s)
             # The db() helper converts standalone ? to %s, but dynamic lists need manual handling
             if _PG_AVAILABLE:
                 placeholders = ','.join(['%s'] * len(old_ids))
@@ -1246,7 +1246,7 @@ async def kb_ingest(file: UploadFile = File(...), password: str = Form(...)):
     except Exception as e:
         return {"status": "error", "message": str(e)[:100]}
 
-# â”€â”€ ROUTE: SSE STREAMING CHAT â”€â”€
+# -- ROUTE: SSE STREAMING CHAT --
 @app.get("/api/chat/stream")
 async def stream_chat(
     message: str,
@@ -1320,7 +1320,7 @@ async def stream_chat(
                 db("INSERT INTO m (sid, role, text, ts) VALUES (?, ?, ?, ?)",
                    (sid, "user", message, time.time()))
 
-            # Stream tokens â€” support both SDKs
+            # Stream tokens - support both SDKs
             full_resp = ""
             import asyncio
             loop = asyncio.get_event_loop()
@@ -1330,7 +1330,7 @@ async def stream_chat(
                     contents_stream.append(genai_types.Content(role=h['role'], parts=[genai_types.Part(text=h['parts'][0])]))
                 contents_stream.append(genai_types.Content(role='user', parts=[genai_types.Part(text=enriched)]))
 
-                # --- PRC HA ROTATOR LOOP ---
+                # -- PRC HA ROTATOR LOOP --
                 max_retries = len(GEMINI_KEY_POOL)
                 for attempt in range(max_retries):
                     try:
@@ -1400,13 +1400,13 @@ async def stream_chat(
                                             return None
 
                                     tr = _extract_json(tool_result)
-                                    # Safe prose default — never leak raw JSON to the frontend
+                                    # Safe prose default - never leak raw JSON to the frontend
                                     res_text = (
                                         f"\n\nThe `{part.function_call.name}` tool completed its analysis. "
                                         f"No renderable output was produced — request a plot or summary to continue.\n\n"
                                     )
 
-                                    # --- INTERCEPT FOR UI RENDERING ---
+                                    # -- INTERCEPT FOR UI RENDERING --
                                     if part.function_call.name == "agentic_history_matching":
                                         try:
                                             if tr and tr.get("success"):
@@ -1450,7 +1450,7 @@ async def stream_chat(
                                                     f"- kro_max = {kro_max:.3f}\n"
                                                     f"- nw (water Corey exponent) = {nw:.3f}\n"
                                                     f"- no (oil Corey exponent) = {no:.3f}\n\n"
-                                                    f"**Goodness of Fit:** Final MSE = {mse:.5f} — "
+                                                    f"**Goodness of Fit:** Final MSE = {mse:.5f} - "
                                                     f"{'EXCELLENT fit (MSE < 0.02)' if mse < 0.02 else 'Acceptable fit'}\n\n"
                                                     f"The chart below overlays raw laboratory measurements (scatter points) against the "
                                                     f"smooth Brooks-Corey analytical curves (solid lines), confirming physical consistency "
@@ -1600,7 +1600,7 @@ async def stream_chat(
                                                         f"UNITS_ON_AXES: YES\n"
                                                         f"COLOR_CONSISTENT: YES\n"
                                                         f"SELF_SCORE_TOTAL: 90\n"
-                                                        f"SELF_SCORE_NOTES: {model_type} fit — verify convergence quality against raw data scatter.\n"
+                                                        f"SELF_SCORE_NOTES: {model_type} fit - verify convergence quality against raw data scatter.\n"
                                                         f"===GRADE_BLOCK_END===\n"
                                                     )
                                                 elif params:
@@ -1652,7 +1652,7 @@ async def stream_chat(
     return StreamingResponse(event_generator(), media_type="text/event-stream",
                              headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
 
-# â”€â”€ ROUTE: CHAT â”€â”€
+# -- ROUTE: CHAT --
 @app.post("/api/chat")
 async def handle(
     message: str = Form(...),
@@ -1671,24 +1671,24 @@ async def handle(
             fname = file.filename or ""
             mime = file.content_type or ""
             
-            # --- STRUCTURED DATA ---
+            # -- STRUCTURED DATA --
             if fname.endswith(('.xlsx', '.xls')) or "sheet" in mime:
                 df = pd.read_excel(pd.io.common.BytesIO(f_bytes))
-                message += f"\n__INTERNAL_DATA_START__\n[EXCEL — {fname}]:\n{df.head(100).to_string()}\n__INTERNAL_DATA_END__"
+                message += f"\n__INTERNAL_DATA_START__\n[EXCEL - {fname}]:\n{df.head(100).to_string()}\n__INTERNAL_DATA_END__"
             elif fname.endswith('.csv'):
                 df = pd.read_csv(pd.io.common.BytesIO(f_bytes))
-                message += f"\n__INTERNAL_DATA_START__\n[CSV — {fname}]:\n{df.head(100).to_string()}\n__INTERNAL_DATA_END__"
+                message += f"\n__INTERNAL_DATA_START__\n[CSV - {fname}]:\n{df.head(100).to_string()}\n__INTERNAL_DATA_END__"
             
-            # --- TEXT DOCUMENTS ---
+            # -- TEXT DOCUMENTS --
             elif fname.endswith('.docx'):
                 from io import BytesIO as _BytesIO
                 doc = Document(_BytesIO(f_bytes))
                 doc_text = "\n".join([p.text for p in doc.paragraphs if p.text.strip()])
-                message += f"\n__INTERNAL_DATA_START__\n[WORD DOC — {fname}]:\n{doc_text[:4000000]}\n__INTERNAL_DATA_END__"
+                message += f"\n__INTERNAL_DATA_START__\n[WORD DOC - {fname}]:\n{doc_text[:4000000]}\n__INTERNAL_DATA_END__"
             elif fname.endswith('.txt'):
-                message += f"\n__INTERNAL_DATA_START__\n[TEXT FILE — {fname}]:\n{f_bytes.decode('utf-8', errors='ignore')[:4000000]}\n__INTERNAL_DATA_END__"
+                message += f"\n__INTERNAL_DATA_START__\n[TEXT FILE - {fname}]:\n{f_bytes.decode('utf-8', errors='ignore')[:4000000]}\n__INTERNAL_DATA_END__"
             
-            # --- BINARY (VISION / NATIVE PDF) ---
+            # -- BINARY (VISION / NATIVE PDF) --
             else:
                 SUPPORTED = ['application/pdf', 'image/jpeg', 'image/png', 'image/gif', 'image/webp']
                 if mime in SUPPORTED:
@@ -1859,7 +1859,7 @@ async def list_skills():
     }
 
 
-# â”€â”€ DIAG â”€â”€
+# -- DIAG --
 @app.get("/api/diag")
 def diag():
     try:
@@ -1911,7 +1911,7 @@ async def dl(filename: str):
         }
     )
 
-# â”€â”€ ROUTE: VISION AUDIT â”€â”€
+# -- ROUTE: VISION AUDIT --
 @app.post("/api/vision/audit")
 async def vision_audit(file: UploadFile = File(...), query: str = Form(...), session_id: str = Form("")):
     """Explicit endpoint for manual vision audits."""
@@ -1979,7 +1979,7 @@ async def get_chat_history(email: str):
         ]
     }
 
-# â”€â”€ AUTOMATED DAILY BACKUP ENGINE â”€â”€
+# -- AUTOMATED DAILY BACKUP ENGINE --
 # To run manually: python app.py --backup
 def run_daily_backup():
     """Performs a full backup of the database and project source."""
