@@ -5,6 +5,13 @@ services:
     plan: standard
     buildCommand: "pip install --no-cache-dir -r requirements.txt"
     startCommand: "uvicorn app:app --host 0.0.0.0 --port $PORT"
+    healthCheckPath: /health
     envVars:
       - key: PYTHON_VERSION
         value: "3.11.0"
+      - key: DATABASE_URL
+        sync: false
+      - key: GEMINI_API_KEY
+        sync: false
+      - key: CLAUDE_API_KEY
+        sync: false

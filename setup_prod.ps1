@@ -1,50 +1,58 @@
-# PRC AI Hub: Production "Always-On" Setup Script
-# This script initializes the sovereign AI infrastructure on a permanent server.
+# PRC AI Hub - Production Pre-Push Build Script
+# Run this locally before every push to Render to ensure fresh frontend assets.
 
-Write-Host "🚀 Initializing PRC AI Pipeline: Always-On Mode..." -ForegroundColor Cyan
+param(
+    [switch]$SkipInstall  # Pass -SkipInstall to skip npm install if deps are unchanged
+)
 
-# 1. Check for Docker
-if (!(Get-Command docker -ErrorAction SilentlyContinue)) {
-    Write-Error "❌ Docker is not installed! Please install Docker Desktop or Docker Engine first."
-    exit
+Set-StrictMode -Version Latest
+$ErrorActionPreference = "Stop"
+
+$projectRoot = $PSScriptRoot
+$frontendDir = Join-Path $projectRoot "frontend"
+$distIndex   = Join-Path $frontendDir "dist\index.html"
+
+Write-Host "PRC AI Hub - Production Build" -ForegroundColor Cyan
+Write-Host "=============================" -ForegroundColor Cyan
+
+# ── 1. Node / npm check ────────────────────────────────────────────────────────
+Write-Host "`n[1/4] Checking Node.js..." -ForegroundColor Yellow
+if (!(Get-Command node -ErrorAction SilentlyContinue)) {
+    Write-Error "Node.js not found. Install from https://nodejs.org and re-run."
+    exit 1
 }
+Write-Host "      Node $(node --version)  |  npm $(npm --version)" -ForegroundColor Gray
 
-# 2. Check for docker-compose
-if (!(Get-Command docker-compose -ErrorAction SilentlyContinue)) {
-    Write-Error "❌ docker-compose is not installed!"
-    exit
-}
-
-# 3. Environment Check
-if (!(Test-Path .env)) {
-    Write-Warning "⚠️ .env file not found. Creating default production .env..."
-    $envContent = @"
-GEMINI_API_KEY=YOUR_KEY_HERE
-CLAUDE_API_KEY=YOUR_KEY_HERE
-DB_POSTGRES_USER=prc_user
-DB_POSTGRES_PASSWORD=prc_password_1509
-DB_POSTGRES_DATABASE=prc_hub
-N8N_ENCRYPTION_KEY=prc_secret_key_1509
-"@
-    Set-Content -Path .env -Value $envContent
-}
-
-# 4. Launching Infrastructure
-Write-Host "📦 Pulling images and starting containers..." -ForegroundColor Gray
-docker-compose up -d
-
-# 5. Verification
-Write-Host "⏳ Waiting for database health-check..." -ForegroundColor Yellow
-Start-Sleep -Seconds 10
-
-$status = docker ps --filter "name=prc-n8n" --format "{{.Status}}"
-if ($status -like "*Up*") {
-    Write-Host "✅ PRC AI Orchestrator is ONLINE." -ForegroundColor Green
-    Write-Host "🔗 Local Access: http://localhost:5678"
-    Write-Host "🔗 Remote Testing (via Tunnel):" -ForegroundColor Magenta
-    docker logs prc-tunnel | Select-String "https://.*\.trycloudflare\.com" | Select-Object -First 1
+# ── 2. Install frontend deps ───────────────────────────────────────────────────
+if (-not $SkipInstall) {
+    Write-Host "`n[2/4] Installing frontend dependencies..." -ForegroundColor Yellow
+    Push-Location $frontendDir
+    npm install --prefer-offline 2>&1 | Select-String -NotMatch "^npm warn"
+    Pop-Location
 } else {
-    Write-Error "❌ Deployment failed. Check 'docker logs prc-n8n' for details."
+    Write-Host "`n[2/4] Skipping npm install (-SkipInstall flag set)." -ForegroundColor Gray
 }
 
-Write-Host "`n🎯 Setup Complete. The server will now auto-restart on reboot." -ForegroundColor Cyan
+# ── 3. Build React app ─────────────────────────────────────────────────────────
+Write-Host "`n[3/4] Building React frontend (Vite production build)..." -ForegroundColor Yellow
+Push-Location $frontendDir
+npm run build
+Pop-Location
+
+if (!(Test-Path $distIndex)) {
+    Write-Error "Build failed - frontend/dist/index.html not found."
+    exit 1
+}
+Write-Host "      Build successful." -ForegroundColor Green
+
+# ── 4. Print git commands ──────────────────────────────────────────────────────
+Write-Host "`n[4/4] Ready to push. Run the following git commands:" -ForegroundColor Yellow
+Write-Host ""
+Write-Host "  git add app.py simulation_core.py requirements.txt render.yaml setup_prod.ps1" -ForegroundColor White
+Write-Host "  git add hermes_skills_library/petroleum/simulator/simulation_core.py" -ForegroundColor White
+Write-Host "  git add frontend/dist/" -ForegroundColor White
+Write-Host "  git status" -ForegroundColor White
+Write-Host "  git commit -m 'chore: production hardening + fresh frontend build'" -ForegroundColor White
+Write-Host "  git push origin main" -ForegroundColor White
+Write-Host ""
+Write-Host "Render will auto-deploy on push. Monitor at: https://dashboard.render.com" -ForegroundColor Cyan

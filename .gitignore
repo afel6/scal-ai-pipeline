@@ -10,8 +10,8 @@ __pycache__/
 *.pyd
 .Python
 *.egg-info/
-dist/
-build/
+/dist/
+/build/
 
 # Database files — keep local only
 *.db
@@ -23,7 +23,7 @@ build/
 # Node
 node_modules/
 frontend/node_modules/
-frontend/dist/
+# frontend/dist/ intentionally tracked so Render serves pre-built assets
 
 # Temp files
 *.log

@@ -5,6 +5,9 @@ from scipy.sparse.linalg import spsolve
 import json
 import sys
 import time
+import logging
+
+_log = logging.getLogger("simulation_core")
 
 class SCALSimulator:
     """
@@ -70,9 +73,9 @@ class SCALSimulator:
         for step in range(total_steps):
             # 1. Update Mobilities
             krw, kro = self.brooks_corey_kr(
-                sw, params['swr'], params['snr'],
-                params['krw_max'], params['kro_max'],
-                params['nw'], params['no']
+                sw, params.get('swr', 0.2), params.get('snr', 0.2),
+                params.get('krw_max', 0.5), params.get('kro_max', 0.8),
+                params.get('nw', 2.0), params.get('no', 2.0)
             )
             lambda_w = krw / mu_w
             lambda_o = kro / mu_o
@@ -122,8 +125,7 @@ class SCALSimulator:
             try:
                 p_new = spsolve(A, b)
             except Exception as e:
-                print(f"Matrix solver exception at step {step}: {e}")
-                # Fallback to previous pressure step if solver fails (e.g. singular matrix)
+                _log.warning(f"IMPES pressure solver failed at step {step} (singular matrix likely): {e}")
                 p_new = p.flatten()
                 
             p = p_new.reshape((nx, ny))
@@ -135,7 +137,7 @@ class SCALSimulator:
             # This is a very simplified explicit update for demonstration
             # In a real simulator, we use the divergence of the water flux
             sw_new[0,0] += (dt * q_inj) / (phi * dx * dy * dz)
-            sw_new = np.clip(sw_new, params['swr'], 1 - params['snr'])
+            sw_new = np.clip(sw_new, params.get('swr', 0.2), 1 - params.get('snr', 0.2))
             sw = sw_new
             
             if step % 5 == 0:
@@ -143,10 +145,25 @@ class SCALSimulator:
                 
         return sw, saturations_history
 
+def _flatten_params(data: dict) -> dict:
+    """Recursively hoist all nested 'params' dicts to the top level.
+
+    Handles arbitrary nesting depth (params → params → params …).
+    Outer keys always take precedence: inner values never overwrite them.
+    """
+    while 'params' in data and isinstance(data.get('params'), dict):
+        nested = data.pop('params')
+        for k, v in nested.items():
+            if k not in data:
+                data[k] = v
+    return data
+
+
 def main():
     try:
         raw_input = sys.argv[1]
         data = json.loads(raw_input)
+        data = _flatten_params(data)
         
         simulator = SCALSimulator()
         
@@ -160,14 +177,26 @@ def main():
                 "params": data
             }
         else:
-            # Legacy 1D Curves
-            sw_range = np.linspace(data.get('swr', 0.2), 1 - data.get('snr', 0.2), 50)
-            krw, kro = simulator.brooks_corey_kr(
-                sw_range, 
-                data['swr'], data['snr'], 
-                data['krw_max'], data['kro_max'], 
-                data['nw'], data['no']
-            )
+            # 1D Curves (Brooks-Corey or LET)
+            model_type = data.get('model', 'brooks_corey').lower()
+            swr = data.get('swr', 0.2)
+            snr = data.get('snr', 0.2)
+            sw_range = np.linspace(swr, 1 - snr, 50)
+            
+            if 'let' in model_type:
+                krw, kro = simulator.let_kr(
+                    sw_range, swr, snr, 
+                    data.get('krw_max', 0.5), data.get('kro_max', 0.8),
+                    data.get('Lw', 2.0), data.get('Ew', 1.0), data.get('Tw', 2.0),
+                    data.get('Lo', 2.0), data.get('Eo', 1.0), data.get('To', 2.0)
+                )
+            else:
+                krw, kro = simulator.brooks_corey_kr(
+                    sw_range, swr, snr, 
+                    data.get('krw_max', 0.5), data.get('kro_max', 0.8),
+                    data.get('nw', 2.0), data.get('no', 2.0)
+                )
+                
             result = {
                 "status": "success",
                 "mode": "1d",
