@@ -335,7 +335,7 @@ _HVIEL_TOOLS = [
 # -- HVIEL BRAIN (Fix 2: new google.genai SDK with old-SDK fallback) --
 class PRCChatAssistant:
     def __init__(self, keys: list):
-        self.model_name = 'gemini-1.5-flash'
+        self.model_name = 'gemini-2.0-flash-lite'
         self._keys = keys
         self._current_idx = 0
         self._client = None
