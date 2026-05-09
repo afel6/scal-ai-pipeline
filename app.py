@@ -351,7 +351,7 @@ class PRCChatAssistant:
             if (now - f_data.get('ts', 0)) < f_data.get('wait', 0): continue
             self._current_idx = idx
             try:
-                self._client = genai_new.Client(api_key=key, http_options={"api_version": "v1"})
+                self._client = genai_new.Client(api_key=key)
                 _logger.info(f"[HA Rotator] Node {idx+1} SELECTED ({key[:8]}...)")
                 return
             except Exception as e:
