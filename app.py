@@ -1271,10 +1271,10 @@ async def handle(
             # --- STRUCTURED DATA ---
             if fname.endswith(('.xlsx', '.xls')) or "sheet" in mime:
                 df = pd.read_excel(pd.io.common.BytesIO(f_bytes))
-                message += f"\n[EXCEL â€” {fname}]:\n{df.head(10).to_string()}"
+                message += f"\n__INTERNAL_DATA_START__\n[EXCEL — {fname}]:\n{df.head(10).to_string()}\n__INTERNAL_DATA_END__"
             elif fname.endswith('.csv'):
                 df = pd.read_csv(pd.io.common.BytesIO(f_bytes))
-                message += f"\n[CSV â€” {fname}]:\n{df.head(10).to_string()}"
+                message += f"\n__INTERNAL_DATA_START__\n[CSV — {fname}]:\n{df.head(10).to_string()}\n__INTERNAL_DATA_END__"
             
             # --- TEXT DOCUMENTS ---
             elif fname.endswith('.docx'):

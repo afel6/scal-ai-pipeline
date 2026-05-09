@@ -1185,12 +1185,11 @@ function App() {
       {showTerms && <TermsModal onClose={() => setShowTerms(false)} />}
 
       <CookieConsent />
-
+    </div>
+  );
 }
 
 export default App;
-
-
 
 
 

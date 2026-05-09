@@ -8,21 +8,29 @@ import KrPlot from '../KrPlot';
 export function renderMessageContent(text) {
   if (!text) return null;
 
+  // Clean out any internal data shards (dataframe dumps, raw file text) 
+  // that the backend injected for AI context but we don't want to show the user.
+  let cleanText = text.replace(/__INTERNAL_DATA_START__[\s\S]*?__INTERNAL_DATA_END__/g, '').trim();
+  
+  if (!cleanText && text.includes('__INTERNAL_DATA_START__')) {
+    return null; // Don't render an empty bubble if it was just a file dump
+  }
+
   // Match markdown images: ![alt](src) -- supports data URIs and http URLs
   const imgRegex = /!\[([^\]]*)\]\((data:[^)]+|https?:[^)]+)\)/g;
   const parts = [];
   let lastIndex = 0;
   let match;
 
-  while ((match = imgRegex.exec(text)) !== null) {
+  while ((match = imgRegex.exec(cleanText)) !== null) {
     if (match.index > lastIndex) {
-      parts.push({ type: 'text', content: text.slice(lastIndex, match.index) });
+      parts.push({ type: 'text', content: cleanText.slice(lastIndex, match.index) });
     }
     parts.push({ type: 'img', alt: match[1], src: match[2] });
     lastIndex = match.index + match[0].length;
   }
-  if (lastIndex < text.length) {
-    parts.push({ type: 'text', content: text.slice(lastIndex) });
+  if (lastIndex < cleanText.length) {
+    parts.push({ type: 'text', content: cleanText.slice(lastIndex) });
   }
 
   // Chain of parsers: Mermaid -> Audit -> Data
