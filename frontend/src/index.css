@@ -2,23 +2,27 @@
 
 /* ── Design Tokens (Anthropic Frontend Design Skill) ────────────────────── */
 :root {
-  --prc-gold: #fbbf24;
-  --prc-gold-dim: #92400e;
-  --prc-blue: #2D358E;
-  --prc-bg: #050505;
-  --prc-surface: #09090b;
-  --prc-glass: rgba(255, 255, 255, 0.025);
-  --prc-border: rgba(255, 255, 255, 0.06);
+  --prc-gold: #FFD700; /* Metallic Gold */
+  --prc-amber: #D97706; /* Rich Amber */
+  --prc-gold-dim: #78350f;
+  --prc-blue: #1e1b4b;
+  --prc-bg: #030303;
+  --prc-surface: #0a0a0c;
+  --prc-glass: rgba(255, 255, 255, 0.015);
+  --prc-border: rgba(255, 255, 255, 0.05);
 }
+
 
 /* ── Base ──────────────────────────────────────────────────────────────── */
 body {
   margin: 0;
-  font-family: 'Outfit', 'Google Sans', system-ui, -apple-system, sans-serif;
+  font-family: 'Outfit', 'Inter', 'Google Sans', system-ui, -apple-system, sans-serif;
   background-color: var(--prc-bg);
   color: #f8fafc;
   overflow: hidden;
+  -webkit-font-smoothing: antialiased;
 }
+
 
 /* ── Glassmorphism Surface ──────────────────────────────────────────────── */
 .bg-gloss {
@@ -44,7 +48,7 @@ body {
 }
 ::-webkit-scrollbar-thumb:hover { background: rgba(251, 191, 36, 0.35); }
 
-/* ── Motion (Anthropic — staggered reveals > scattered micro-interactions) */
+/* ── Motion ─────────────────────────────────────────────────────────────── */
 @keyframes fadeSlideUp {
   from { opacity: 0; transform: translateY(14px); }
   to   { opacity: 1; transform: translateY(0); }
@@ -57,10 +61,28 @@ body {
   0%, 100% { opacity: 1; }
   50%       { opacity: 0.6; }
 }
+@keyframes scanner-down {
+  0%   { top: 0; opacity: 0; }
+  10%  { opacity: 1; }
+  90%  { opacity: 1; }
+  100% { top: 100%; opacity: 0; }
+}
+@keyframes shake {
+  0%, 100% { transform: translateX(0); }
+  25%      { transform: translateX(-4px); }
+  75%      { transform: translateX(4px); }
+}
 
 .animate-fade-in    { animation: fadeSlideUp 0.45s cubic-bezier(0.16, 1, 0.3, 1) forwards; }
 .animate-slide-in   { animation: fadeSlideIn 0.35s cubic-bezier(0.16, 1, 0.3, 1) forwards; }
 .animate-pulse-slow { animation: pulse-slow 3s infinite ease-in-out; }
+.animate-scanner-down { animation: scanner-down 3s infinite linear; }
+.animate-shake       { animation: shake 0.2s ease-in-out 0s 2; }
+
+/* ── HUD and Technical Effects ─────────────────────────────────────────── */
+.hud-glow {
+  text-shadow: 0 0 10px rgba(234, 179, 8, 0.4);
+}
 
 /* Chat bubble staggered reveal */
 .msg-bubble { animation: fadeSlideUp 0.4s cubic-bezier(0.16, 1, 0.3, 1) both; }

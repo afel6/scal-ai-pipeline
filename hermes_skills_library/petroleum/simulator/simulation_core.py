@@ -15,19 +15,26 @@ class SCALSimulator:
     @staticmethod
     def brooks_corey_kr(sw, swr, snr, krw_max, kro_max, nw, no):
         """Calculates Relative Permeability using Brooks-Corey."""
-        sw_norm = (sw - swr) / (1 - swr - snr)
-        sw_norm = np.clip(sw_norm, 0, 1)
+        denom = max(1.0 - swr - snr, 1e-6)
+        sw_norm = (sw - swr) / denom
+        sw_norm = np.clip(sw_norm, 0.0, 1.0)
         krw = krw_max * (sw_norm ** nw)
-        kro = kro_max * ((1 - sw_norm) ** no)
+        kro = kro_max * ((1.0 - sw_norm) ** no)
         return krw, kro
 
     @staticmethod
     def let_kr(sw, swr, snr, krw_max, kro_max, Lw, Ew, Tw, Lo, Eo, To):
         """Calculates Relative Permeability using LET model."""
-        sw_norm = (sw - swr) / (1 - swr - snr)
-        sw_norm = np.clip(sw_norm, 0, 1)
-        krw = krw_max * (sw_norm ** Lw) / (sw_norm ** Lw + Ew * (1 - sw_norm) ** Tw)
-        kro = kro_max * ((1 - sw_norm) ** Lo) / ((1 - sw_norm) ** Lo + Eo * sw_norm ** To)
+        denom = max(1.0 - swr - snr, 1e-6)
+        sw_norm = (sw - swr) / denom
+        sw_norm = np.clip(sw_norm, 0.0, 1.0)
+        
+        # Prevent runtime warnings and zero division
+        denom_w = np.clip((sw_norm ** Lw + Ew * (1.0 - sw_norm) ** Tw), 1e-10, None)
+        denom_o = np.clip(((1.0 - sw_norm) ** Lo + Eo * sw_norm ** To), 1e-10, None)
+        
+        krw = krw_max * (sw_norm ** Lw) / denom_w
+        kro = kro_max * ((1.0 - sw_norm) ** Lo) / denom_o
         return krw, kro
 
     def solve_2d_displacement(self, params):
@@ -112,7 +119,13 @@ class SCALSimulator:
             b[N-1] = -q_inj # Material balance simplified
             
             A = csr_matrix((data, (rows, cols)), shape=(N, N))
-            p_new = spsolve(A, b)
+            try:
+                p_new = spsolve(A, b)
+            except Exception as e:
+                print(f"Matrix solver exception at step {step}: {e}")
+                # Fallback to previous pressure step if solver fails (e.g. singular matrix)
+                p_new = p.flatten()
+                
             p = p_new.reshape((nx, ny))
             
             # 3. Update Saturation (Explicit)

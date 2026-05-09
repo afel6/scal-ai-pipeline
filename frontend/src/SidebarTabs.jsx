@@ -131,71 +131,101 @@ export default function SidebarTabs({ sessionId, sessions, handleLoadSession, ha
 
       {/* Library tab */}
       {tab === 'library' && (
-        <div className="flex-1 overflow-y-auto p-3 space-y-3">
-          <p className="text-[10px] text-slate-500 font-mono uppercase tracking-widest">Upload books to teach Hviel</p>
-          
-          {/* Upload button */}
-          <div className="space-y-2">
-            <input 
-              type="password" 
-              placeholder="Admin Password"
-              value={bookPassword}
-              onChange={(e) => setBookPassword(e.target.value)}
-              className="w-full bg-slate-900 border border-slate-700/60 rounded-lg px-3 py-2 text-xs text-slate-200 outline-none focus:border-yellow-500/50"
-            />
-            <label className={`flex items-center justify-center gap-2 w-full border-2 border-dashed rounded-xl py-4 cursor-pointer transition-all
-              ${uploading ? 'border-yellow-700 bg-yellow-950/20' : 'border-slate-700 hover:border-yellow-600 hover:bg-yellow-950/10'}`}>
-              <input type="file" className="hidden" onChange={handleBookUpload} disabled={uploading}
-                accept=".html,.htm,.txt,.pdf,.docx" />
-              {uploading ? (
-                <><Loader className="w-4 h-4 text-yellow-400 animate-spin" /><span className="text-xs text-yellow-400 font-bold">Processing…</span></>
-              ) : (
-                <><Upload className="w-4 h-4 text-slate-400" /><span className="text-xs text-slate-400 font-medium">Click to upload book<br/><span className="text-[10px] text-slate-600">HTML, TXT, PDF, DOCX</span></span></>
-              )}
-            </label>
-          </div>
+        <div className="flex-1 overflow-y-auto p-3 space-y-4 custom-scrollbar">
+          <div className="bg-gradient-to-br from-yellow-500/5 to-transparent border border-yellow-500/10 rounded-2xl p-4 space-y-3">
+            <p className="text-[10px] text-yellow-500 font-black uppercase tracking-[0.2em] flex items-center gap-2">
+              <BookOpen className="w-3 h-3" /> Core Ingestion
+            </p>
+            <p className="text-[10px] text-slate-500 font-mono leading-relaxed">Admin portal for training Hviel on proprietary laboratory manuals.</p>
+            
+            {/* Upload button */}
+            <div className="space-y-2">
+              <input 
+                type="password" 
+                placeholder="Admin PIN"
+                value={bookPassword}
+                onChange={(e) => setBookPassword(e.target.value)}
+                className="w-full bg-black border border-slate-800 rounded-xl px-3 py-2.5 text-xs text-slate-200 outline-none focus:border-yellow-500/50 placeholder:text-slate-700 transition-all"
+              />
+              <label className={`flex flex-col items-center justify-center gap-3 w-full border-2 border-dashed rounded-2xl py-6 cursor-pointer transition-all duration-300
+                ${uploading ? 'border-yellow-500 bg-yellow-500/5' : 'border-slate-800 hover:border-yellow-500/30 hover:bg-yellow-500/5'}`}>
+                <input type="file" className="hidden" onChange={handleBookUpload} disabled={uploading}
+                  accept=".html,.htm,.txt,.pdf,.docx" />
+                {uploading ? (
+                  <>
+                    <div className="relative">
+                      <Loader className="w-6 h-6 text-yellow-500 animate-spin" />
+                      <div className="absolute inset-0 blur-lg bg-yellow-500/20 animate-pulse" />
+                    </div>
+                    <span className="text-[10px] text-yellow-500 font-black uppercase tracking-widest italic">Indexing Chunks...</span>
+                  </>
+                ) : (
+                  <>
+                    <div className="w-10 h-10 rounded-xl bg-slate-900 border border-slate-800 flex items-center justify-center text-slate-500 group-hover:text-yellow-500 transition-colors">
+                      <Upload className="w-5 h-5" />
+                    </div>
+                    <div className="text-center">
+                      <span className="text-[11px] text-slate-400 font-bold uppercase tracking-widest block">Deploy Knowledge</span>
+                      <span className="text-[9px] text-slate-600 font-mono uppercase mt-1">PDF, DOCX, HTML</span>
+                    </div>
+                  </>
+                )}
+              </label>
+            </div>
 
-          {/* Upload result message */}
-          {uploadMsg && (
-            <p className="text-[11px] text-yellow-300 bg-yellow-950/30 border border-yellow-800/30 rounded-lg px-3 py-2 leading-relaxed">{uploadMsg}</p>
-          )}
+            {/* Upload result message */}
+            {uploadMsg && (
+              <div className={`text-[10px] font-bold p-3 rounded-xl border leading-relaxed animate-in fade-in slide-in-from-top-2
+                ${uploadMsg.includes('✅') ? 'bg-green-500/5 border-green-500/20 text-green-400' : 'bg-red-500/5 border-red-500/20 text-red-400'}`}>
+                {uploadMsg}
+              </div>
+            )}
+          </div>
 
           {/* Autonomous Skills Section */}
-          <div className="space-y-2.5 pt-2">
-            <p className="text-[10px] text-yellow-500 uppercase tracking-widest font-bold flex items-center gap-1.5 px-1">
-              <Zap className="w-3 h-3" /> Autonomous Agent Skills
-            </p>
-            <div className="space-y-2">
+          <div className="space-y-3 pt-2">
+            <div className="flex items-center justify-between px-1">
+              <p className="text-[10px] text-yellow-500 font-black uppercase tracking-[0.2em] flex items-center gap-2 italic">
+                <Zap className="w-3 h-3 fill-yellow-500" /> Agent Capabilities
+              </p>
+              <div className="flex gap-1">
+                <div className="w-1 h-1 bg-yellow-500 rounded-full animate-pulse" />
+                <div className="w-1 h-1 bg-yellow-500 rounded-full animate-pulse [animation-delay:0.2s]" />
+              </div>
+            </div>
+
+            <div className="space-y-2.5">
               {skills.map((s, i) => (
-                <div key={i} className="bg-yellow-950/5 border border-yellow-950/20 rounded-xl p-3 transition-all hover:bg-yellow-950/10 hover:border-yellow-900/40">
-                  <div className="flex items-center gap-2 mb-1.5">
-                    <span className="text-[9px] font-bold text-yellow-600 bg-yellow-950/30 px-1.5 py-0.5 rounded uppercase tracking-tighter">{s.category}</span>
-                    <span className="text-[11px] font-bold text-slate-200">{s.name}</span>
+                <div key={i} className="group relative overflow-hidden rounded-2xl bg-[#0c0c10] border border-slate-800 hover:border-yellow-900/40 transition-all p-4 shadow-xl">
+                  {/* Subtle hover background glow */}
+                  <div className="absolute top-0 right-0 w-24 h-24 bg-yellow-500/5 blur-3xl opacity-0 group-hover:opacity-100 transition-opacity" />
+                  
+                  <div className="relative flex items-center gap-2 mb-2">
+                    <span className="text-[8px] font-black text-yellow-600 bg-yellow-950/30 px-1.5 py-0.5 rounded uppercase tracking-[0.15em] border border-yellow-900/20">{s.category}</span>
+                    <span className="text-xs font-black text-slate-200 uppercase tracking-wider">{s.name}</span>
                   </div>
-                  <p className="text-[10px] text-slate-500 leading-tight font-medium">{s.desc}</p>
+                  <p className="relative text-[10px] text-slate-500 leading-relaxed font-medium group-hover:text-slate-400 transition-colors">{s.desc}</p>
                 </div>
               ))}
             </div>
           </div>
 
-          <div className="h-px bg-slate-800/40 my-2" />
-
-          {/* Loaded books */}
-          {books.length > 0 ? (
-            <div className="space-y-2">
-              <p className="text-[10px] text-slate-600 uppercase tracking-widest font-bold">Knowledge Base</p>
-              {books.map((b, i) => (
-                <div key={i} className="flex items-center gap-2 bg-slate-900/60 border border-slate-800 rounded-xl px-3 py-2.5">
-                  <CheckCircle className="w-3.5 h-3.5 text-green-500 shrink-0" />
-                  <div className="flex-1 min-w-0">
-                    <p className="text-xs text-slate-200 font-medium truncate">{b.name}</p>
-                    <p className="text-[10px] text-slate-600">{b.chunks} chunks loaded</p>
+          {/* Knowledge Base Section */}
+          {books.length > 0 && (
+            <div className="space-y-3 pt-4 pb-10 border-t border-slate-800/40">
+              <p className="text-[10px] text-slate-500 font-black uppercase tracking-[0.2em] px-1 italic">Knowledge Base Status</p>
+              <div className="space-y-2">
+                {books.map((b, i) => (
+                  <div key={i} className="flex items-center gap-3 bg-black/40 border border-slate-800/60 rounded-xl px-3 py-3 hover:border-green-500/20 transition-all group">
+                    <div className="w-2 h-2 rounded-full bg-green-500 shadow-[0_0_8px_rgba(34,197,94,0.4)]" />
+                    <div className="flex-1 min-w-0">
+                      <p className="text-[11px] text-slate-300 font-bold truncate group-hover:text-white transition-colors">{b.name}</p>
+                      <p className="text-[9px] text-slate-600 font-mono mt-0.5 uppercase tracking-tighter">{b.chunks} Data Shards Active</p>
+                    </div>
                   </div>
-                </div>
-              ))}
+                ))}
+              </div>
             </div>
-          ) : (
-            <p className="text-xs text-slate-600 text-center mt-4">No books uploaded yet.</p>
           )}
         </div>
       )}

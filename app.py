@@ -1013,6 +1013,9 @@ async def kb_ingest(file: UploadFile = File(...), password: str = Form(...)):
         return {"status": "error", "message": "Unauthorized"}
     try:
         content = await file.read()
+        if len(content) > 50 * 1024 * 1024:
+            return {"status": "error", "message": "File size exceeds the 50MB limit"}
+        
         name = file.filename or "Unknown Book"
         text = ""
 
@@ -1554,7 +1557,13 @@ if os.path.isdir(os.path.join(_dist_dir, "assets")):
 # Serve any other static files from dist (favicon, icons, images)
 @app.get("/{filename:path}")
 def serve_frontend(filename: str):
-    filepath = os.path.join(_dist_dir, filename)
+    filename = filename.lstrip("/")
+    filepath = os.path.abspath(os.path.join(_dist_dir, filename))
+    
+    # Security: Prevent path traversal outside of _dist_dir
+    if not filepath.startswith(os.path.abspath(_dist_dir)):
+        return {"error": "Invalid path"}
+
     if os.path.isfile(filepath):
         return FileResponse(filepath)
     # SPA fallback: return index.html for client-side routing

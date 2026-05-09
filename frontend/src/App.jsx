@@ -7,18 +7,17 @@ import { Send, Paperclip, Bot, User, Download, FileText, Database, Circle, PlusC
 import axios from 'axios';
 
 import SidebarTabs from './SidebarTabs';
-
 import Mermaid from './Mermaid';
-
 import VisualAudit from './VisualAudit';
-
 import { FeedbackModal, PrivacyModal, TermsModal, CookieConsent, trackEvent } from './PrcModals';
-
 import SimulationHeatmap from './SimulationHeatmap';
-
 import KrPlot from './KrPlot';
-
 import AdminDashboard from './AdminDashboard';
+
+// New Modular Components
+import Login from './components/Login';
+import PetrophysicalTable from './components/PetrophysicalTable';
+import { renderMessageContent } from './components/MessageRenderer';
 
 
 
@@ -26,343 +25,13 @@ const API_URL = import.meta.env.VITE_API_URL || '';
 
 
 
-function PetrophysicalTable({ content }) {
-
-  try {
-
-    const data = JSON.parse(content);
-
-    const headers = data.headers || Object.keys(data.rows[0] || {});
-
-    return (
-
-      <div className="my-6 overflow-hidden rounded-2xl border border-yellow-900/40 bg-[#0c0c10] shadow-2xl">
-
-        <div className="bg-gradient-to-r from-yellow-950/40 to-black px-4 py-3 border-b border-yellow-900/30 flex items-center justify-between">
-
-          <div className="flex items-center gap-2">
-
-            <Database className="w-4 h-4 text-yellow-500" />
-
-            <span className="text-[11px] font-black tracking-[0.2em] text-yellow-50/90 uppercase">V-Table Ingestion Preview</span>
-
-          </div>
-
-          <div className="text-[10px] text-slate-500 font-mono italic">
-
-            Total Samples: {data.rows.length}
-
-          </div>
-
-        </div>
-
-        <div className="overflow-x-auto">
-
-          <table className="w-full text-left border-collapse min-w-[600px]">
-
-            <thead>
-
-              <tr className="bg-yellow-950/10">
-
-                {headers.map((h, i) => (
-
-                  <th key={i} className="px-4 py-3 text-[10px] font-bold text-yellow-600 uppercase tracking-widest border-b border-yellow-900/20">
-
-                    {h.replace(/_/g, ' ')}
-
-                  </th>
-
-                ))}
-
-              </tr>
-
-            </thead>
-
-            <tbody className="divide-y divide-yellow-900/10">
-
-              {data.rows.slice(0, 10).map((row, i) => {
-
-                const values = Array.isArray(row) ? row : headers.map(h => row[h]);
-
-                return (
-
-                  <tr key={i} className="hover:bg-yellow-900/5 transition-colors group">
-
-                    {values.map((v, j) => (
-
-                      <td key={j} className={`px-4 py-3 text-xs font-serif ${v === null || v === 'NaN' || v === 'nan' ? 'text-slate-700 italic' : 'text-slate-300'}`}>
-
-                        {v === null || v === 'NaN' || v === 'nan' ? '--' : (typeof v === 'number' ? v.toFixed(3) : v)}
-
-                      </td>
-
-                    ))}
-
-                  </tr>
-
-                );
-
-              })}
-
-            </tbody>
-
-          </table>
-
-          {data.rows.length > 10 && (
-
-            <div className="p-3 bg-black/40 text-center border-t border-yellow-900/10">
-
-              <p className="text-[10px] text-slate-500 font-mono italic uppercase tracking-widest">+ {data.rows.length - 10} additional samples available in full export</p>
-
-            </div>
-
-          )}
-
-        </div>
-
-      </div>
-
-    );
-
-  } catch (err) {
-
-    return <div className="p-4 bg-red-950/20 border border-red-900/50 text-red-400 text-xs font-mono">Invalid Data Format: {err.message}</div>;
-
-  }
-
-}
+// PetrophysicalTable extracted to components/PetrophysicalTable.jsx
 
 
 
 // Splits a message into text, embedded charts, mermaid diagrams, and audit logs
 
-function renderMessageContent(text) {
-
-  if (!text) return null;
-
-  // Match markdown images: ![alt](src) -- supports data URIs and http URLs
-
-  const imgRegex = /!\[([^\]]*)\]\((data:[^)]+|https?:[^)]+)\)/g;
-
-  const parts = [];
-
-  let lastIndex = 0;
-
-  let match;
-
-  while ((match = imgRegex.exec(text)) !== null) {
-
-    if (match.index > lastIndex) {
-
-      parts.push({ type: 'text', content: text.slice(lastIndex, match.index) });
-
-    }
-
-    parts.push({ type: 'img', alt: match[1], src: match[2] });
-
-    lastIndex = match.index + match[0].length;
-
-  }
-
-  if (lastIndex < text.length) {
-
-    parts.push({ type: 'text', content: text.slice(lastIndex) });
-
-  }
-
-
-
-  // Chain of parsers: Mermaid -> Audit -> Data
-
-  const mermaidParts = [];
-
-  parts.forEach(p => {
-
-    if (p.type === 'text') {
-
-      const merRegex = /__MERMAID_START__([\s\S]*?)__MERMAID_END__/g;
-
-      let lastMIndex = 0;
-
-      let mMatch;
-
-      while ((mMatch = merRegex.exec(p.content)) !== null) {
-
-        if (mMatch.index > lastMIndex) mermaidParts.push({ type: 'text', content: p.content.slice(lastMIndex, mMatch.index) });
-
-        mermaidParts.push({ type: 'mermaid', content: mMatch[1].trim() });
-
-        lastMIndex = mMatch.index + mMatch[0].length;
-
-      }
-
-      if (lastMIndex < p.content.length) mermaidParts.push({ type: 'text', content: p.content.slice(lastMIndex) });
-
-    } else mermaidParts.push(p);
-
-  });
-
-
-
-  const auditParts = [];
-
-  mermaidParts.forEach(p => {
-
-    if (p.type === 'text') {
-
-      const auditRegex = /__AUDIT_LOG_START__([\s\S]*?)__AUDIT_LOG_END__/g;
-
-      let lastAIndex = 0;
-
-      let aMatch;
-
-      while ((aMatch = auditRegex.exec(p.content)) !== null) {
-
-        if (aMatch.index > lastAIndex) auditParts.push({ type: 'text', content: p.content.slice(lastAIndex, aMatch.index) });
-
-        auditParts.push({ type: 'audit', content: aMatch[1].trim() });
-
-        lastAIndex = aMatch.index + aMatch[0].length;
-
-      }
-
-      if (lastAIndex < p.content.length) auditParts.push({ type: 'text', content: p.content.slice(lastAIndex) });
-
-    } else auditParts.push(p);
-
-  });
-
-
-
-  const finalParts = [];
-
-  auditParts.forEach(p => {
-
-    if (p.type === 'text') {
-
-      const dataRegex = /__PRC_DATA_START__([\s\S]*?)__PRC_DATA_END__/g;
-
-      let lastDIndex = 0;
-
-      let dMatch;
-
-      while ((dMatch = dataRegex.exec(p.content)) !== null) {
-
-        if (dMatch.index > lastDIndex) finalParts.push({ type: 'text', content: p.content.slice(lastDIndex, dMatch.index) });
-
-        finalParts.push({ type: 'data', content: dMatch[1].trim() });
-
-        lastDIndex = dMatch.index + dMatch[0].length;
-
-      }
-
-      if (lastDIndex < p.content.length) finalParts.push({ type: 'text', content: p.content.slice(lastDIndex) });
-
-    } else finalParts.push(p);
-
-  });
-
-
-
-  const simParts = [];
-
-  finalParts.forEach(p => {
-
-    if (p.type === 'text') {
-
-      const simRegex = /__SIMULATION_START__([\s\S]*?)__SIMULATION_END__/g;
-
-      let lastSIndex = 0;
-
-      let sMatch;
-
-      while ((sMatch = simRegex.exec(p.content)) !== null) {
-
-        if (sMatch.index > lastSIndex) simParts.push({ type: 'text', content: p.content.slice(lastSIndex, sMatch.index) });
-
-        simParts.push({ type: 'simulation', content: sMatch[1].trim() });
-
-        lastSIndex = sMatch.index + sMatch[0].length;
-
-      }
-
-      if (lastSIndex < p.content.length) simParts.push({ type: 'text', content: p.content.slice(lastSIndex) });
-
-    } else simParts.push(p);
-
-  });
-
-
-
-  // Parse __PRC_PLOT__ JSON blocks into interactive charts
-
-  const plotParts = [];
-
-  simParts.forEach(p => {
-
-    if (p.type === 'text') {
-
-      // Match either __PRC_PLOT__ token followed by JSON, or raw JSON with "curves" key
-
-      const plotRegex = /(?:__PRC_PLOT__\s*)?({\s*"curves"[\s\S]*?}(?=\s*(?:__|$|\n\n)))/g;
-
-      let lastPIndex = 0;
-
-      let pMatch;
-
-      while ((pMatch = plotRegex.exec(p.content)) !== null) {
-
-        if (pMatch.index > lastPIndex) plotParts.push({ type: 'text', content: p.content.slice(lastPIndex, pMatch.index) });
-
-        plotParts.push({ type: 'plot', content: pMatch[1].trim() });
-
-        lastPIndex = pMatch.index + pMatch[0].length;
-
-      }
-
-      if (lastPIndex < p.content.length) plotParts.push({ type: 'text', content: p.content.slice(lastPIndex) });
-
-    } else plotParts.push(p);
-
-  });
-
-
-
-  if (plotParts.length === 0) return <p className="whitespace-pre-wrap font-serif leading-[1.75]">{text}</p>;
-
-  return plotParts.map((part, i) => {
-
-    if (part.type === 'img') return <img key={i} src={part.src} alt={part.alt || 'PRC Chart'} className="w-full rounded-xl border border-yellow-900/30 my-3 shadow-lg" />;
-
-    if (part.type === 'mermaid') return <Mermaid key={i} content={part.content} />;
-
-    if (part.type === 'data') return <PetrophysicalTable key={i} content={part.content} />;
-
-    if (part.type === 'simulation') return <SimulationHeatmap key={i} content={part.content} />;
-
-    if (part.type === 'plot') return <KrPlot key={i} content={part.content} />;
-
-    if (part.type === 'audit') return (
-
-      <div key={i} className="my-4 p-4 bg-yellow-950/20 border-l-4 border-yellow-600 rounded-r-xl shadow-inner font-mono text-[13px] text-yellow-100/90">
-
-        <div className="flex items-center gap-2 mb-2 text-yellow-500 font-black tracking-widest text-[10px] uppercase">
-
-          <Database className="w-3 h-3" /> Engineering Audit Ledger
-
-        </div>
-
-        <div className="whitespace-pre-wrap leading-relaxed opacity-80">{part.content}</div>
-
-      </div>
-
-    );
-
-    return part.content.trim() ? <p key={i} className="whitespace-pre-wrap font-serif leading-[1.75]">{part.content}</p> : null;
-
-  });
-
-}
+// renderMessageContent extracted to components/MessageRenderer.jsx
 
 
 
@@ -915,15 +584,16 @@ function App() {
 
 
   if (!user) {
-
-    return <Login onLogin={(u) => {
-
-      localStorage.setItem('prc_user', JSON.stringify(u));
-
-      setUser(u);
-
-    }} />;
-
+    return (
+      <Login 
+        onLogin={(u) => {
+          localStorage.setItem('prc_user', JSON.stringify(u));
+          setUser(u);
+        }} 
+        setShowPrivacy={setShowPrivacy} 
+        setShowTerms={setShowTerms} 
+      />
+    );
   }
 
 
@@ -1238,7 +908,9 @@ function App() {
 
               {messages.map((msg, idx) => (
 
-                <div key={idx} className={`flex gap-3 ${msg.role === 'user' ? 'flex-row-reverse' : ''} max-w-2xl ${msg.role === 'user' ? 'ml-auto' : 'mr-auto'} w-full`}>
+                <div key={idx} 
+                  className={`flex gap-3 ${msg.role === 'user' ? 'flex-row-reverse' : ''} max-w-2xl ${msg.role === 'user' ? 'ml-auto' : 'mr-auto'} w-full msg-bubble`}
+                  style={{ animationDelay: `${Math.min(idx, 5) * 0.1}s` }}>
 
                   {/* Avatar */}
 
@@ -1419,109 +1091,71 @@ function App() {
 
 
             {/* Input Footer */}
-
-            <footer className="p-3 md:p-4 bg-[#050505] border-t border-slate-800/60 shrink-0">
-
+            <footer className="p-4 bg-black/40 backdrop-blur-xl border-t border-slate-800/60 shrink-0 relative overflow-hidden">
+              <div className="absolute inset-0 bg-gradient-to-t from-yellow-500/5 to-transparent pointer-events-none" />
+              
               {/* File chips */}
-
               {files.length > 0 && (
-
-                <div className="mb-2 flex flex-wrap gap-2">
-
+                <div className="mb-3 flex flex-wrap gap-2 animate-in fade-in slide-in-from-bottom-2">
                   {files.map((f, i) => (
-
-                    <div key={i} className="flex items-center gap-1.5 bg-yellow-950/30 border border-yellow-800/40 rounded-xl px-3 py-1.5">
-
-                      <FileText className="w-3 h-3 text-yellow-400 shrink-0" />
-
-                      <span className="text-xs font-mono text-yellow-300 truncate max-w-[140px]">{f.name}</span>
-
-                      <button onClick={() => setFiles(prev => prev.filter((_, idx) => idx !== i))} className="ml-1 text-slate-500 hover:text-red-400">
-
-                        <X className="w-3 h-3" />
-
+                    <div key={i} className="flex items-center gap-2 bg-yellow-950/20 border border-yellow-500/20 rounded-xl px-3 py-2 shadow-inner">
+                      <FileText className="w-3.5 h-3.5 text-yellow-500 shrink-0" />
+                      <span className="text-[10px] font-black text-yellow-200 uppercase tracking-wider truncate max-w-[140px]">{f.name}</span>
+                      <button onClick={() => setFiles(prev => prev.filter((_, idx) => idx !== i))} className="ml-1 text-slate-500 hover:text-red-500 transition-colors">
+                        <X className="w-3.5 h-3.5" />
                       </button>
-
                     </div>
-
                   ))}
-
                 </div>
-
               )}
 
-              <div className="flex items-center gap-2 bg-[#111116] border border-slate-800 rounded-2xl p-2 pl-4 focus-within:border-yellow-500/40 transition-all">
+              <div className="relative group">
+                {/* Glow effect on focus */}
+                <div className="absolute -inset-1 bg-gradient-to-r from-yellow-500/20 to-amber-500/20 rounded-[22px] blur opacity-0 group-focus-within:opacity-100 transition-opacity duration-500" />
+                
+                <div className="relative flex items-center gap-3 bg-[#0a0a0c] border border-slate-800 rounded-2xl p-2 pl-4 group-focus-within:border-yellow-500/50 transition-all shadow-2xl">
+                  <label className="cursor-pointer shrink-0 p-2 hover:bg-yellow-500/10 rounded-xl transition-all hover:scale-110 active:scale-95 group">
+                    <input type="file" multiple accept=".txt,.pdf,.csv,.xlsx,.xls,.doc,.docx,image/jpeg,image/png,image/gif,image/webp" className="hidden"
+                      onChange={(e) => {
+                        const newFiles = Array.from(e.target.files);
+                        setFiles(prev => {
+                          const existingNames = prev.map(f => f.name);
+                          const deduped = newFiles.filter(f => !existingNames.includes(f.name));
+                          return [...prev, ...deduped];
+                        });
+                        e.target.value = '';
+                      }} />
+                    <Paperclip className={`w-5 h-5 transition-colors ${files.length > 0 ? 'text-yellow-500' : 'text-slate-500 group-hover:text-yellow-500/70'}`} />
+                  </label>
 
-                <label className="cursor-pointer shrink-0 p-1.5 hover:bg-slate-800 rounded-xl transition-colors">
-
-                  <input type="file" multiple accept=".txt,.pdf,.csv,.xlsx,.xls,.doc,.docx,image/jpeg,image/png,image/gif,image/webp" className="hidden"
-
+                  <textarea
+                    ref={inputRef}
+                    value={input}
                     onChange={(e) => {
+                      setInput(e.target.value);
+                      e.target.style.height = 'auto';
+                      e.target.style.height = `${Math.min(e.target.scrollHeight, 250)}px`;
+                    }}
+                    onKeyDown={(e) => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); if (input.trim() || files.length > 0) handleSend(); } }}
+                    rows={1}
+                    disabled={serverStatus === 'waking'}
+                    placeholder={serverStatus === 'waking' ? 'Establishing secure link...' : 'Query Hviel Intel...'}
+                    className="flex-1 bg-transparent border-none outline-none text-slate-100 placeholder-slate-700 text-sm md:text-[15px] font-medium disabled:opacity-50 resize-none overflow-y-auto py-3 min-h-[48px] leading-relaxed block"
+                  />
 
-                      const newFiles = Array.from(e.target.files);
-
-                      setFiles(prev => {
-
-                        const existingNames = prev.map(f => f.name);
-
-                        const deduped = newFiles.filter(f => !existingNames.includes(f.name));
-
-                        return [...prev, ...deduped];
-
-                      });
-
-                      e.target.value = '';
-
-                    }} />
-
-                  <Paperclip className={`w-5 h-5 ${files.length > 0 ? 'text-yellow-400' : 'text-slate-500'}`} />
-
-                </label>
-
-                <textarea
-
-                  ref={inputRef}
-
-                  value={input}
-
-                  onChange={(e) => {
-
-                    setInput(e.target.value);
-
-                    e.target.style.height = 'auto';
-
-                    e.target.style.height = `${Math.min(e.target.scrollHeight, 250)}px`;
-
-                  }}
-
-                  onKeyDown={(e) => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); if (input.trim() || files.length > 0) handleSend(); } }}
-
-                  rows={1}
-
-                  disabled={serverStatus === 'waking'}
-
-                  placeholder={serverStatus === 'waking' ? 'Connecting to server...' : 'Ask Hviel or paste lab data...'}
-
-                  className="flex-1 bg-transparent border-none outline-none text-yellow-50 placeholder-slate-600 text-sm md:text-[15px] font-serif disabled:opacity-50 resize-none overflow-y-auto py-2.5 min-h-[44px] leading-relaxed block"
-
-                />
-
-                <button
-
-                  onClick={() => handleSend()}
-
-                  disabled={loading || serverStatus === 'waking' || (!input.trim() && files.length === 0)}
-
-                  className="bg-yellow-600 hover:bg-yellow-500 text-black p-3 rounded-xl shrink-0 transition-all active:scale-95 disabled:opacity-30 disabled:cursor-not-allowed"
-
-                >
-
-                  <Send className="w-4 h-4" />
-
-                </button>
-
+                  <button
+                    onClick={() => handleSend()}
+                    disabled={loading || serverStatus === 'waking' || (!input.trim() && files.length === 0)}
+                    className="bg-gradient-to-br from-yellow-500 to-amber-600 hover:from-yellow-400 hover:to-amber-500 text-black p-3 rounded-xl shrink-0 transition-all active:scale-90 disabled:opacity-30 disabled:cursor-not-allowed shadow-[0_0_20px_rgba(234,179,8,0.3)] hover:shadow-[0_0_25px_rgba(234,179,8,0.5)]"
+                  >
+                    {loading ? <Loader className="w-5 h-5 animate-spin" /> : <Send className="w-5 h-5" />}
+                  </button>
+                </div>
               </div>
-
+              
+              <div className="mt-2 text-center">
+                <p className="text-[8px] text-slate-700 font-mono uppercase tracking-[0.3em]">Sovereign AI Node -- Encrypted PRC Stream</p>
+              </div>
             </footer>
 
           </>
@@ -1552,153 +1186,10 @@ function App() {
 
       <CookieConsent />
 
-    </div>
-
-  );
-
 }
-
-
-
-function Login({ onLogin }) {
-
-  const [id, setId] = useState('');
-
-  const [name, setName] = useState('');
-
-  const [email, setEmail] = useState('');
-
-  const [error, setError] = useState('');
-
-
-
-  const handleAuth = () => {
-
-    if (id === '1509') {
-
-      const fd = new FormData(); fd.append('email', email); fd.append('name', name);
-
-      fetch((import.meta.env.VITE_API_URL || '') + '/api/register', {method:'POST', body: fd}).catch(()=>{});
-
-      onLogin({ name, id, email });
-
-    } else {
-
-      setError('Invalid MFA Credentials. Access Denied.');
-
-      setId('');
-
-    }
-
-  };
-
-
-
-  return (
-
-    <div className="min-h-screen bg-[#050505] flex items-center justify-center p-4 relative overflow-hidden">
-
-      {/* Background glow */}
-
-      <div className="absolute inset-0 pointer-events-none overflow-hidden opacity-20">
-
-        <div className="absolute -top-40 -left-60 w-[600px] h-[600px] bg-yellow-900/30 rounded-full blur-[140px]" />
-
-        <div className="absolute -bottom-40 -right-60 w-[500px] h-[500px] bg-amber-900/20 rounded-full blur-[120px]" />
-
-      </div>
-
-
-
-      <div className="w-full max-w-sm space-y-6 animate-fade-in relative z-10">
-
-        {/* Logo */}
-
-        <div className="flex flex-col items-center">
-
-          <div className="bg-white/95 p-5 rounded-3xl shadow-2xl shadow-yellow-900/10 mb-6 border border-white/10 hover:scale-[1.02] transition-transform duration-500">
-
-            <img src="/prc_logo.jpg" alt="PRC Logo" className="w-40 h-auto object-contain" />
-
-          </div>
-
-          <h1 className="text-xl font-black tracking-widest text-white uppercase italic text-center">Hviel | PRC AI Hub</h1>
-
-          <p className="text-slate-500 text-xs mt-2 font-mono tracking-widest uppercase text-center animate-pulse-slow">Senior AI Petrophysical Specialist</p>
-
-        </div>
-
-
-
-        {/* Form */}
-
-        <div className="p-6 bg-gloss rounded-3xl border border-white/5 space-y-5 shadow-2xl backdrop-blur-3xl shadow-black/80">
-
-          <div className="space-y-4">
-
-            <div className="space-y-2">
-
-              <label className="text-[10px] font-bold text-slate-400 uppercase tracking-widest ml-2">Full Name & Profession</label>
-
-              <input type="text" value={name} onChange={(e) => setName(e.target.value)}
-
-                onKeyDown={(e) => e.key === 'Enter' && name && id && handleAuth()}
-
-                placeholder="e.g. Eng. Ahmed Al-Lafi" className="auth-input" />
-
-            </div>
-
-            <div className="space-y-2">
-
-              <label className="text-[10px] font-bold text-slate-400 uppercase tracking-widest ml-2">Email Address</label>
-
-              <input type="email" value={email} onChange={(e) => setEmail(e.target.value)}
-
-                onKeyDown={(e) => e.key === 'Enter' && name && email && id && handleAuth()}
-
-                placeholder="e.g. ahmed@prc.ly" className="auth-input" />
-
-            </div>
-
-            <div className="space-y-2">
-
-              <label className="text-[10px] font-bold text-slate-400 uppercase tracking-widest ml-2">PRC Access Code</label>
-
-              <input type="password" value={id} onChange={(e) => { setId(e.target.value); setError(''); }}
-
-                onKeyDown={(e) => e.key === 'Enter' && name && id && handleAuth()}
-
-                placeholder="Enter Access Code" className="auth-input" />
-
-            </div>
-
-          </div>
-
-          {error && <p className="text-yellow-500 text-[10px] text-center font-bold tracking-widest uppercase">{error}</p>}
-
-                    <button onClick={handleAuth} disabled={!name || !id || !email} className="auth-button">
-            Authenticate Session
-          </button>
-          
-          <div className="flex justify-center gap-4 mt-6 text-[10px] text-slate-500 font-mono tracking-widest uppercase">
-            <button onClick={() => setShowPrivacy(true)} className="hover:text-yellow-500 transition-colors">Privacy Policy</button>
-            <span className="opacity-30">|</span>
-            <button onClick={() => setShowTerms(true)} className="hover:text-yellow-500 transition-colors">Terms of Service</button>
-          </div>
-
-        </div>
-
-      </div>
-
-    </div>
-
-  );
-
-}
-
-
 
 export default App;
+
 
 
 
