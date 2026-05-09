@@ -466,14 +466,17 @@ class PRCChatAssistant:
                                     elif part.text: yield part.text
                     else:
                         resp = self._client.models.generate_content(model=self.model_name, contents=contents, config=cfg)
-                        if not resp or not resp.candidates: return "I encountered an error."
+                        if not resp or not resp.candidates:
+                            yield "I encountered an error."
+                            return
                         final_text = ""
                         for part in resp.candidates[0].content.parts:
                             if part.function_call:
                                 tool_res = self._execute_tool(part.function_call)
                                 final_text += self._format_tool_response(part.function_call.name, part.function_call.args, tool_res)
                             elif part.text: final_text += part.text
-                        return final_text
+                        yield final_text
+                        return
                     break
                 except Exception as e:
                     err = str(e).lower()
@@ -483,7 +486,7 @@ class PRCChatAssistant:
                         continue
                     raise e
 
-        return _generate() if stream else _generate()
+        return _generate() if stream else next(_generate(), "I encountered an error.")
 
     def _format_tool_response(self, name, args, result):
         try:
