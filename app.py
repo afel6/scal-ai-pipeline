@@ -1,4 +1,5 @@
-# PRC-HUB-VER-13-PROD-READY - HEARTBEAT: 2026-05-09T22:59
+# PRC-HUB-VER-13-PROD-READY - HEARTBEAT: 2026-05-09T23:20
+print("[SYSTEM] app.py loading...")
 from fastapi import FastAPI, UploadFile, File, Form
 from contextlib import asynccontextmanager
 from fastapi.responses import FileResponse, StreamingResponse
@@ -1004,9 +1005,32 @@ class PetrelExporter:
 hviel_engine = HvielDocEngine(output_dir='.')   # saves .docx/.xlsx/.pptx/.pdf to working dir
 
 # -- APP SETUP --
+def init_db():
+    try:
+        if _PG_AVAILABLE:
+            db('CREATE TABLE IF NOT EXISTS m (id SERIAL PRIMARY KEY, sid TEXT, role TEXT, text TEXT, url TEXT, ts REAL)')
+            try: db('ALTER TABLE m ADD COLUMN user_email TEXT')
+            except: pass
+            db('CREATE TABLE IF NOT EXISTS kb (id SERIAL PRIMARY KEY, source TEXT, chunk TEXT)')
+            db('CREATE TABLE IF NOT EXISTS kb_vectors (id SERIAL PRIMARY KEY, chunk_id INTEGER UNIQUE, embedding BYTEA)')
+            db('CREATE TABLE IF NOT EXISTS users (id SERIAL PRIMARY KEY, email TEXT UNIQUE, name TEXT, created_at REAL)')
+            db('CREATE TABLE IF NOT EXISTS feedback (id SERIAL PRIMARY KEY, user_email TEXT, bug_report TEXT, ts REAL)')
+            db('CREATE TABLE IF NOT EXISTS analytics_events (id SERIAL PRIMARY KEY, user_email TEXT, event_type TEXT, event_data TEXT, ts REAL)')
+        else:
+            db('CREATE TABLE IF NOT EXISTS m (id INTEGER PRIMARY KEY AUTOINCREMENT, sid TEXT, role TEXT, text TEXT, url TEXT, ts REAL)')
+            try: db('ALTER TABLE m ADD COLUMN user_email TEXT')
+            except: pass
+            db('CREATE TABLE IF NOT EXISTS kb (id INTEGER PRIMARY KEY AUTOINCREMENT, source TEXT, chunk TEXT)')
+            db('CREATE TABLE IF NOT EXISTS kb_vectors (id INTEGER PRIMARY KEY AUTOINCREMENT, chunk_id INTEGER UNIQUE, embedding BLOB)')
+            db('CREATE TABLE IF NOT EXISTS users (id INTEGER PRIMARY KEY AUTOINCREMENT, email TEXT UNIQUE, name TEXT, created_at REAL)')
+            db('CREATE TABLE IF NOT EXISTS feedback (id INTEGER PRIMARY KEY AUTOINCREMENT, user_email TEXT, bug_report TEXT, ts REAL)')
+            db('CREATE TABLE IF NOT EXISTS analytics_events (id INTEGER PRIMARY KEY AUTOINCREMENT, user_email TEXT, event_type TEXT, event_data TEXT, ts REAL)')
+    except Exception as e:
+        _logger.error(f"[DB] Initialization failed: {e}")
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    import threading
+    init_db()
     def _hydrate_background():
         import PyPDF2
         _logger.info("[SYSTEM] PRC Auto-Hydration Engine starting - scanning /books...")
@@ -1038,11 +1062,14 @@ async def lifespan(app: FastAPI):
 
         _logger.info("[SYSTEM] Auto-Hydration complete. PRC Hub ONLINE.")
 
-    # Run hydration in background so the web server boots up immediately (prevents Render timeout/OOM)
     threading.Thread(target=_hydrate_background, daemon=True).start()
     yield
 
 app = FastAPI(lifespan=lifespan)
+
+@app.get("/health")
+def health():
+    return {"status": "ok", "db": "postgres" if _PG_AVAILABLE else "sqlite", "sdk": "google.genai"}
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[
@@ -1753,12 +1780,12 @@ async def handle(
                 else:
                     raise e
 
-        # â”€â”€ GEMINI NATIVE ENGINE â”€â”€
+        # -- GEMINI NATIVE ENGINE --
         # Safety: Gemini can return None for blocked or empty responses
         if not resp:
             resp = "I was unable to generate a response for this request. Please try rephrasing your question or uploading a smaller file."
 
-        # Handle Graphs â€” iterate over ALL __PRC_PLOT__ tokens in one response
+        # Handle Graphs - iterate over ALL __PRC_PLOT__ tokens in one response
         _plot_attempts = 0
         while '__PRC_PLOT__' in resp and _plot_attempts < 10:
             _plot_attempts += 1
