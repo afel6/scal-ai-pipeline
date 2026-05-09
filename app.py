@@ -350,11 +350,19 @@ class PRCChatAssistant:
             f_data = _FAILED_KEYS.get(key, {})
             if (now - f_data.get('ts', 0)) < f_data.get('wait', 0): continue
             self._current_idx = idx
-            self._client = genai_new.Client(api_key=key)
-            _logger.info(f"[HA Rotator] Node {idx+1} SELECTED ({key[:8]}...)")
-            return
+            try:
+                self._client = genai_new.Client(api_key=key)
+                _logger.info(f"[HA Rotator] Node {idx+1} SELECTED ({key[:8]}...)")
+                return
+            except Exception as e:
+                _logger.warning(f"[HA Rotator] Node {idx+1} failed to init: {e}")
+                continue
         self._current_idx = 0
-        self._client = genai_new.Client(api_key=self._keys[0])
+        try:
+            self._client = genai_new.Client(api_key=self._keys[0])
+        except Exception as e:
+            _logger.error(f"[HA Rotator] Emergency fallback also failed: {e}")
+            self._client = None
 
     def rotate_key(self, is_hard_fail=False):
         current_key = self._keys[self._current_idx]
@@ -895,7 +903,11 @@ class PetrelExporter:
 
 # -- REPORTING ENGINE (HvielDocEngine - Claude's architecture) --
 # from document_engines import DocumentEngines  # legacy - superseded by HvielDocEngine
-hviel_engine = HvielDocEngine(output_dir='.')   # saves .docx/.xlsx/.pptx/.pdf to working dir
+try:
+    hviel_engine = HvielDocEngine(output_dir='.')
+except Exception as _he:
+    _logger.error(f"[SYSTEM] HvielDocEngine failed to load: {_he}")
+    hviel_engine = None
 
 # -- APP SETUP --
 def init_db():
