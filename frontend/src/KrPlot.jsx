@@ -1,8 +1,8 @@
 import React, { useMemo } from 'react';
 import {
-  LineChart, Line, ScatterChart, Scatter,
+  Line, Scatter,
   XAxis, YAxis, CartesianGrid, Tooltip,
-  Legend, ResponsiveContainer, ComposedChart
+  ResponsiveContainer, ComposedChart
 } from 'recharts';
 
 const COLORS = {
@@ -70,6 +70,18 @@ export default function KrPlot({ content }) {
     });
   });
 
+  const xDomain = useMemo(() => {
+    const allX = [
+      ...lineData.map(d => d.Sw),
+      ...scatterData.krw_raw.map(d => d.Sw),
+      ...scatterData.kro_raw.map(d => d.Sw),
+    ];
+    if (!allX.length) return [0, 1];
+    const lo = Math.floor(Math.min(...allX) * 10) / 10;
+    const hi = Math.ceil(Math.max(...allX) * 10) / 10;
+    return [lo, hi];
+  }, [lineData, scatterData]);
+
   const title = data.title || 'Relative Permeability Curves';
   const xLabel = data.x_label || 'Water Saturation (Sw)';
   const yLabel = data.y_label || 'Relative Permeability (Kr)';
@@ -92,51 +104,51 @@ export default function KrPlot({ content }) {
       <div className="p-5 pt-6">
         {/* Line chart for fitted curves */}
         <ResponsiveContainer width="100%" height={340}>
-          <ComposedChart margin={{ top: 10, right: 30, bottom: 40, left: 20 }}>
-            <CartesianGrid strokeDasharray="3 3" stroke="#1e1e2e" />
+          <ComposedChart margin={{ top: 10, right: 24, bottom: 36, left: 20 }}>
+            <CartesianGrid strokeDasharray="3 3" stroke="#1a1a2a" />
             <XAxis
               dataKey="Sw"
               type="number"
-              domain={[0.1, 0.9]}
+              domain={xDomain}
               tickCount={9}
               tickFormatter={v => v.toFixed(2)}
-              stroke="#475569"
+              stroke="#334155"
               tick={{ fontSize: 10, fill: '#64748b', fontFamily: 'monospace' }}
-              label={{ value: xLabel, position: 'insideBottom', offset: -25, fill: '#64748b', fontSize: 11 }}
+              label={{ value: xLabel, position: 'insideBottom', offset: -22, fill: '#64748b', fontSize: 11 }}
             />
             <YAxis
               type="number"
               domain={[0, 1]}
               tickCount={6}
               tickFormatter={v => v.toFixed(2)}
-              stroke="#475569"
+              stroke="#334155"
               tick={{ fontSize: 10, fill: '#64748b', fontFamily: 'monospace' }}
               label={{ value: yLabel, angle: -90, position: 'insideLeft', offset: 5, fill: '#64748b', fontSize: 11 }}
             />
             <Tooltip content={<CustomTooltip />} />
-            <Legend
-              wrapperStyle={{ fontSize: '11px', fontFamily: 'monospace', paddingTop: '16px' }}
-              formatter={(value) => <span style={{ color: '#94a3b8' }}>{value}</span>}
-            />
 
             {/* Fitted lines */}
             <Line
               data={lineData}
               dataKey="krw_fit"
-              name="Krw Fitted (Brooks-Corey)"
+              name="Krw Fitted"
               stroke={COLORS.krw_fit}
               strokeWidth={2.5}
               dot={false}
               type="monotone"
+              isAnimationActive={false}
+              activeDot={{ r: 5, strokeWidth: 0, fill: COLORS.krw_fit }}
             />
             <Line
               data={lineData}
               dataKey="kro_fit"
-              name="Kro Fitted (Brooks-Corey)"
+              name="Kro Fitted"
               stroke={COLORS.kro_fit}
               strokeWidth={2.5}
               dot={false}
               type="monotone"
+              isAnimationActive={false}
+              activeDot={{ r: 5, strokeWidth: 0, fill: COLORS.kro_fit }}
             />
 
             {/* Raw scatter points */}
@@ -145,16 +157,18 @@ export default function KrPlot({ content }) {
               dataKey="Kr"
               name="Krw Lab Data"
               fill={COLORS.krw_raw}
-              opacity={0.85}
-              r={5}
+              opacity={0.9}
+              r={4.5}
+              isAnimationActive={false}
             />
             <Scatter
               data={scatterData.kro_raw}
               dataKey="Kr"
               name="Kro Lab Data"
               fill={COLORS.kro_raw}
-              opacity={0.85}
-              r={5}
+              opacity={0.9}
+              r={4.5}
+              isAnimationActive={false}
             />
           </ComposedChart>
         </ResponsiveContainer>
