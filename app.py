@@ -975,8 +975,10 @@ def health():
 @app.get("/api/sessions")
 def get_sessions(email: str = None):
     try:
-        if email:
-            rows = db("SELECT sid, MIN(ts), text FROM m WHERE role='user' AND user_email=? GROUP BY sid ORDER BY MAX(ts) DESC", (email,))
+        # Fix: Normalize email to match lower-case INSERTs
+        const_email = email.lower().strip() if email else None
+        if const_email:
+            rows = db("SELECT sid, MIN(ts), text FROM m WHERE role='user' AND user_email=? GROUP BY sid ORDER BY MAX(ts) DESC", (const_email,))
         else:
             rows = db("SELECT sid, MIN(ts), text FROM m WHERE role='user' GROUP BY sid ORDER BY MAX(ts) DESC")
         return [{"id": r[0], "title": r[2].split('\n')[0][:40] + '...', "created_at": r[1]} for r in rows]
@@ -984,8 +986,10 @@ def get_sessions(email: str = None):
 
 @app.delete("/api/session/{sid}")
 def del_session(sid: str, email: str = None):
-    if email:
-        db("DELETE FROM m WHERE sid = ? AND user_email = ?", (sid, email))
+    # Fix: Normalize email for deletion safety
+    const_email = email.lower().strip() if email else None
+    if const_email:
+        db("DELETE FROM m WHERE sid = ? AND user_email = ?", (sid, const_email))
     else:
         db("DELETE FROM m WHERE sid = ?", (sid,))
     return {"status": "ok"}
@@ -1133,9 +1137,11 @@ async def stream_chat(
             if valid_history and valid_history[-1]['role'] == 'user':
                 valid_history.pop()
 
-            if user_email:
+            const_email = user_email.lower().strip() if (user_email and user_email.strip()) else None
+
+            if const_email:
                 db("INSERT INTO m (sid, role, text, ts, user_email) VALUES (?, ?, ?, ?, ?)",
-                   (sid, "user", message, time.time(), user_email))
+                   (sid, "user", message, time.time(), const_email))
             else:
                 db("INSERT INTO m (sid, role, text, ts) VALUES (?, ?, ?, ?)",
                    (sid, "user", message, time.time()))
@@ -1234,12 +1240,12 @@ async def stream_chat(
                     # BUG FIX: use json.dumps for correct escaping of all chars (\n, \t, ", \\, etc.)
                     yield f"data: {_json.dumps({'type': 'token', 'text': token})}\n\n"
 
-            if user_email:
+            if const_email:
                 db("INSERT INTO m (sid, role, text, ts, user_email) VALUES (?, ?, ?, ?, ?)",
-                   (sid, "model", full_resp.split("__PRC_")[0] if "__PRC_" in full_resp else full_resp, time.time(), user_email))
+                   (sid, "model", full_resp, time.time(), const_email))
             else:
                 db("INSERT INTO m (sid, role, text, ts) VALUES (?, ?, ?, ?)",
-                   (sid, "model", full_resp.split("__PRC_")[0] if "__PRC_" in full_resp else full_resp, time.time()))
+                   (sid, "model", full_resp, time.time()))
             yield f"data: {_json.dumps({'type': 'done'})}\n\n"
 
         except Exception as e:
@@ -1313,9 +1319,11 @@ async def handle(
         if _is_heavy_query(message):
             kb_context = KnowledgeBase.search(message)
 
+        const_email = user_email.lower().strip() if (user_email and user_email.strip()) else None
+
         # SAVE USER MESSAGE TO DB
-        if user_email:
-            db("INSERT INTO m (sid, role, text, ts, user_email) VALUES (?, ?, ?, ?, ?)", (sid, "user", message, time.time(), user_email))
+        if const_email:
+            db("INSERT INTO m (sid, role, text, ts, user_email) VALUES (?, ?, ?, ?, ?)", (sid, "user", message, time.time(), const_email))
         else:
             db("INSERT INTO m (sid, role, text, ts) VALUES (?, ?, ?, ?)", (sid, "user", message, time.time()))
 
@@ -1424,7 +1432,7 @@ async def handle(
 
         if doc_type:
             url = f"/api/download/{path}"
-            db("INSERT INTO m (sid, role, text, url, ts, user_email) VALUES (?, ?, ?, ?, ?, ?)", (sid, "model", clean_resp, url, time.time(), user_email))
+            db("INSERT INTO m (sid, role, text, url, ts, user_email) VALUES (?, ?, ?, ?, ?, ?)", (sid, "model", resp, url, time.time(), const_email))
             return {"status": "success", "is_report_ready": True, "download_url": url, "doc_type": doc_type, "session_id": sid, "reply": clean_resp}
 
         # Handle Petrel Exports
@@ -1432,10 +1440,10 @@ async def handle(
             clean_resp = resp.replace('__PETREL_EXPORT__', '').strip()
             path = PetrelExporter.build_xml(f"Study_{int(time.time())}", clean_resp)
             url = f"/api/download/{path}"
-            db("INSERT INTO m (sid, role, text, url, ts, user_email) VALUES (?, ?, ?, ?, ?, ?)", (sid, "model", clean_resp, url, time.time(), user_email))
+            db("INSERT INTO m (sid, role, text, url, ts, user_email) VALUES (?, ?, ?, ?, ?, ?)", (sid, "model", resp, url, time.time(), const_email))
             return {"status": "success", "is_report_ready": True, "download_url": url, "session_id": sid, "reply": clean_resp}
 
-        db("INSERT INTO m (sid, role, text, ts, user_email) VALUES (?, ?, ?, ?, ?)", (sid, "model", resp, time.time(), user_email))
+        db("INSERT INTO m (sid, role, text, ts, user_email) VALUES (?, ?, ?, ?, ?)", (sid, "model", resp, time.time(), const_email))
         return {"status": "success", "session_id": sid, "reply": resp}
 
     except Exception as e:

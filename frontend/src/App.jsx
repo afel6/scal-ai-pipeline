@@ -169,15 +169,15 @@ function App() {
     try {
       const emailParam = user?.email ? `?email=${user.email}` : '';
       const { data } = await axios.get(`${API_URL}/api/sessions${emailParam}`);
+      setSessions(data);
+    } catch {}
+  }, [user]);
+
   useEffect(() => {
     if (user?.email && !sessionId && sessions.length > 0) {
       handleLoadSession(sessions[0].id);
     }
   }, [user, sessionId, sessions]);
-
-      setSessions(data);
-    } catch {}
-  }, [user]);
 
 
 

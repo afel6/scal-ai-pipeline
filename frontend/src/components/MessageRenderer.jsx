@@ -110,7 +110,10 @@ export function renderMessageContent(text) {
     } else plotParts.push(p);
   });
 
-  if (plotParts.length === 0) return <p className="whitespace-pre-wrap font-serif leading-[1.75]">{text}</p>;
+  if (plotParts.length === 0) {
+    if (!cleanText) return null;
+    return <p className="whitespace-pre-wrap font-serif leading-[1.75]">{cleanText}</p>;
+  }
 
   return plotParts.map((part, i) => {
     if (part.type === 'img') return <img key={i} src={part.src} alt={part.alt || 'PRC Chart'} className="w-full rounded-xl border border-yellow-900/30 my-3 shadow-lg" />;

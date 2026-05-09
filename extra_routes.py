@@ -13,8 +13,9 @@ def register_extra_routes(app, db):
         user_email: str = Form(""),
         bug_report: str = Form(...)
     ):
+        const_email = user_email.lower().strip() if user_email else ""
         db("INSERT INTO feedback (user_email, bug_report, ts) VALUES (?, ?, ?)",
-           (user_email, bug_report, time.time()))
+           (const_email, bug_report, time.time()))
         return {"status": "ok"}
 
     @app.post("/api/analytics/event")
@@ -23,8 +24,9 @@ def register_extra_routes(app, db):
         event_type: str = Form(...),
         event_data: str = Form("")
     ):
+        const_email = user_email.lower().strip() if user_email else ""
         db("INSERT INTO analytics_events (user_email, event_type, event_data, ts) VALUES (?, ?, ?, ?)",
-           (user_email, event_type, event_data, time.time()))
+           (const_email, event_type, event_data, time.time()))
         return {"status": "ok"}
 
     @app.post("/api/register")
