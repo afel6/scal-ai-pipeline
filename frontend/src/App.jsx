@@ -234,13 +234,10 @@ function App() {
           setMessages([WELCOME_MSG, ...data.messages.map(m => ({
 
             role: m.role,
-
             text: m.text,
-
-            download_url: m.download_url, // Synchronized with backend's new 'download_url' key
-
+            download_url: m.download_url,
+            fileName: m.fileName,
             doc_type: m.text?.includes('EXCEL') ? 'excel' : m.text?.includes('PPTX') ? 'pptx' : m.text?.includes('PDF') ? 'pdf' : 'docx'
-
           }))]);
 
           setLastMessage(null);
