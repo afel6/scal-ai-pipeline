@@ -4,7 +4,7 @@ from fastapi import FastAPI, UploadFile, File, Form
 from contextlib import asynccontextmanager
 from fastapi.responses import FileResponse, StreamingResponse
 from fastapi.middleware.cors import CORSMiddleware
-import os, uuid, time, re, json as _json, logging, threading
+import os, uuid, time, re, json as _json, logging, threading, asyncio
 import numpy as np
 import pandas as pd
 from typing import Optional
@@ -342,305 +342,182 @@ class PRCChatAssistant:
         self._initialize_node()
 
     def _initialize_node(self):
-        """Selects the best available API key and initializes the GenAI client.
-
-        Key validation is intentionally deferred to the first real request.
-        A blocking ping at boot time delays Render startup and wastes quota.
-        """
-        if not self._keys:
-            return
+        if not self._keys: return
         now = time.time()
         for i in range(len(self._keys)):
             idx = (self._current_idx + i) % len(self._keys)
             key = self._keys[idx]
-            wait_time = _FAILED_KEYS.get(key, {}).get('wait', 0)
-            last_fail  = _FAILED_KEYS.get(key, {}).get('ts', 0)
-            if (now - last_fail) < wait_time:
-                continue
+            f_data = _FAILED_KEYS.get(key, {})
+            if (now - f_data.get('ts', 0)) < f_data.get('wait', 0): continue
             self._current_idx = idx
             self._client = genai_new.Client(api_key=key)
             _logger.info(f"[HA Rotator] Node {idx+1} SELECTED ({key[:8]}...)")
             return
-        # All keys in cooldown — emergency fallback to first key
         self._current_idx = 0
         self._client = genai_new.Client(api_key=self._keys[0])
-        _logger.warning("[HA Rotator] All nodes in cooldown — emergency fallback to node 1")
 
     def rotate_key(self, is_hard_fail=False):
-        """Penalizes the current key and switches to the next healthy node."""
         current_key = self._keys[self._current_idx]
         penalty = 3600 if is_hard_fail else 60
         _FAILED_KEYS[current_key] = {'ts': time.time(), 'wait': penalty}
-        _logger.warning(f"[HA Rotator] Key {current_key[:8]}... penalized {penalty}s (hard_fail={is_hard_fail})")
         self._current_idx = (self._current_idx + 1) % len(self._keys)
         self._initialize_node()
 
-    # Petrophysical parameter keys the LLM might place at the top level of args
-    # instead of inside the 'params' object, depending on how it interprets the schema.
     _PETRO_KEYS = frozenset({
-        'swr', 'snr', 'krw_max', 'kro_max', 'nw', 'no',
-        'Lw', 'Ew', 'Tw', 'Lo', 'Eo', 'To',
-        'nx', 'ny', 'dx', 'dy', 'dz', 'dt', 'steps',
-        'porosity', 'perm', 'swi', 'pi', 'q_inj', 'mu_w', 'mu_o',
+        'swr', 'snr', 'krw_max', 'kro_max', 'nw', 'no', 'Lw', 'Ew', 'Tw', 'Lo', 'Eo', 'To',
+        'nx', 'ny', 'dx', 'dy', 'dz', 'dt', 'steps', 'porosity', 'perm', 'swi', 'pi', 'q_inj', 'mu_w', 'mu_o',
     })
 
     def _execute_tool(self, call):
-        name = call.name
-        args = call.args
+        name, args = call.name, call.args
         if name == "execute_python_simulation":
-            model = args.get("model")
-            mode = args.get("mode", "1d")
-            # Guard: params may be None (LLM sends params: null) or missing entirely
             p = args.get("params") or {}
-            if not isinstance(p, dict):
-                p = {}
-            # Hoist any petrophysical keys the LLM placed at the top level of args
-            # rather than inside the 'params' object (schema misinterpretation)
+            if not isinstance(p, dict): p = {}
             for k in self._PETRO_KEYS:
-                if k in args and k not in p:
-                    p[k] = args[k]
-            p['model'] = model
-            p['mode'] = mode
+                if k in args and k not in p: p[k] = args[k]
+            p['model'] = args.get("model")
+            p['mode'] = args.get("mode", "1d")
             res = SkillsEngine.run_skill("petroleum", "simulator", "simulation_core.py", [_json.dumps(p)])
-
             output = res.get("stdout") or res.get("error")
-            # Strip raw Python tracebacks before returning — Gemini and the frontend
-            # should never see internal stack frames.
-            if output:
-                try:
-                    out_json = _json.loads(output)
-                    if out_json.get("status") == "error":
-                        return _json.dumps({
-                            "status": "error",
-                            "message": out_json.get("message", "Simulation failed"),
-                            "mode": mode,
-                        })
-                except Exception:
-                    pass
-            if mode == "2d" and output and "success" in output:
+            if args.get("mode") == "2d" and output and "success" in output:
                 return f"__SIMULATION_START__\n{output}\n__SIMULATION_END__"
             return output
         elif name == "generate_mermaid_diagram":
             return f"__MERMAID_START__\n{args.get('content')}\n__MERMAID_END__"
         elif name == "fit_petrophysical_curve":
-            model = args.get("model")
-            sw = args.get("sw", [])
-            krw = args.get("krw", [])
-            data = {"model": model, "sw": sw, "krw": krw}
+            data = {"model": args.get("model"), "sw": args.get("sw", []), "krw": args.get("krw", [])}
             res = SkillsEngine.run_skill("petroleum", "", "curve_fitting_skill.py", [_json.dumps(data)])
             return res.get("stdout") or res.get("error")
         elif name == "agentic_history_matching":
-            sw = args.get("sw", [])
-            krw = args.get("krw", [])
-            kro = args.get("kro", [])
-            data = {"sw": sw, "krw": krw, "kro": kro}
+            data = {"sw": args.get("sw", []), "krw": args.get("krw", []), "kro": args.get("kro", [])}
             res = SkillsEngine.run_skill("petroleum", "simulator", "history_matching_skill.py", [_json.dumps(data)])
             return res.get("stdout") or res.get("error")
         return f"Unknown tool: {name}"
 
-    def chat(self, history, msg, kb_context="", f_parts=[]):
-        enriched = SYSTEM_PROMPT
-        if kb_context:
-            enriched += f"\n\n--- KNOWLEDGE BASE CONTEXT ---\n{kb_context}\n--- END CONTEXT ---"
-        enriched += f"\n\nUSER QUERY: {msg}"
-
-        # Build strictly alternating history
+    def chat(self, history, msg, kb_context="", f_parts=[], stream=False):
+        """Unified entry point for both sync and stream chat. Handles HA, Files, Tools, and Plots."""
+        enriched = f"{msg}\n\n[CONTEXT: {kb_context}]" if kb_context else msg
         valid_history = []
         for x in history:
             role = 'user' if x['role'] == 'user' else 'model'
             if not valid_history:
-                if role == 'user': valid_history.append({"role": role, "parts": [x['text']]})
+                if role == 'user': valid_history.append({"role": role, "parts": [x['text']], "url": x.get('url')})
             else:
                 if valid_history[-1]['role'] != role:
-                    valid_history.append({"role": role, "parts": [x['text']]})
+                    valid_history.append({"role": role, "parts": [x['text']], "url": x.get('url')})
                 elif role == 'user':
-                    valid_history[-1] = {"role": role, "parts": [x['text']]}
+                    valid_history[-1] = {"role": role, "parts": [x['text']], "url": x.get('url')}
                 elif role == 'model':
                     valid_history[-1]['parts'][0] += "\n\n" + x['text']
-        if valid_history and valid_history[-1]['role'] == 'user':
-            valid_history.pop()
+        if valid_history and valid_history[-1]['role'] == 'user': valid_history.pop()
 
-        if _USE_NEW_SDK:
-            # â”€â”€ New google.genai SDK path â”€â”€
-            SUPPORTED = ['application/pdf', 'image/jpeg', 'image/png', 'image/gif', 'image/webp']
-            contents = []
-            for h in valid_history:
-                contents.append(genai_types.Content(role=h['role'], parts=[genai_types.Part(text=h['parts'][0])]))
-            user_parts = [genai_types.Part(text=enriched)]
-            for data, mime in f_parts:
-                if mime in SUPPORTED:
-                    import tempfile, os, time as _t
-                    with tempfile.NamedTemporaryFile(delete=False) as tf:
-                        tf.write(data)
-                        tmp_path = tf.name
-                    try:
-                        # Upload file natively to prevent Base64 JSON memory explosion (saves ~40MB RAM for 8MB PDFs)
-                        uploaded_file = self._client.files.upload(file=tmp_path, config={'mime_type': mime})
-                        # Wait for file to become ACTIVE (Google processes asynchronously)
-                        for _wait in range(30):
-                            if uploaded_file.state and str(uploaded_file.state).upper().endswith('ACTIVE'):
-                                break
-                            _t.sleep(1)
-                            uploaded_file = self._client.files.get(name=uploaded_file.name)
-                        user_parts.append(genai_types.Part(
-                            file_data=genai_types.FileData(file_uri=uploaded_file.uri, mime_type=mime)
-                        ))
-                    finally:
-                        try: os.unlink(tmp_path)
-                        except: pass
-            contents.append(genai_types.Content(role='user', parts=user_parts))
-            try:
-                # First attempt with tool support
-                resp = self._client.models.generate_content(
-                    model=self.model_name,
-                    contents=contents,
-                    config=genai_types.GenerateContentConfig(
-                        temperature=0.1,
-                        tools=_HVIEL_TOOLS
-                    )
-                )
-                
-                # Check for tool/function calls
-                if resp.candidates and resp.candidates[0].content.parts:
-                    for part in resp.candidates[0].content.parts:
-                        if part.function_call:
-                            tool_result = self._execute_tool(part.function_call)
+        SUPPORTED = ['application/pdf', 'image/jpeg', 'image/png', 'image/gif', 'image/webp']
+        contents = []
+        for h in valid_history:
+            parts = [genai_types.Part(text=h['parts'][0])]
+            if h.get('url') and '|' in h['url']:
+                f_uri, f_mime = h['url'].split('|', 1)
+                parts.append(genai_types.Part(file_data=genai_types.FileData(file_uri=f_uri, mime_type=f_mime)))
+            contents.append(genai_types.Content(role=h['role'], parts=parts))
 
-                            # -- HISTORY MATCHING: build rich response directly in Python --
-                            # Gemini's second-turn response is often None/blocked after tool calls.
-                            # We avoid that by constructing the reply ourselves.
-                            if part.function_call.name == "agentic_history_matching":
-                                try:
-                                    tr = _json.loads(tool_result) if isinstance(tool_result, str) else tool_result
-                                    if tr.get("success"):
-                                        sw = part.function_call.args.get("sw", [])
-                                        krw = part.function_call.args.get("krw", [])
-                                        kro = part.function_call.args.get("kro", [])
-                                        p = tr.get("optimal_parameters", {})
-                                        mse = tr.get("final_mse", 0)
+        user_parts = [genai_types.Part(text=enriched)]
+        new_file_uris = []
+        for data, mime in f_parts:
+            if mime in SUPPORTED:
+                import tempfile, os, time as _t
+                with tempfile.NamedTemporaryFile(delete=False) as tf:
+                    tf.write(data); tmp_path = tf.name
+                try:
+                    uploaded_file = self._client.files.upload(file=tmp_path, config={'mime_type': mime})
+                    for _ in range(7):
+                        if uploaded_file.state and str(uploaded_file.state).upper().endswith('ACTIVE'): break
+                        _t.sleep(0.5); uploaded_file = self._client.files.get(name=uploaded_file.name)
+                    user_parts.append(genai_types.Part(file_data=genai_types.FileData(file_uri=uploaded_file.uri, mime_type=mime)))
+                    new_file_uris.append(f"{uploaded_file.uri}|{mime}")
+                finally:
+                    try: os.unlink(tmp_path)
+                    except: pass
+        
+        contents.append(genai_types.Content(role='user', parts=user_parts))
+        self._last_file_uris = ",".join(new_file_uris) if new_file_uris else None
 
-                                        # Build smooth fitted curves
-                                        import numpy as _np
-                                        sw_arr = _np.array(sw)
-                                        swi = float(sw_arr.min())
-                                        sor = 1.0 - float(sw_arr.max())
-                                        sw_fit = _np.linspace(swi, sw_arr.max(), 50).tolist()
-                                        krw_max = p.get('krw_max', 0.5)
-                                        kro_max = p.get('kro_max', 0.8)
-                                        nw = p.get('nw', 2.0)
-                                        no = p.get('no', 2.0)
-                                        se = [max(0.001, min(0.999, (s - swi) / max(1e-6, 1 - swi - sor))) for s in sw_fit]
-                                        krw_fit = [round(krw_max * (e ** nw), 4) for e in se]
-                                        kro_fit = [round(kro_max * ((1 - e) ** no), 4) for e in se]
+        def _generate():
+            max_retries = len(self._keys)
+            for attempt in range(max_retries):
+                try:
+                    cfg = genai_types.GenerateContentConfig(temperature=0.1, tools=_HVIEL_TOOLS)
+                    if stream:
+                        response = self._client.models.generate_content_stream(model=self.model_name, contents=contents, config=cfg)
+                        for chunk in response:
+                            if chunk.candidates and chunk.candidates[0].content.parts:
+                                for part in chunk.candidates[0].content.parts:
+                                    if part.function_call:
+                                        yield f" [Executing {part.function_call.name}...] "
+                                        tool_res = self._execute_tool(part.function_call)
+                                        yield self._format_tool_response(part.function_call.name, part.function_call.args, tool_res)
+                                    elif part.text: yield part.text
+                    else:
+                        resp = self._client.models.generate_content(model=self.model_name, contents=contents, config=cfg)
+                        if not resp or not resp.candidates: return "I encountered an error."
+                        final_text = ""
+                        for part in resp.candidates[0].content.parts:
+                            if part.function_call:
+                                tool_res = self._execute_tool(part.function_call)
+                                final_text += self._format_tool_response(part.function_call.name, part.function_call.args, tool_res)
+                            elif part.text: final_text += part.text
+                        return final_text
+                    break
+                except Exception as e:
+                    err = str(e).lower()
+                    if any(x in err for x in ["401", "403", "429", "unauthorized", "exhausted"]) and attempt < max_retries - 1:
+                        self.rotate_key(is_hard_fail="429" not in err)
+                        if stream: yield " !!! Rotating Node !!! "
+                        continue
+                    raise e
 
-                                        plot_json = _json.dumps({
-                                            "curves": [
-                                                {"label": "Krw (Raw Data)", "x": [round(v,4) for v in sw[:len(krw)]], "y": [round(v,4) for v in krw], "type": "scatter"},
-                                                {"label": "Kro (Raw Data)", "x": [round(v,4) for v in sw[:len(kro)]], "y": [round(v,4) for v in kro], "type": "scatter"},
-                                                {"label": "Krw (Fitted)", "x": [round(v,4) for v in sw_fit], "y": krw_fit, "type": "line"},
-                                                {"label": "Kro (Fitted)", "x": [round(v,4) for v in sw_fit], "y": kro_fit, "type": "line"}
-                                            ],
-                                            "title": "Relative Permeability Curves: Raw Data vs. Brooks-Corey Fit",
-                                            "x_label": "Water Saturation (Sw)",
-                                            "y_label": "Relative Permeability (Kr)"
-                                        })
+        return _generate() if stream else _generate()
 
-                                        reply = (
-                                            f"The Agentic History Matching has successfully identified the optimal Brooks-Corey parameters.\n\n"
-                                            f"FITTED PARAMETERS:\n"
-                                            f"  krw_max = {krw_max:.3f}\n"
-                                            f"  kro_max = {kro_max:.3f}\n"
-                                            f"  nw (water exponent) = {nw:.3f}\n"
-                                            f"  no (oil exponent) = {no:.3f}\n\n"
-                                            f"Final MSE = {mse:.5f} — {'EXCELLENT fit' if mse < 0.02 else 'Good fit'}\n\n"
-                                            f"The chart below shows both your raw lab data (dots) and the smooth fitted Brooks-Corey curves (lines).\n\n"
-                                            f"__PRC_PLOT__\n{plot_json}\n\n"
-                                            f"===GRADE_BLOCK_START===\n1. Curve Smoothness: Verified (Mathematical Simulation)\n2. Axis Bounds: Exact Data Match\n3. Consistent Coloring: Verified\n===GRADE_BLOCK_END==="
-                                        )
-                                        return reply
-                                except Exception as _e:
-                                    return f"History matching completed but rendering failed: {tool_result}\nError: {_e}"
+    def _format_tool_response(self, name, args, result):
+        try:
+            tr = _json.loads(result) if isinstance(result, str) else result
+            if name == "agentic_history_matching" and tr.get("success"):
+                sw, krw, kro = args.get("sw", []), args.get("krw", []), args.get("kro", [])
+                p, mse = tr.get("optimal_parameters", {}), tr.get("final_mse", 0)
+                import numpy as _np
+                sw_arr = _np.array(sw); swi = float(sw_arr.min()); sor = 1.0 - float(sw_arr.max())
+                sw_fit = _np.linspace(swi, sw_arr.max(), 50).tolist()
+                krm, kom, nw, no = p.get('krw_max', 0.5), p.get('kro_max', 0.8), p.get('nw', 2.0), p.get('no', 2.0)
+                se = [max(0.001, min(0.999, (s - swi) / max(1e-6, 1 - swi - sor))) for s in sw_fit]
+                krw_fit = [round(krm * (e ** nw), 4) for e in se]
+                kro_fit = [round(kom * ((1 - e) ** no), 4) for e in se]
+                plot_json = _json.dumps({
+                    "curves": [
+                        {"label": "Krw (Raw Data)", "x": [round(v,4) for v in sw[:len(krw)]], "y": [round(v,4) for v in krw], "type": "scatter"},
+                        {"label": "Kro (Raw Data)", "x": [round(v,4) for v in sw[:len(kro)]], "y": [round(v,4) for v in kro], "type": "scatter"},
+                        {"label": "Krw (Fitted)", "x": [round(v,4) for v in sw_fit], "y": krw_fit, "type": "line"},
+                        {"label": "Kro (Fitted)", "x": [round(v,4) for v in sw_fit], "y": kro_fit, "type": "line"}
+                    ],
+                    "title": "History Matching: Raw Data vs. Brooks-Corey Fit",
+                    "x_label": "Water Saturation (Sw)", "y_label": "Relative Permeability (Kr)"
+                })
+                return f"\n\nOptimization complete. Final MSE: {mse:.5f}\n__PRC_PLOT__\n{plot_json}\n\n"
+            elif name == "execute_python_simulation":
+                if isinstance(result, str) and "__SIMULATION_START__" in result:
+                    return f"\n\nSimulation complete.\n{result}\n\n"
+                if tr and tr.get("mode") == "1d" and tr.get("status") == "success":
+                    sw, krw, kro, p = tr.get("sw", []), tr.get("krw", []), tr.get("kro", []), tr.get("params", {})
+                    plot_json = _json.dumps({
+                        "curves": [
+                            {"label": "Krw (Simulated)", "x": [round(v,4) for v in sw], "y": [round(v,4) for v in krw], "type": "line"},
+                            {"label": "Kro (Simulated)", "x": [round(v,4) for v in sw], "y": [round(v,4) for v in kro], "type": "line"}
+                        ],
+                        "title": f"Simulation Result: {p.get('model', 'Brooks-Corey').title()}",
+                        "x_label": "Water Saturation (Sw)", "y_label": "Relative Permeability (Kr)"
+                    })
+                    return f"\n\nSimulation complete.\n__PRC_PLOT__\n{plot_json}\n\n"
+            return f"\n\nTool `{name}` executed successfully.\n\n"
+        except: return f"\n\nTool `{name}` completed.\n\n"
 
-                            elif part.function_call.name == "execute_python_simulation":
-                                try:
-                                    tr = _json.loads(tool_result) if isinstance(tool_result, str) else tool_result
-                                    if tr.get("mode") == "1d" and tr.get("status") == "success":
-                                        sw = tr.get("sw", [])
-                                        krw = tr.get("krw", [])
-                                        kro = tr.get("kro", [])
-                                        p = tr.get("params", {})
-                                        
-                                        plot_json = _json.dumps({
-                                            "curves": [
-                                                {"label": "Krw (Fitted)", "x": [round(v,4) for v in sw], "y": [round(v,4) for v in krw], "type": "line"},
-                                                {"label": "Kro (Fitted)", "x": [round(v,4) for v in sw], "y": [round(v,4) for v in kro], "type": "line"}
-                                            ],
-                                            "title": f"Relative Permeability Curves: {p.get('model', 'Brooks-Corey').replace('_', ' ').title()} Simulation",
-                                            "x_label": "Water Saturation (Sw)",
-                                            "y_label": "Relative Permeability (Kr)"
-                                        })
-                                        
-                                        reply = (
-                                            f"The numerical simulation ({p.get('model', 'Brooks-Corey')}) has completed successfully.\n\n"
-                                            f"INPUT PARAMETERS:\n"
-                                            f"  Swr = {p.get('swr', 0.2):.3f}, Snr = {p.get('snr', 0.2):.3f}\n"
-                                            f"  krw_max = {p.get('krw_max', 0.5):.3f}, kro_max = {p.get('kro_max', 0.8):.3f}\n"
-                                        )
-                                        if "nw" in p:
-                                            reply += f"  Exponents: nw = {p.get('nw', 2.0):.3f}, no = {p.get('no', 2.0):.3f}\n\n"
-                                        elif "Lw" in p:
-                                            reply += f"  LET Params (Water): Lw={p.get('Lw', 2.0)}, Ew={p.get('Ew', 1.0)}, Tw={p.get('Tw', 2.0)}\n"
-                                            reply += f"  LET Params (Oil): Lo={p.get('Lo', 2.0)}, Eo={p.get('Eo', 1.0)}, To={p.get('To', 2.0)}\n\n"
-                                            
-                                        reply += (
-                                            f"__PRC_PLOT__\n{plot_json}\n\n"
-                                            f"===GRADE_BLOCK_START===\n1. Curve Smoothness: Verified (Mathematical Simulation)\n2. Axis Bounds: Exact Data Match\n3. Consistent Coloring: Verified\n===GRADE_BLOCK_END==="
-                                        )
-                                        return reply
-                                except Exception as _e:
-                                    pass
-
-                            # ——— All other tools: send result back to Gemini for final prose ———
-                            contents.append(resp.candidates[0].content)
-                            contents.append(genai_types.Content(
-                                role='user',
-                                parts=[genai_types.Part(
-                                    function_response=genai_types.FunctionResponse(
-                                        name=part.function_call.name,
-                                        response={"result": tool_result}
-                                    )
-                                )]
-                            ))
-                            # Get final response after tool execution
-                            final_resp = self._client.models.generate_content(
-                                model=self.model_name,
-                                contents=contents,
-                                config=genai_types.GenerateContentConfig(temperature=0.1)
-                            )
-                            final_text = None
-                            try: final_text = final_resp.text
-                            except Exception: pass
-                            if not final_text:
-                                tool_str = str(tool_result)
-                                if len(tool_str) > 800:
-                                    tool_str = tool_str[:800] + "\n... [Data Truncated for UI Display]"
-                                final_text = f"The tool `{part.function_call.name}` completed successfully.\n\nResult:\n```json\n{tool_str}\n```\n\n*(Note: Data analysis complete. Please request a plot or summary if needed.)*"
-                            return final_text
-
-                return resp.text or "I received your document but could not generate a detailed response. Please try rephrasing your question."
-            except Exception as e:
-                # Fallback chain on 404 or quota errors
-                for fb in ['gemini-2.5-flash', 'gemini-1.5-flash']:
-                    if fb == self.model_name: continue
-                    try:
-                        resp = self._client.models.generate_content(model=fb, contents=contents,
-                            config=genai_types.GenerateContentConfig(temperature=0.1))
-                        self.model_name = fb  # persist working model
-                        return resp.text
-                    except: continue
-                raise e
-        else:
-            raise RuntimeError("Legacy google-generativeai SDK is no longer supported. Set _USE_NEW_SDK=True.")
 
 
 class AnthropicAssistant:
@@ -830,8 +707,11 @@ class KnowledgeBase:
 
     @staticmethod
     def search(query, top_k=15):
-        """Vector cosine-similarity search with keyword fallback. Works for PostgreSQL + SQLite."""
+        """Vector cosine-similarity search with high-speed SQL keyword fallback."""
         try:
+            # Safety: don't process massive queries (e.g. huge file dumps) in RAG
+            clean_q = query[:2000] if query else ""
+            
             if _PG_AVAILABLE:
                 import psycopg2
                 conn = psycopg2.connect(DATABASE_URL)
@@ -847,46 +727,48 @@ class KnowledgeBase:
                 _fetch = lambda: cur.fetchall()
                 _close = lambda: conn.close()
 
-            # -- Try semantic search --
+            # -- 1. Semantic Search (Optimized for small-to-medium datasets) --
             _exec("SELECT COUNT(*) FROM kb_vectors")
             vec_count = _fetch()[0][0]
-            if vec_count > 0:
-                q_vec = KnowledgeBase._embed_query(query)
+            if 0 < vec_count < 2000: # Only do in-memory search if dataset is manageable
+                q_vec = KnowledgeBase._embed_query(clean_q)
                 if q_vec is not None:
-                    _exec("""SELECT kb.source, kb.chunk, kb_vectors.embedding
-                               FROM kb_vectors
-                               JOIN kb ON kb.id = kb_vectors.chunk_id""")
+                    _exec("SELECT kb.source, kb.chunk, kb_vectors.embedding FROM kb_vectors JOIN kb ON kb.id = kb_vectors.chunk_id")
                     rows = _fetch()
-                    _close()
                     if rows:
                         sources = [r[0] for r in rows]
                         texts   = [r[1] for r in rows]
                         raw_vecs = [r[2] for r in rows]
-                        # psycopg2 returns memoryview for BYTEA; sqlite3 returns bytes
                         vecs = np.stack([np.frombuffer(bytes(v) if isinstance(v, memoryview) else v, dtype=np.float32) for v in raw_vecs])
                         q_norm  = q_vec / (np.linalg.norm(q_vec) + 1e-9)
                         v_norms = vecs / (np.linalg.norm(vecs, axis=1, keepdims=True) + 1e-9)
                         scores  = v_norms @ q_norm
                         top_idx = np.argsort(scores)[::-1][:top_k]
-                        parts   = [f"[From: {sources[i]}]\n{texts[i]}" for i in top_idx if scores[i] > 0.3]
-                        return "\n\n".join(parts)
+                        parts   = [f"[From: {sources[i]}]\n{texts[i]}" for i in top_idx if scores[i] > 0.35]
+                        if parts:
+                            _close()
+                            return "\n\n".join(parts)
 
-            # -- Keyword fallback --
-            keywords = [w.lower() for w in re.split(r'\W+', query) if len(w) > 3]
-            if not keywords:
+            # -- 2. High-Speed Keyword Fallback (SQL-native) --
+            words = [w.lower() for w in re.split(r'\W+', clean_q) if len(w) > 3]
+            if not words:
                 _close()
                 return ""
-            _exec("SELECT source, chunk FROM kb")
+            
+            # Select top 5 keywords to keep SQL query efficient
+            top_words = words[:5]
+            conditions = " OR ".join(["LOWER(chunk) LIKE ?"] * len(top_words))
+            params = [f"%{w}%" for w in top_words]
+            
+            _exec(f"SELECT source, chunk FROM kb WHERE {conditions} LIMIT 20", params)
             results = _fetch()
             _close()
-            scored = []
-            for source, chunk in results:
-                cl = chunk.lower()
-                score = sum(1 for kw in keywords if kw in cl)
-                if score > 0: scored.append((score, source, chunk))
-            scored.sort(key=lambda x: -x[0])
-            top = scored[:top_k]
-            if not top: return ""
+            
+            parts = [f"[From: {s}]\n{ch}" for s, ch in results]
+            return "\n\n".join(parts)
+        except Exception as e:
+            _logger.error(f"[RAG] Search error: {e}")
+            return ""
             
             parts = []
             for _, s, ch in top:
@@ -930,14 +812,16 @@ class Visualizer:
             ylabel = data.get('y_label', 'Y')
             ptype  = data.get('type',    'line')
 
+            has_data = False
             curves = data.get('curves')  # new multi-curve schema
             if curves and isinstance(curves, list):
                 # -- Multi-curve mode --
                 for i, curve in enumerate(curves):
                     cx = curve.get('x', [])
                     cy = curve.get('y', [])
+                    if not cx or not cy: continue
+                    has_data = True
                     
-                    # LLM Hallucination safety guard: ensure dimensions match exactly
                     min_len = min(len(cx), len(cy))
                     cx = cx[:min_len]
                     cy = cy[:min_len]
@@ -946,22 +830,30 @@ class Visualizer:
                     color = _PRC_COLORS[i % len(_PRC_COLORS)]
                     ax.plot(cx, cy, marker='o', linestyle='-', color=color,
                             linewidth=2.5, markersize=7, label=lbl)
-                ax.legend(fontsize=10, framealpha=0.85)
+                if has_data:
+                    ax.legend(fontsize=10, framealpha=0.85)
             else:
                 # -- Legacy single-curve mode --
                 x = data.get('x', [])
                 y = data.get('y', [])
-                
-                # LLM Hallucination safety guard: ensure dimensions match exactly
-                min_len = min(len(x), len(y))
-                x = x[:min_len]
-                y = y[:min_len]
-                
-                if ptype == 'scatter':
-                    ax.scatter(x, y, color='#1e3a8a', s=60, alpha=0.9, edgecolor='white')
-                else:
-                    ax.plot(x, y, marker='o', linestyle='-', color='#1e3a8a',
-                            linewidth=2.5, markersize=8)
+                if x and y:
+                    has_data = True
+                    min_len = min(len(x), len(y))
+                    x = x[:min_len]
+                    y = y[:min_len]
+                    
+                    if ptype == 'scatter':
+                        ax.scatter(x, y, color='#1e3a8a', s=60, alpha=0.9, edgecolor='white')
+                    else:
+                        ax.plot(x, y, marker='o', linestyle='-', color='#1e3a8a',
+                                linewidth=2.5, markersize=8)
+
+            if not has_data:
+                ax.text(0.5, 0.5, "DATA UNAVAILABLE\n\nPlease ensure your dataset is correctly parsed\nor provide specific parameter values.",
+                        horizontalalignment='center', verticalalignment='center',
+                        fontsize=12, fontweight='bold', color='#ef4444', transform=ax.transAxes)
+                ax.set_xticks([])
+                ax.set_yticks([])
 
             ax.set_title(title,  fontsize=15, fontweight='bold', color='#1e3a8a', pad=15)
             ax.set_xlabel(xlabel, fontsize=12, fontweight='bold')
@@ -975,6 +867,7 @@ class Visualizer:
             b64 = base64.b64encode(buf.getvalue()).decode('utf-8')
             return f"\n\n![{title}](data:image/png;base64,{b64})\n\n"
         except Exception as e:
+            _logger.error(f"[Visualizer] Build plot error: {e}")
             return f"\n*(Failed to generate plot: {str(e)[:100]})*\n"
 
 # -- PETREL EXPORTER --
@@ -1011,6 +904,8 @@ def init_db():
             db('CREATE TABLE IF NOT EXISTS m (id SERIAL PRIMARY KEY, sid TEXT, role TEXT, text TEXT, url TEXT, ts REAL)')
             try: db('ALTER TABLE m ADD COLUMN user_email TEXT')
             except: pass
+            try: db('ALTER TABLE m ADD COLUMN fname TEXT')
+            except: pass
             db('CREATE TABLE IF NOT EXISTS kb (id SERIAL PRIMARY KEY, source TEXT, chunk TEXT)')
             db('CREATE TABLE IF NOT EXISTS kb_vectors (id SERIAL PRIMARY KEY, chunk_id INTEGER UNIQUE, embedding BYTEA)')
             db('CREATE TABLE IF NOT EXISTS users (id SERIAL PRIMARY KEY, email TEXT UNIQUE, name TEXT, created_at REAL)')
@@ -1019,6 +914,8 @@ def init_db():
         else:
             db('CREATE TABLE IF NOT EXISTS m (id INTEGER PRIMARY KEY AUTOINCREMENT, sid TEXT, role TEXT, text TEXT, url TEXT, ts REAL)')
             try: db('ALTER TABLE m ADD COLUMN user_email TEXT')
+            except: pass
+            try: db('ALTER TABLE m ADD COLUMN fname TEXT')
             except: pass
             db('CREATE TABLE IF NOT EXISTS kb (id INTEGER PRIMARY KEY AUTOINCREMENT, source TEXT, chunk TEXT)')
             db('CREATE TABLE IF NOT EXISTS kb_vectors (id INTEGER PRIMARY KEY AUTOINCREMENT, chunk_id INTEGER UNIQUE, embedding BLOB)')
@@ -1121,10 +1018,6 @@ try:
 except Exception as e:
     _logger.error(f"[SYSTEM] Failed to register extra routes: {e}")
 
-@app.get('/health')
-def health():
-    return {'status': 'ok', 'db': 'postgres' if _PG_AVAILABLE else 'sqlite', 'sdk': 'google.genai' if _USE_NEW_SDK else 'google-generativeai'}
-
 # -- ROUTES: SESSIONS --
 @app.get("/api/sessions")
 def get_sessions(email: str = None):
@@ -1174,12 +1067,12 @@ def del_session(sid: str, email: str = None):
 @app.get("/api/session/{sid}")
 def get_session(sid: str):
     try:
-        rows = db("SELECT role, text, url, ts FROM m WHERE sid = ? ORDER BY id", (sid,))
+        rows = db("SELECT role, text, url, ts, fname FROM m WHERE sid = ? ORDER BY id", (sid,))
         import re
         messages = []
-        for r, t, u, ts in rows:
+        for r, t, u, ts, fn in rows:
             clean_text = re.sub(r'__INTERNAL_DATA_START__[\s\S]*?__INTERNAL_DATA_END__', '', t if t else '').strip()
-            messages.append({"role": r, "text": clean_text, "download_url": u, "ts": ts})
+            messages.append({"role": r, "text": clean_text, "download_url": u, "ts": ts, "fileName": fn})
         return {"status": "ok", "messages": messages}
     except Exception as e: return {"status": "error"}
 
@@ -1265,396 +1158,48 @@ async def stream_chat(
     async def event_generator():
         try:
             sid = session_id if (session_id and session_id != "undefined") else str(uuid.uuid4())
+            yield f"data: {_json.dumps({'type': 'session', 'session_id': sid})}\n\n"
             
-            # Send session_id first so the frontend can latch onto it IMMEDIATELY
-            yield f"data: {{\"type\": \"session\", \"session_id\": \"{sid}\"}}\n\n"
-            
-            # Limit history to the last 12 messages to massively speed up Gemini generation times
             history_rows = db("SELECT role, text, url FROM m WHERE sid = ? ORDER BY id DESC LIMIT 12", (sid,))
-            history = [{"role": r, "text": t} for r, t, u in reversed(history_rows)]
+            history = [{"role": r, "text": t, "url": u} for r, t, u in reversed(history_rows)]
 
-            # --- SMART ROUTER: Heavy vs Easy ---
-            def _is_heavy_query(msg):
-                msg_lower = msg.lower()
-                words = msg_lower.replace('?', '').replace('.', '').replace(',', '').split()
-                if len(words) > 12: return True
-                
-                heavy_keywords = {
-                    'what', 'how', 'why', 'explain', 'analysis', 'core', 'permeability', 
-                    'porosity', 'saturation', 'archie', 'capillary', 'pc', 'sw', 'krw', 
-                    'kro', 'wettability', 'fracture', 'relative', 'formation', 'resistivity',
-                    'calculate', 'equation', 'theory', 'model', 'brooks', 'corey', 'report', 
-                    'plot', 'excel', 'word', 'document', 'file', 'csv', 'generate', 'pdf', 'powerpoint',
-                    'curves', 'draw', 'graph', 'chart', 'visualize', 'thomeer', 'pore-throat',
-                    'ok', 'yes', 'sure', 'proceed', 'go', 'confirm'
-                }
-                
-                if any(kw in words for kw in heavy_keywords): return True
-                return False
-
-            kb_context = ""
-            if _is_heavy_query(message):
-                kb_context = KnowledgeBase.search(message)
-
-            # Build enriched prompt
-            enriched = SYSTEM_PROMPT
-            if kb_context:
-                enriched += f"\n\n--- KNOWLEDGE BASE CONTEXT ---\n{kb_context}\n--- END CONTEXT ---"
-            enriched += f"\n\nUSER QUERY: {message}"
-
-            # Enforce alternating history
-            valid_history = []
-            for x in history:
-                role = 'user' if x['role'] == 'user' else 'model'
-                if not valid_history:
-                    if role == 'user': valid_history.append({"role": role, "parts": [x['text']]})
-                else:
-                    if valid_history[-1]['role'] != role:
-                        valid_history.append({"role": role, "parts": [x['text']]})
-                    elif role == 'user':
-                        valid_history[-1] = {"role": role, "parts": [x['text']]}
-                    elif role == 'model':
-                        valid_history[-1]['parts'][0] += "\n\n" + x['text']
-            if valid_history and valid_history[-1]['role'] == 'user':
-                valid_history.pop()
-
+            kb_context = KnowledgeBase.search(message) if len(message) > 15 else ""
+            
             const_email = user_email.lower().strip() if (user_email and user_email.strip()) else None
+            db("INSERT INTO m (sid, role, text, ts, user_email) VALUES (?, ?, ?, ?, ?)", (sid, "user", message, time.time(), const_email))
 
-            if const_email:
-                db("INSERT INTO m (sid, role, text, ts, user_email) VALUES (?, ?, ?, ?, ?)",
-                   (sid, "user", message, time.time(), const_email))
-            else:
-                db("INSERT INTO m (sid, role, text, ts) VALUES (?, ?, ?, ?)",
-                   (sid, "user", message, time.time()))
-
-            # Stream tokens - support both SDKs
+            # Unified Streaming Path
             full_resp = ""
-            import asyncio
-            loop = asyncio.get_event_loop()
-            if _USE_NEW_SDK:
-                contents_stream = []
-                for h in valid_history:
-                    contents_stream.append(genai_types.Content(role=h['role'], parts=[genai_types.Part(text=h['parts'][0])]))
-                contents_stream.append(genai_types.Content(role='user', parts=[genai_types.Part(text=enriched)]))
-
-                # -- PRC HA ROTATOR LOOP --
-                max_retries = len(GEMINI_KEY_POOL)
-                for attempt in range(max_retries):
-                    try:
-                        for fb in [assistant.model_name, 'gemini-2.5-flash', 'gemini-1.5-flash']:
-                            try:
-                                stream_resp = await loop.run_in_executor(
-                                    None,
-                                    lambda m=fb: assistant._client.models.generate_content_stream(
-                                        model=m,
-                                        contents=contents_stream,
-                                        config=genai_types.GenerateContentConfig(
-                                            temperature=0.1,
-                                            tools=_HVIEL_TOOLS
-                                        )
-                                    )
-                                )
-                                assistant.model_name = fb  # persist working model
-                                break
-                            except Exception as try_e:
-                                if fb == 'gemini-1.5-flash':
-                                    raise try_e
-                        
-                        response = stream_resp
-                        break # Success! Exit the retry loop
-                    except Exception as e:
-                        # Catch API failures
-                        err_str = str(e).lower()
-                        is_auth_error = any(x in err_str for x in ["401", "403", "unauthorized", "permission"])
-                        is_rate_limit = any(x in err_str for x in ["429", "resource_exhausted"])
-                        
-                        if (is_auth_error or is_rate_limit) and attempt < max_retries - 1:
-                            status_msg = "Node Auth Failed (Skipping)" if is_auth_error else "Rate Limit Reached (Hopping Node)"
-                            yield f"data: {_json.dumps({'type': 'token', 'text': f' !!! {status_msg} (Node {assistant._current_idx + 1}/{len(GEMINI_KEY_POOL)}) !!! '})}\n\n"
-                            assistant.rotate_key(is_hard_fail=is_auth_error)
-                            continue 
-                        else:
-                            raise e
-            async def iterate_response(resp):
-                for c in resp:
-                    yield c
-
-            async for chunk in iterate_response(response):
+            generator = assistant.chat(history, message, kb_context, stream=True)
+            
+            # Bridge the generator to async yield
+            import queue, threading
+            q = queue.Queue()
+            def _pull():
                 try:
-                    # In new SDK, we check for function calls in the chunk
-                    if _USE_NEW_SDK:
-                        if chunk.candidates and chunk.candidates[0].content.parts:
-                            for part in chunk.candidates[0].content.parts:
-                                if part.function_call:
-                                    # Handle tool call in stream
-                                    yield f"data: {_json.dumps({'type': 'token', 'text': f' [Executing {part.function_call.name}...] '})}\n\n"
-                                    tool_result = assistant._execute_tool(part.function_call)
-                                    
-                                    def _extract_json(txt):
-                                        """Find the first valid JSON object in txt using raw_decode.
-                                        Unlike a greedy regex, raw_decode stops at the first complete
-                                        object boundary so trailing text never corrupts the parse.
-                                        """
-                                        if not isinstance(txt, str):
-                                            return txt
-                                        idx = txt.find('{')
-                                        if idx == -1:
-                                            return None
-                                        try:
-                                            obj, _ = _json.JSONDecoder().raw_decode(txt[idx:])
-                                            return obj if isinstance(obj, dict) else None
-                                        except (_json.JSONDecodeError, ValueError):
-                                            return None
+                    for token in generator: q.put(token)
+                    q.put(None)
+                except Exception as e: q.put(e)
+            threading.Thread(target=_pull, daemon=True).start()
 
-                                    tr = _extract_json(tool_result)
-                                    # Safe prose default - never leak raw JSON to the frontend
-                                    res_text = (
-                                        f"\n\nThe `{part.function_call.name}` tool completed its analysis. "
-                                        f"No renderable output was produced — request a plot or summary to continue.\n\n"
-                                    )
-
-                                    # -- INTERCEPT FOR UI RENDERING --
-                                    if part.function_call.name == "agentic_history_matching":
-                                        try:
-                                            if tr and tr.get("success"):
-                                                sw = part.function_call.args.get("sw", [])
-                                                krw = part.function_call.args.get("krw", [])
-                                                kro = part.function_call.args.get("kro", [])
-                                                p = tr.get("optimal_parameters", {})
-                                                mse = tr.get("final_mse", 0)
-
-                                                import numpy as _np
-                                                sw_arr = _np.array(sw)
-                                                swi = float(sw_arr.min())
-                                                sor = 1.0 - float(sw_arr.max())
-                                                sw_fit = _np.linspace(swi, sw_arr.max(), 50).tolist()
-                                                krw_max = p.get('krw_max', 0.5)
-                                                kro_max = p.get('kro_max', 0.8)
-                                                nw = p.get('nw', 2.0)
-                                                no = p.get('no', 2.0)
-                                                se = [max(0.001, min(0.999, (s - swi) / max(1e-6, 1 - swi - sor))) for s in sw_fit]
-                                                krw_fit = [round(krw_max * (e ** nw), 4) for e in se]
-                                                kro_fit = [round(kro_max * ((1 - e) ** no), 4) for e in se]
-
-                                                plot_json = _json.dumps({
-                                                    "curves": [
-                                                        {"label": "Krw (Raw Data)", "x": [round(v,4) for v in sw[:len(krw)]], "y": [round(v,4) for v in krw], "type": "scatter"},
-                                                        {"label": "Kro (Raw Data)", "x": [round(v,4) for v in sw[:len(kro)]], "y": [round(v,4) for v in kro], "type": "scatter"},
-                                                        {"label": "Krw (Fitted)", "x": [round(v,4) for v in sw_fit], "y": krw_fit, "type": "line"},
-                                                        {"label": "Kro (Fitted)", "x": [round(v,4) for v in sw_fit], "y": kro_fit, "type": "line"}
-                                                    ],
-                                                    "title": "Relative Permeability Curves: Raw Data vs. Brooks-Corey Fit",
-                                                    "x_label": "Water Saturation (Sw)",
-                                                    "y_label": "Relative Permeability (Kr)"
-                                                })
-
-                                                res_text = (
-                                                    f"\n\nThe Agentic History Matching has successfully identified the optimal Brooks-Corey parameters "
-                                                    f"via Simulated Annealing. The algorithm converged on a minimum-MSE solution across the full "
-                                                    f"saturation range from Swi = {swi:.3f} to Sw = {float(sw_arr.max()):.3f}.\n\n"
-                                                    f"**Fitted Parameters:**\n"
-                                                    f"- krw_max = {krw_max:.3f}\n"
-                                                    f"- kro_max = {kro_max:.3f}\n"
-                                                    f"- nw (water Corey exponent) = {nw:.3f}\n"
-                                                    f"- no (oil Corey exponent) = {no:.3f}\n\n"
-                                                    f"**Goodness of Fit:** Final MSE = {mse:.5f} - "
-                                                    f"{'EXCELLENT fit (MSE < 0.02)' if mse < 0.02 else 'Acceptable fit'}\n\n"
-                                                    f"The chart below overlays raw laboratory measurements (scatter points) against the "
-                                                    f"smooth Brooks-Corey analytical curves (solid lines), confirming physical consistency "
-                                                    f"across the mobile saturation range.\n\n"
-                                                    f"__PRC_PLOT__\n{plot_json}\n\n"
-                                                    f"===GRADE_BLOCK_START===\n"
-                                                    f"CURVE_TYPE: Relative Permeability (Kr)\n"
-                                                    f"ROCK_TYPES_PLOTTED: Water-Wet (History-Matched)\n"
-                                                    f"LINE_STYLE: SMOOTH_CONTINUOUS\n"
-                                                    f"DUPLICATE_FIGURES: NO\n"
-                                                    f"X_START: {swi:.3f} X_END: {float(sw_arr.max()):.3f} X_SCALE: LINEAR\n"
-                                                    f"Y_START: 0.000 Y_END: 1.000 Y_SCALE: LINEAR\n"
-                                                    f"X_LABEL: Water Saturation (Sw) Y_LABEL: Relative Permeability (Kr)\n"
-                                                    f"LEGEND: YES\n"
-                                                    f"TITLE: YES\n"
-                                                    f"UNITS_ON_AXES: YES\n"
-                                                    f"COLOR_CONSISTENT: YES\n"
-                                                    f"SELF_SCORE_TOTAL: 95\n"
-                                                    f"SELF_SCORE_NOTES: History-matched via Simulated Annealing. Saturation bounds exact. MSE = {mse:.5f}.\n"
-                                                    f"===GRADE_BLOCK_END===\n"
-                                                )
-                                        except Exception: pass
-                                    elif part.function_call.name == "execute_python_simulation":
-                                        try:
-                                            # 2D flood simulation: forward the structured block as-is
-                                            if isinstance(tool_result, str) and "__SIMULATION_START__" in tool_result:
-                                                res_text = (
-                                                    f"\n\nThe 2D flood simulation has completed. The spatial saturation field "
-                                                    f"is rendered below.\n\n{tool_result}\n\n"
-                                                )
-                                            elif tr and tr.get("status") == "error":
-                                                err_msg = tr.get("message", "unknown error")
-                                                res_text = (
-                                                    f"\n\n**Simulation Engine Error**\n\n"
-                                                    f"The petrophysical simulation could not complete. "
-                                                    f"The engine reported:\n\n"
-                                                    f"> `{err_msg}`\n\n"
-                                                    f"This is typically caused by missing or incorrectly structured "
-                                                    f"parameters (Swr, Snr, krw_max, kro_max, nw, no). "
-                                                    f"Please specify explicit parameter values and retry — for example: "
-                                                    f"*\"Run a Brooks-Corey simulation with Swr=0.20, Snr=0.25, "
-                                                    f"krw_max=0.6, kro_max=0.85, nw=2.5, no=3.0\"*\n\n"
-                                                )
-                                            elif tr and tr.get("mode") == "1d" and tr.get("status") == "success":
-                                                sw = tr.get("sw", [])
-                                                krw = tr.get("krw", [])
-                                                kro = tr.get("kro", [])
-                                                p = tr.get("params", {})
-                                                swi_val = float(min(sw)) if sw else 0.0
-                                                swe_val = float(max(sw)) if sw else 1.0
-
-                                                plot_json = _json.dumps({
-                                                    "curves": [
-                                                        {"label": "Krw (Simulated)", "x": [round(v,4) for v in sw], "y": [round(v,4) for v in krw], "type": "line"},
-                                                        {"label": "Kro (Simulated)", "x": [round(v,4) for v in sw], "y": [round(v,4) for v in kro], "type": "line"}
-                                                    ],
-                                                    "title": f"Relative Permeability Curves: {p.get('model', 'Brooks-Corey').replace('_', ' ').title()} Simulation",
-                                                    "x_label": "Water Saturation (Sw)",
-                                                    "y_label": "Relative Permeability (Kr)"
-                                                })
-
-                                                sim_prose = (
-                                                    f"\n\nThe {p.get('model', 'Brooks-Corey').replace('_', ' ').title()} numerical simulation "
-                                                    f"has completed successfully, generating {len(sw)} saturation points across the "
-                                                    f"mobile saturation range Sw = [{swi_val:.3f}, {swe_val:.3f}].\n\n"
-                                                    f"**Input Parameters:**\n"
-                                                    f"- Swr = {p.get('swr', 0.2):.3f}, Snr = {p.get('snr', 0.2):.3f}\n"
-                                                    f"- krw_max = {p.get('krw_max', 0.5):.3f}, kro_max = {p.get('kro_max', 0.8):.3f}\n"
-                                                )
-                                                if "nw" in p:
-                                                    sim_prose += f"- Corey Exponents: nw = {p.get('nw', 2.0):.3f}, no = {p.get('no', 2.0):.3f}\n\n"
-                                                elif "Lw" in p:
-                                                    sim_prose += (
-                                                        f"- LET Params (Water): L={p.get('Lw', 2.0)}, E={p.get('Ew', 1.0)}, T={p.get('Tw', 2.0)}\n"
-                                                        f"- LET Params (Oil): L={p.get('Lo', 2.0)}, E={p.get('Eo', 1.0)}, T={p.get('To', 2.0)}\n\n"
-                                                    )
-                                                else:
-                                                    sim_prose += "\n"
-                                                sim_prose += (
-                                                    f"The curves below are analytically computed, ensuring smooth and "
-                                                    f"physically consistent profiles free of experimental noise.\n\n"
-                                                    f"__PRC_PLOT__\n{plot_json}\n\n"
-                                                    f"===GRADE_BLOCK_START===\n"
-                                                    f"CURVE_TYPE: Relative Permeability (Kr)\n"
-                                                    f"ROCK_TYPES_PLOTTED: Simulated (Single Sample)\n"
-                                                    f"LINE_STYLE: SMOOTH_CONTINUOUS\n"
-                                                    f"DUPLICATE_FIGURES: NO\n"
-                                                    f"X_START: {swi_val:.3f} X_END: {swe_val:.3f} X_SCALE: LINEAR\n"
-                                                    f"Y_START: 0.000 Y_END: 1.000 Y_SCALE: LINEAR\n"
-                                                    f"X_LABEL: Water Saturation (Sw) Y_LABEL: Relative Permeability (Kr)\n"
-                                                    f"LEGEND: YES\n"
-                                                    f"TITLE: YES\n"
-                                                    f"UNITS_ON_AXES: YES\n"
-                                                    f"COLOR_CONSISTENT: YES\n"
-                                                    f"SELF_SCORE_TOTAL: 98\n"
-                                                    f"SELF_SCORE_NOTES: Fully analytical simulation — no raw data uncertainty. Saturation endpoints exact.\n"
-                                                    f"===GRADE_BLOCK_END===\n"
-                                                )
-                                                res_text = sim_prose
-                                        except Exception: pass
-                                    elif part.function_call.name == "generate_mermaid_diagram":
-                                        # Mermaid block is structured markup, not raw JSON — pass through safely
-                                        res_text = f"\n\n{tool_result}\n\n"
-                                    elif part.function_call.name == "fit_petrophysical_curve":
-                                        try:
-                                            if tr:
-                                                model_type = tr.get("model", "corey").title()
-                                                orig_sw = part.function_call.args.get("sw", [])
-                                                orig_krw = part.function_call.args.get("krw", [])
-                                                sw_fit = tr.get("sw_fit") or tr.get("sw", [])
-                                                krw_fit_vals = tr.get("krw_fit") or tr.get("krw_fitted", [])
-                                                params = tr.get("params") or tr.get("optimal_parameters", {}) or {}
-                                                if sw_fit and krw_fit_vals:
-                                                    plot_json = _json.dumps({
-                                                        "curves": [
-                                                            {"label": "Krw (Raw Data)", "x": [round(v,4) for v in orig_sw], "y": [round(v,4) for v in orig_krw], "type": "scatter"},
-                                                            {"label": f"Krw ({model_type} Fit)", "x": [round(v,4) for v in sw_fit], "y": [round(v,4) for v in krw_fit_vals], "type": "line"}
-                                                        ],
-                                                        "title": f"Curve Fitting Result: {model_type} Model",
-                                                        "x_label": "Water Saturation (Sw)",
-                                                        "y_label": "Relative Permeability to Water (Krw)"
-                                                    })
-                                                    param_lines = "\n".join([
-                                                        f"- {k} = {round(v, 4) if isinstance(v, float) else v}"
-                                                        for k, v in params.items()
-                                                    ]) if params else "- Parameters not reported"
-                                                    x_min = min(orig_sw) if orig_sw else 0.0
-                                                    x_max = max(orig_sw) if orig_sw else 1.0
-                                                    res_text = (
-                                                        f"\n\nThe {model_type} curve fitting procedure has converged on the "
-                                                        f"following optimal parameters, minimizing the residual between the "
-                                                        f"analytical model and the raw laboratory measurements.\n\n"
-                                                        f"**Fitted Parameters:**\n{param_lines}\n\n"
-                                                        f"The chart below overlays the raw laboratory measurements against the "
-                                                        f"fitted analytical curve, confirming physical consistency.\n\n"
-                                                        f"__PRC_PLOT__\n{plot_json}\n\n"
-                                                        f"===GRADE_BLOCK_START===\n"
-                                                        f"CURVE_TYPE: Relative Permeability to Water (Krw) — {model_type} Curve Fit\n"
-                                                        f"ROCK_TYPES_PLOTTED: Single Sample\n"
-                                                        f"LINE_STYLE: SMOOTH_CONTINUOUS\n"
-                                                        f"DUPLICATE_FIGURES: NO\n"
-                                                        f"X_START: {x_min:.3f} X_END: {x_max:.3f} X_SCALE: LINEAR\n"
-                                                        f"Y_START: 0.000 Y_END: 1.000 Y_SCALE: LINEAR\n"
-                                                        f"X_LABEL: Water Saturation (Sw) Y_LABEL: Relative Permeability to Water (Krw)\n"
-                                                        f"LEGEND: YES\n"
-                                                        f"TITLE: YES\n"
-                                                        f"UNITS_ON_AXES: YES\n"
-                                                        f"COLOR_CONSISTENT: YES\n"
-                                                        f"SELF_SCORE_TOTAL: 90\n"
-                                                        f"SELF_SCORE_NOTES: {model_type} fit - verify convergence quality against raw data scatter.\n"
-                                                        f"===GRADE_BLOCK_END===\n"
-                                                    )
-                                                elif params:
-                                                    param_lines = "\n".join([
-                                                        f"- {k} = {round(v, 4) if isinstance(v, float) else v}"
-                                                        for k, v in params.items()
-                                                    ])
-                                                    res_text = (
-                                                        f"\n\nThe {model_type} curve fitting has completed with the following "
-                                                        f"optimal parameters:\n\n"
-                                                        f"**Fitted Parameters:**\n{param_lines}\n\n"
-                                                        f"Provide the fitted curve coordinate arrays to generate a visualization.\n\n"
-                                                    )
-                                        except Exception: pass
-                                    
-                                    yield f"data: {_json.dumps({'type': 'token', 'text': res_text})}\n\n"
-                                    full_resp += res_text
-                                    continue
-                    token = chunk.text
-                except (ValueError, AttributeError):
-                    continue  # skip finish/safety chunks with no content
-                if token:
+            while True:
+                try:
+                    token = q.get_nowait()
+                    if token is None: break
+                    if isinstance(token, Exception): raise token
                     full_resp += token
-                    
-                    # HARD INTERCEPT: Prevent document-generation tokens from leaking in the
-                    # fast SSE stream (those require the Claude Document Engine). We check only
-                    # the current streaming token — NOT full_resp — because full_resp may
-                    # legitimately contain __PRC_PLOT__ injected by tool interceptors above.
-                    _DOC_TOKENS = ("__PRC_DOCX__", "__PRC_EXCEL__", "__PRC_PDF__", "__PRC_PPTX__", "__PETREL_EXPORT__")
-                    if any(tok in token for tok in _DOC_TOKENS):
-                        err_msg = 'Document generation requested. Please use the export panel or type "generate document" to activate the Document Engine.'
-                        yield f"data: {_json.dumps({'type': 'error', 'msg': err_msg})}\n\n"
-                        break
-                        
                     yield f"data: {_json.dumps({'type': 'token', 'text': token})}\n\n"
+                except queue.Empty:
+                    await asyncio.sleep(0.01)
+                    continue
 
-            if const_email:
-                db("INSERT INTO m (sid, role, text, ts, user_email) VALUES (?, ?, ?, ?, ?)",
-                   (sid, "model", full_resp, time.time(), const_email))
-            else:
-                db("INSERT INTO m (sid, role, text, ts) VALUES (?, ?, ?, ?)",
-                   (sid, "model", full_resp, time.time()))
-            yield f"data: {_json.dumps({'type': 'done'})}\n\n"
+            db("INSERT INTO m (sid, role, text, ts, user_email) VALUES (?, ?, ?, ?, ?)", (sid, "model", full_resp, time.time(), const_email))
+            yield "data: [DONE]\n\n"
 
         except Exception as e:
             err = str(e)[:120]
             yield f"data: {_json.dumps({'type': 'error', 'msg': err})}\n\n"
+            yield "data: [DONE]\n\n"
 
     return StreamingResponse(event_generator(), media_type="text/event-stream",
                              headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
@@ -1670,8 +1215,7 @@ async def handle(
 ):
     try:
         sid = session_id if (session_id and session_id != "undefined") else str(uuid.uuid4())
-        history = [{"role": r, "text": t} for r, t, u in db("SELECT role, text, url FROM m WHERE sid = ? ORDER BY id", (sid,))]
-
+        
         f_parts = []
         for file in files:
             f_bytes = await file.read()
@@ -1724,19 +1268,19 @@ async def handle(
             kb_context = KnowledgeBase.search(message)
 
         const_email = user_email.lower().strip() if (user_email and user_email.strip()) else None
+        file_names_str = ", ".join([f.filename for f in files if f.filename]) if files else None
 
         # SAVE USER MESSAGE TO DB
         if const_email:
-            db("INSERT INTO m (sid, role, text, ts, user_email) VALUES (?, ?, ?, ?, ?)", (sid, "user", message, time.time(), const_email))
+            db("INSERT INTO m (sid, role, text, ts, user_email, fname) VALUES (?, ?, ?, ?, ?, ?)", (sid, "user", message, time.time(), const_email, file_names_str))
         else:
-            db("INSERT INTO m (sid, role, text, ts) VALUES (?, ?, ?, ?)", (sid, "user", message, time.time()))
+            db("INSERT INTO m (sid, role, text, ts, fname) VALUES (?, ?, ?, ?, ?)", (sid, "user", message, time.time(), file_names_str))
 
         # Limit history heavily to speed up the prompt evaluation
         history_rows = db("SELECT role, text, url FROM m WHERE sid = ? ORDER BY id DESC LIMIT 12", (sid,))
-        history = [{"role": r, "text": t} for r, t, u in reversed(history_rows)]
+        history = [{"role": r, "text": t, "url": u} for r, t, u in reversed(history_rows)]
 
         # --- HA ROTATOR RETRY LOOP ---
-        import asyncio
         loop = asyncio.get_event_loop()
         max_retries = len(GEMINI_KEY_POOL)
         resp = "SYSTEM ERROR: All API nodes are currently exhausted."
@@ -1746,6 +1290,9 @@ async def handle(
                     None,
                     lambda req=(history, message, kb_context, f_parts): assistant.chat(*req)
                 )
+                # SAVE USER MESSAGE WITH FILE URIs
+                if getattr(assistant, '_last_file_uris', None):
+                    db("UPDATE m SET url = ? WHERE id = (SELECT MAX(id) FROM m WHERE sid = ? AND role = 'user')", (assistant._last_file_uris, sid))
                 break # Success!
             except Exception as e:
                 err_str = str(e).lower()
@@ -1764,38 +1311,12 @@ async def handle(
         if not resp:
             resp = "I was unable to generate a response for this request. Please try rephrasing your question or uploading a smaller file."
 
-        # Handle Graphs - iterate over ALL __PRC_PLOT__ tokens in one response
+        # Handle Graphs - Keep as interactive JSON for KrPlot in chat
+        # (Static image conversion disabled to prioritize high-fidelity UI)
         _plot_attempts = 0
-        while '__PRC_PLOT__' in resp and _plot_attempts < 10:
-            _plot_attempts += 1
-            try:
-                before, after = resp.split('__PRC_PLOT__', 1)
-                after_stripped = after.strip()
-                
-                # Strip markdown code blocks if Gemini aggressively fenced the JSON
-                if after_stripped.startswith('```json'):
-                    after_stripped = after_stripped[7:].strip()
-                elif after_stripped.startswith('```'):
-                    after_stripped = after_stripped[3:].strip()
-                    
-                try:
-                    import json
-                    plot_data, end_idx = json.JSONDecoder().raw_decode(after_stripped)
-                except json.JSONDecodeError:
-                    # No valid JSON object after this token â€” strip the dangling token and stop
-                    resp = before + "\n" + after_stripped
-                    break
-                
-                img_md = Visualizer.build_plot(plot_data)
-                
-                remaining = after_stripped[end_idx:].strip()
-                if remaining.startswith('```'):
-                    remaining = remaining[3:].strip()
-                    
-                resp = before + "\n\n" + img_md + "\n\n" + remaining
-            except Exception as e:
-                resp = resp.replace('__PRC_PLOT__', '') + f"\n*(Plot Error: {str(e)[:60]})*"
-                break
+        # while '__PRC_PLOT__' in resp and _plot_attempts < 10:
+        #     _plot_attempts += 1
+        #     ... [Legacy Matplotlib conversion code disabled] ...
 
         # Handle Documents (routed through HvielDocEngine)
         doc_type = None
@@ -1942,6 +1463,18 @@ async def vision_audit(file: UploadFile = File(...), query: str = Form(...), ses
     except Exception as e:
         return {"status": "error", "message": str(e)}
 
+@app.get("/api/chat/history")
+async def get_chat_history(email: str):
+    """Fetch all messages for a specific user email."""
+    if not email: return {"messages": []}
+    rows = db("SELECT role, text, url, ts FROM m WHERE user_email = ? ORDER BY ts ASC", (email.lower().strip(),))
+    return {
+        "messages": [
+            {"role": r[0], "text": r[1], "download_url": r[2], "ts": r[3]}
+            for r in rows
+        ]
+    }
+
 @app.get("/")
 def root():
     # Serve frontend index.html if dist exists, otherwise return API status
@@ -1973,18 +1506,6 @@ def serve_frontend(filename: str):
     if os.path.exists(index):
         return FileResponse(index, media_type="text/html")
     return {"error": "not found"}
-
-@app.get("/api/chat/history")
-async def get_chat_history(email: str):
-    """Fetch all messages for a specific user email."""
-    if not email: return {"messages": []}
-    rows = db("SELECT role, text, url, ts FROM m WHERE user_email = ? ORDER BY ts ASC", (email.lower().strip(),))
-    return {
-        "messages": [
-            {"role": r[0], "text": r[1], "download_url": r[2], "ts": r[3]} 
-            for r in rows
-        ]
-    }
 
 # -- AUTOMATED DAILY BACKUP ENGINE --
 # To run manually: python app.py --backup
