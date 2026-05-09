@@ -335,7 +335,7 @@ _HVIEL_TOOLS = [
 # -- HVIEL BRAIN (Fix 2: new google.genai SDK with old-SDK fallback) --
 class PRCChatAssistant:
     def __init__(self, keys: list):
-        self.model_name = 'gemini-2.0-flash-lite'
+        self.model_name = 'gemini-1.5-flash'
         self._keys = keys
         self._current_idx = 0
         self._client = None
@@ -351,7 +351,7 @@ class PRCChatAssistant:
             if (now - f_data.get('ts', 0)) < f_data.get('wait', 0): continue
             self._current_idx = idx
             try:
-                self._client = genai_new.Client(api_key=key)
+                self._client = genai_new.Client(api_key=key, http_options={"api_version": "v1"})
                 _logger.info(f"[HA Rotator] Node {idx+1} SELECTED ({key[:8]}...)")
                 return
             except Exception as e:
