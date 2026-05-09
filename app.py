@@ -278,12 +278,12 @@ _HVIEL_TOOLS = [
                 "name": "execute_python_simulation",
                 "description": "Executes an advanced numerical SCAL simulation (Brooks-Corey/LET). Replaces legacy SENDRA workflows.",
                 "parameters": {
-                    "type": "object",
+                    "type": "OBJECT",
                     "properties": {
-                        "model": {"type": "string", "description": "Model type: 'brooks_corey' or 'let'"},
-                        "mode": {"type": "string", "description": "Simulation mode: '1d' (curves) or '2d' (spatial grid)"},
+                        "model": {"type": "STRING", "description": "Model type: 'brooks_corey' or 'let'"},
+                        "mode": {"type": "STRING", "description": "Simulation mode: '1d' (curves) or '2d' (spatial grid)"},
                         "params": {
-                            "type": "object", 
+                            "type": "OBJECT",
                             "description": "Parameters (swr, snr, krw_max, kro_max, nw, no). For 2D, add nx, ny, steps."
                         }
                     },
@@ -294,10 +294,10 @@ _HVIEL_TOOLS = [
                 "name": "generate_mermaid_diagram",
                 "description": "Generates a Mermaid.js diagram code for complex workflows.",
                 "parameters": {
-                    "type": "object",
+                    "type": "OBJECT",
                     "properties": {
-                        "type": {"type": "string", "description": "Diagram type: 'flowchart', 'sequence', 'graph'"},
-                        "content": {"type": "string", "description": "The mermaid code content (e.g., 'graph TD; A-->B;')"}
+                        "type": {"type": "STRING", "description": "Diagram type: 'flowchart', 'sequence', 'graph'"},
+                        "content": {"type": "STRING", "description": "The mermaid code content (e.g., 'graph TD; A-->B;')"}
                     },
                     "required": ["type", "content"]
                 }
@@ -306,11 +306,11 @@ _HVIEL_TOOLS = [
                 "name": "fit_petrophysical_curve",
                 "description": "Fits raw laboratory data to a mathematical model (Corey/LET) for physical consistency.",
                 "parameters": {
-                    "type": "object",
+                    "type": "OBJECT",
                     "properties": {
-                        "model": {"type": "string", "description": "Model type: 'corey' or 'let'"},
-                        "sw": {"type": "array", "items": {"type": "number"}, "description": "Array of Water Saturation points"},
-                        "krw": {"type": "array", "items": {"type": "number"}, "description": "Array of Relative Permeability points"}
+                        "model": {"type": "STRING", "description": "Model type: 'corey' or 'let'"},
+                        "sw": {"type": "ARRAY", "items": {"type": "NUMBER"}, "description": "Array of Water Saturation points"},
+                        "krw": {"type": "ARRAY", "items": {"type": "NUMBER"}, "description": "Array of Relative Permeability points"}
                     },
                     "required": ["model", "sw", "krw"]
                 }
@@ -319,11 +319,11 @@ _HVIEL_TOOLS = [
                 "name": "agentic_history_matching",
                 "description": "Uses Simulated Annealing to perform history matching on SCAL lab data, automatically finding the optimal Brooks-Corey parameters that match experimental curves.",
                 "parameters": {
-                    "type": "object",
+                    "type": "OBJECT",
                     "properties": {
-                        "sw": {"type": "array", "items": {"type": "number"}, "description": "Array of Water Saturation (Sw) points"},
-                        "krw": {"type": "array", "items": {"type": "number"}, "description": "Array of Relative Permeability to Water (Krw) points"},
-                        "kro": {"type": "array", "items": {"type": "number"}, "description": "Array of Relative Permeability to Oil (Kro) points"}
+                        "sw": {"type": "ARRAY", "items": {"type": "NUMBER"}, "description": "Array of Water Saturation (Sw) points"},
+                        "krw": {"type": "ARRAY", "items": {"type": "NUMBER"}, "description": "Array of Relative Permeability to Water (Krw) points"},
+                        "kro": {"type": "ARRAY", "items": {"type": "NUMBER"}, "description": "Array of Relative Permeability to Oil (Kro) points"}
                     },
                     "required": ["sw", "krw", "kro"]
                 }
@@ -453,7 +453,7 @@ class PRCChatAssistant:
             max_retries = len(self._keys)
             for attempt in range(max_retries):
                 try:
-                    cfg = {"temperature": 0.1, "tools": _HVIEL_TOOLS}
+                    cfg = genai_types.GenerateContentConfig(temperature=0.1, tools=_HVIEL_TOOLS)
                     if stream:
                         response = self._client.models.generate_content_stream(model=self.model_name, contents=contents, config=cfg)
                         for chunk in response:
