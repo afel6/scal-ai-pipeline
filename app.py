@@ -17,6 +17,7 @@ from google.genai import types as genai_types
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(name)s: %(message)s")
 _logger = logging.getLogger("PRC-Hub")
+_USE_NEW_SDK = True
 
 # -- Fix 3: PostgreSQL + SQLite unified DB layer --
 DATABASE_URL = os.getenv("DATABASE_URL", "").strip()
