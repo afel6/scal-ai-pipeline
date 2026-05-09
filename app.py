@@ -453,7 +453,7 @@ class PRCChatAssistant:
             max_retries = len(self._keys)
             for attempt in range(max_retries):
                 try:
-                    cfg = genai_types.GenerateContentConfig(temperature=0.1, tools=_HVIEL_TOOLS)
+                    cfg = {"temperature": 0.1, "tools": _HVIEL_TOOLS}
                     if stream:
                         response = self._client.models.generate_content_stream(model=self.model_name, contents=contents, config=cfg)
                         for chunk in response:
