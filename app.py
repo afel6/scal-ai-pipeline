@@ -1114,33 +1114,12 @@ def db(q, p=()):
         conn.close()
         return res
 
-# Init tables - works for both PostgreSQL and SQLite
-if _PG_AVAILABLE:
-    # PostgreSQL uses SERIAL instead of INTEGER PRIMARY KEY
-    db('CREATE TABLE IF NOT EXISTS m (id SERIAL PRIMARY KEY, sid TEXT, role TEXT, text TEXT, url TEXT, ts REAL)')
-    try: db('ALTER TABLE m ADD COLUMN user_email TEXT')
-    except: pass
-    db('CREATE TABLE IF NOT EXISTS kb (id SERIAL PRIMARY KEY, source TEXT, chunk TEXT)')
-    db('CREATE TABLE IF NOT EXISTS kb_vectors (id SERIAL PRIMARY KEY, chunk_id INTEGER UNIQUE, embedding BYTEA)')
-    db('CREATE TABLE IF NOT EXISTS users (id SERIAL PRIMARY KEY, email TEXT UNIQUE, name TEXT, created_at REAL)')
-    db('CREATE TABLE IF NOT EXISTS feedback (id SERIAL PRIMARY KEY, user_email TEXT, bug_report TEXT, ts REAL)')
-    db('CREATE TABLE IF NOT EXISTS analytics_events (id SERIAL PRIMARY KEY, user_email TEXT, event_type TEXT, event_data TEXT, ts REAL)')
-else:
-    db('CREATE TABLE IF NOT EXISTS m (id INTEGER PRIMARY KEY, sid TEXT, role TEXT, text TEXT, url TEXT, ts REAL)')
-    try: db('ALTER TABLE m ADD COLUMN user_email TEXT')
-    except: pass
-    db('CREATE TABLE IF NOT EXISTS kb (id INTEGER PRIMARY KEY, source TEXT, chunk TEXT)')
-    db('CREATE TABLE IF NOT EXISTS kb_vectors (id INTEGER PRIMARY KEY, chunk_id INTEGER UNIQUE, embedding BLOB)')
-    db('CREATE TABLE IF NOT EXISTS users (id INTEGER PRIMARY KEY, email TEXT UNIQUE, name TEXT, created_at REAL)')
-    db('CREATE TABLE IF NOT EXISTS feedback (id INTEGER PRIMARY KEY, user_email TEXT, bug_report TEXT, ts REAL)')
-    db('CREATE TABLE IF NOT EXISTS analytics_events (id INTEGER PRIMARY KEY, user_email TEXT, event_type TEXT, event_data TEXT, ts REAL)')
-
-# -- Fix 1: Start keep-alive self-ping --
-keepalive.start()
-
 # ── Register extra routes (feedback, analytics, user mgmt) ──
-from extra_routes import register_extra_routes
-register_extra_routes(app, db)
+try:
+    from extra_routes import register_extra_routes
+    register_extra_routes(app, db)
+except Exception as e:
+    _logger.error(f"[SYSTEM] Failed to register extra routes: {e}")
 
 @app.get('/health')
 def health():
