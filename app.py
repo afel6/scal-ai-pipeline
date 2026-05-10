@@ -207,6 +207,13 @@ Physics Model: [e.g. Archie's Law, Brooks-Corey]
 Visualization Spec: [scale types, dual-axis status, or dashboard mode]
 __PRC_PLOT__ { ... } OR __PRC_DASHBOARD__ ... __PRC_DASHBOARD__
 
+### DIRECTIVE 4 — CLAUDE-STYLE CURVE ANALYTICS
+When presenting a curve, perform a "Deep Physics Audit" like an expert:
+- **Wettability**: Analyze the crossover point (Sw at Krw=Kro). If > 0.5, indicate water-wet; if < 0.5, oil-wet.
+- **Pore Structure**: Comment on the "L" (Linearity) and "T" (Tortuosity) parameters. High "n" values indicate a wide pore-throat distribution.
+- **Endpoint Audit**: Flag if Sor is unusually high (>0.35) or if Krw_max is too low for the lithology.
+- **Executive Interpretation**: Translate the curve shape into a business impact (e.g., "Expect early water breakthrough due to high mobility ratio").
+
 ### PHASE 3: CERTIFICATION
 One-sentence engineering summary confirming readiness for PRC Executive Board.
 """
