@@ -371,14 +371,26 @@ If anomalies remain unresolved: state the outstanding issue and the required PRC
 SECTION 6 — CURVE TYPE DETECTION
 ════════════════════════════════════════════════════
 Auto-detect from column names:
-  Sw + Krw + Kro          → Relative Permeability (Brooks-Corey + LET)
-  Sw + Pc                 → Capillary Pressure (Brooks-Corey Pc model)
-  Sw + RI                 → Resistivity Index [Log-Log scale mandatory]
-  Porosity + FF           → Formation Factor [Log-Log + Archie mandatory]
-  Pressure + Porosity + k → Overburden Compaction [Dual-Axis: linear φ left, log k right]
-  T2 + porosity           → NMR T2 Distribution
-  Vsp/Vtp/Vso/Vto         → Wettability Index (Amott method)
-  Pc + IFT + k + φ        → Leverett J-Function
+  Sw + Krw + Kro                    → Relative Permeability (Brooks-Corey + LET)
+  Sw + Pc                           → Capillary Pressure (Brooks-Corey Pc model)
+  Sw + RI                           → Resistivity Index [Log-Log scale mandatory]
+  Porosity + FF                     → Formation Factor [Log-Log + Archie mandatory]
+  Pressure + Porosity + k           → Overburden Compaction [Dual-Axis: linear φ left, log k right]
+  T2 + porosity                     → NMR T2 Distribution
+  Vsp/Vtp/Vso/Vto                   → Wettability Index (Amott method)
+  Pc + IFT + k + φ                  → Leverett J-Function
+  Pressure_psia + Hg_Saturation     → *** MICP — Mercury Injection Capillary Pressure ***
+  Pc_psia + S_Hg / P + Sw_Hg       → *** MICP — Mercury Injection Capillary Pressure ***
+
+CRITICAL MICP RULE — DO NOT CONFUSE WITH Kr:
+  If ANY column name contains: Hg, Mercury, MICP, Pc_psia, Pressure_psia, S_Hg, Sw_Hg:
+  → This is MICP data. NEVER call execute_python_simulation with Brooks-Corey Kr model.
+  → MANDATORY: Call fit_petrophysical_curve with model="micp", \
+pc=[pressure values as list], s_hg=[mercury saturation values as list].
+  → The system will auto-generate BOTH the Capillary Pressure curve AND the Pore Size \
+Distribution (PSD). You do not need to construct the plots manually.
+  → Your analysis must address: Entry Pressure, Threshold Pressure, Pore Throat Radius, \
+Sorting Coefficient, and reservoir quality classification — NOT wettability crossover.
 
 ════════════════════════════════════════════════════
 SECTION 7 — PHYSICS VALIDATION (NON-NEGOTIABLE)
@@ -423,6 +435,31 @@ Model selection guide:
   Brooks-Corey → clean water-wet sandstones; simple pore networks; quick parametric studies
   LET          → mixed-wet Libyan carbonate/dolomite; complex wettability; S-shaped Kr curves
   When both are fitted, lead with the higher-R² model and comment on the discrepancy.
+
+MICP Interpretation (Washburn equation: r_µm = 107.5 / Pc_psia):
+Entry Pressure (Pe — first Hg intrusion):
+  Pe < 10 psia    → Macro-porous; excellent reservoir quality (vuggy carbonate or clean sandstone)
+  Pe 10–50 psia   → Good to moderate pore network; typical Libyan sandstone
+  Pe 50–200 psia  → Tight to very tight; micro-porosity dominant; reduced productivity
+  Pe > 200 psia   → Ultra-tight; unconventional reservoir candidate; stimulation required
+
+Threshold Pressure (inflection / maximum dSw/dPc):
+  → Controls minimum column height for hydrocarbon migration and seal integrity
+  → r_threshold (µm) = 107.5 / Pe_threshold — report this as the modal pore throat
+
+Pore Throat Sorting (shape of PSD peak):
+  Sharp unimodal PSD   → Well-sorted; predictable flow; high sweep; clean sandstone
+  Broad PSD            → Heterogeneous pore network; early breakthrough; permeability over-estimates likely
+  Bimodal PSD          → Dual-porosity (fracture + matrix); common Libyan carbonate; must model separately
+  Multiple PSD peaks   → Complex diagenesis; cement-lined or fractured system
+
+Maximum Hg Saturation (Sw_Hg_max):
+  > 0.85  → Well-connected pore network; low dead-end porosity
+  0.60–0.85 → Moderate connectivity; check clay content
+  < 0.60  → High micro-porosity trapping or clay-rich; NMR T2 cross-check recommended
+
+Report the dominant pore throat radius (peak of PSD), the sorting coefficient, and the \
+reservoir quality index (RQI = 0.0314 * sqrt(k/φ) if permeability is available).
 
 ════════════════════════════════════════════════════
 SECTION 9 — VISION PROTOCOL (LABORATORY EQUIPMENT ANALYSIS)
@@ -516,15 +553,22 @@ _HVIEL_TOOLS = [
             },
             {
                 "name": "fit_petrophysical_curve",
-                "description": "Fits raw lab Kr data to Corey/LET model.",
+                "description": (
+                    "Fits raw lab data. For Kr data: pass model='brooks_corey' or 'let', sw, krw, kro arrays. "
+                    "For MICP mercury injection data: pass model='micp', pc=[pressure_psia values], "
+                    "s_hg=[mercury_saturation fraction values]. MICP auto-generates Pc curve + PSD chart."
+                ),
                 "parameters": {
                     "type": "OBJECT",
                     "properties": {
                         "model": {"type": "STRING"},
                         "sw":    {"type": "ARRAY", "items": {"type": "NUMBER"}},
                         "krw":   {"type": "ARRAY", "items": {"type": "NUMBER"}},
+                        "kro":   {"type": "ARRAY", "items": {"type": "NUMBER"}},
+                        "pc":    {"type": "ARRAY", "items": {"type": "NUMBER"}},
+                        "s_hg":  {"type": "ARRAY", "items": {"type": "NUMBER"}},
                     },
-                    "required": ["model", "sw", "krw"],
+                    "required": ["model"],
                 },
             },
             {
@@ -608,6 +652,10 @@ class PRCChatAssistant:
         elif name == "generate_mermaid_diagram":
             return f"__MERMAID_START__\n{args.get('content','')}\n__MERMAID_END__"
         elif name == "fit_petrophysical_curve":
+            if args.get("model") == "micp":
+                # MICP: data lives in args.pc and args.s_hg — _format_tool_response handles computation
+                return _json.dumps({"status": "micp_ready", "model": "micp",
+                                    "pc": args.get("pc", []), "s_hg": args.get("s_hg", [])})
             data = {"model": args.get("model"), "sw": args.get("sw",[]), "krw": args.get("krw",[])}
             res  = SkillsEngine.run_skill("petroleum", "", "curve_fitting_skill.py", [_json.dumps(data)])
             return res.get("stdout") or res.get("error", "")
@@ -619,6 +667,78 @@ class PRCChatAssistant:
 
     def _format_tool_response(self, name: str, args: dict, result: str) -> str:
         try:
+            # ── MICP: compute Pc curve + PSD directly from args (no curve_fitting_skill needed) ──
+            if name == "fit_petrophysical_curve" and args.get("model") == "micp":
+                pc_raw  = args.get("pc",  [])
+                shg_raw = args.get("s_hg", [])
+                if len(pc_raw) > 1 and len(shg_raw) > 1:
+                    pc_arr  = np.array(pc_raw,  dtype=float)
+                    shg_arr = np.array(shg_raw, dtype=float)
+                    # Sort by mercury saturation
+                    idx      = np.argsort(shg_arr)
+                    pc_s     = pc_arr[idx]
+                    shg_s    = shg_arr[idx]
+                    pc_pos   = np.maximum(pc_s, 0.01)
+                    # Washburn: r(µm) = 2·γ·|cosθ| / Pc  — for Hg-air γ=480 mN/m, θ=140° → r=107.5/Pc_psia
+                    r_um     = 107.5 / pc_pos
+                    # Entry pressure = first non-trivial Pc (where Sw_Hg first exceeds 1 %)
+                    entry_mask = shg_s > 0.01
+                    pe = float(pc_s[entry_mask][0]) if entry_mask.any() else float(pc_s[0])
+                    # Threshold pressure = Pc at maximum d(Sw)/dPc (inflection)
+                    if len(pc_s) > 2:
+                        grad   = np.gradient(shg_s, pc_s)
+                        thr_pc = float(pc_s[np.argmax(grad)])
+                    else:
+                        thr_pc = pe
+                    thr_r = 107.5 / max(thr_pc, 0.01)
+                    # PSD: dSw/d(log10 r)  — positive because Sw increases as r decreases
+                    log_r   = np.log10(r_um)
+                    psd_pts = []
+                    for j in range(1, len(shg_s)):
+                        dlr = log_r[j] - log_r[j - 1]
+                        if abs(dlr) > 1e-10:
+                            psd_pts.append({
+                                "x": float((r_um[j] + r_um[j-1]) / 2),
+                                "y": float(abs((shg_s[j] - shg_s[j-1]) / dlr)),
+                            })
+                    psd_pts.sort(key=lambda p: p["x"])
+                    # Plot 1 — Capillary Pressure curve
+                    plot_pc = {
+                        "title": "MICP — Capillary Pressure vs Mercury Saturation",
+                        "xAxis": {"label": "Mercury Saturation Sw_Hg (fraction)"},
+                        "yAxis": {"label": "Capillary Pressure Pc (psia)"},
+                        "curves": [{"name": "Pc (Mercury Injection)", "showLine": True,
+                                    "showPoints": True, "color": "#a855f7",
+                                    "data": [{"x": float(s), "y": float(p)}
+                                             for s, p in zip(shg_s, pc_s)]}],
+                        "metadata": {"micp": {
+                            "entry_pressure_psia":     round(pe, 2),
+                            "threshold_pressure_psia": round(thr_pc, 2),
+                            "modal_pore_radius_um":    round(thr_r, 3),
+                            "max_hg_saturation":       round(float(shg_s[-1]), 4),
+                        }},
+                    }
+                    # Plot 2 — Pore Size Distribution
+                    plot_psd = {
+                        "title": "Pore Throat Size Distribution (MICP)",
+                        "xAxis": {"label": "Pore Throat Radius r (µm)"},
+                        "yAxis": {"label": "Incremental Hg Saturation  dSw/d(log r)"},
+                        "curves": [{"name": "Pore Throat Distribution", "showLine": True,
+                                    "showPoints": False, "color": "#f59e0b",
+                                    "data": psd_pts}],
+                    }
+                    summary = (
+                        f"Entry Pressure Pe = {pe:.1f} psia  |  "
+                        f"Threshold Pressure = {thr_pc:.1f} psia  |  "
+                        f"Modal Pore Throat r = {thr_r:.3f} µm  |  "
+                        f"Max Hg Saturation = {float(shg_s[-1]):.3f}"
+                    )
+                    return (
+                        f"\n\nMICP analysis complete. {summary}\n\n"
+                        f"__PRC_PLOT__\n{_json.dumps(plot_pc, ensure_ascii=False)}\n\n"
+                        f"__PRC_PLOT__\n{_json.dumps(plot_psd, ensure_ascii=False)}\n\n"
+                    )
+
             tr = _json.loads(result) if isinstance(result, str) else result
             if name == "agentic_history_matching" and tr.get("success"):
                 sw, krw, kro = args.get("sw",[]), args.get("krw",[]), args.get("kro",[])
@@ -685,6 +805,15 @@ class PRCChatAssistant:
                         "note": "History matching complete. PRC_PLOT rendered. Proceed with Phase 3 certification.",
                     }
             elif name == "fit_petrophysical_curve":
+                if isinstance(data, dict) and data.get("model") == "micp":
+                    return {
+                        "status": "success",
+                        "model": "MICP",
+                        "note": (
+                            "Pc curve and Pore Size Distribution rendered in chat. "
+                            "Proceed with Entry Pressure, Threshold Pressure, and Pore Throat Sorting analysis."
+                        ),
+                    }
                 if isinstance(data, dict) and data.get("success"):
                     return {
                         "status": "success",
