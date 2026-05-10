@@ -92,8 +92,8 @@ if not _PG_AVAILABLE:
 
 
 def _translate_placeholders(query: str) -> str:
-    """Convert SQLite ? placeholders to PostgreSQL $N."""
-    out, n, in_str, quote = [], 0, False, None
+    """Convert SQLite ? placeholders to PostgreSQL %s for psycopg2 driver."""
+    out, in_str, quote = [], False, None
     for ch in query:
         if in_str:
             out.append(ch)
@@ -103,8 +103,7 @@ def _translate_placeholders(query: str) -> str:
             in_str, quote = True, ch
             out.append(ch)
         elif ch == "?":
-            n += 1
-            out.append(f"${n}")
+            out.append("%s")
         else:
             out.append(ch)
     return "".join(out)
