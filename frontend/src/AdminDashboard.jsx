@@ -1,5 +1,5 @@
-import React, { useState, useEffect } from 'react';
-import { Users, MessageSquare, BarChart3, Bug, Database, Activity, ArrowLeft, RefreshCw, Clock, Mail, ChevronDown, ChevronUp } from 'lucide-react';
+import React, { useState, useEffect, useCallback } from 'react';
+import { Users, MessageSquare, BarChart3, Bug, Database, Activity, ArrowLeft, RefreshCw, Clock, Mail, ChevronDown, ChevronUp, LogOut } from 'lucide-react';
 import axios from 'axios';
 
 const API_URL = import.meta.env.VITE_API_URL || '';
@@ -89,7 +89,7 @@ function UserRow({ user, idx }) {
 /* ══════════════════════════════════════════════════════════════════════════
    ADMIN DASHBOARD — Main Export
    ══════════════════════════════════════════════════════════════════════════ */
-export default function AdminDashboard({ onBack }) {
+export default function AdminDashboard({ adminToken, onBack, onLogout }) {
   const [summary, setSummary] = useState(null);
   const [events, setEvents] = useState([]);
   const [feedback, setFeedback] = useState([]);
@@ -97,14 +97,16 @@ export default function AdminDashboard({ onBack }) {
   const [activeTab, setActiveTab] = useState('overview');
   const [loading, setLoading] = useState(true);
 
-  const fetchAll = async () => {
+  const fetchAll = useCallback(async () => {
+    if (!adminToken) return;
     setLoading(true);
     try {
+      const config = { headers: { Authorization: `Bearer ${adminToken}` } };
       const [sumRes, evtRes, fbRes, usrRes] = await Promise.all([
-        axios.get(`${API_URL}/api/admin/summary`),
-        axios.get(`${API_URL}/api/admin/analytics`),
-        axios.get(`${API_URL}/api/admin/feedback`),
-        axios.get(`${API_URL}/api/admin/users`),
+        axios.get(`${API_URL}/api/admin/summary`, config),
+        axios.get(`${API_URL}/api/admin/analytics`, config),
+        axios.get(`${API_URL}/api/admin/feedback`, config),
+        axios.get(`${API_URL}/api/admin/users`, config),
       ]);
       setSummary(sumRes.data);
       setEvents(evtRes.data?.events || []);
@@ -112,11 +114,12 @@ export default function AdminDashboard({ onBack }) {
       setUsers(usrRes.data?.users || []);
     } catch (e) {
       console.error('Admin fetch error:', e);
+      if (e.response?.status === 401) onBack(); 
     }
     setLoading(false);
-  };
+  }, [adminToken, onBack]);
 
-  useEffect(() => { fetchAll(); }, []);
+  useEffect(() => { fetchAll(); }, [fetchAll]);
 
   const tabs = [
     { id: 'overview', label: 'Overview', icon: BarChart3 },
@@ -154,13 +157,23 @@ export default function AdminDashboard({ onBack }) {
                 {summary.storage_type}
               </div>
             )}
-            <button
+          <button
             onClick={fetchAll}
             disabled={loading}
             className="flex items-center gap-2 px-4 py-2 rounded-xl border border-amber-900/30 bg-amber-950/20 text-amber-400 text-xs font-bold tracking-wider uppercase hover:bg-amber-950/40 transition-colors disabled:opacity-50"
           >
             <RefreshCw className={`w-3.5 h-3.5 ${loading ? 'animate-spin' : ''}`} />
             Refresh
+          </button>
+          
+          <div className="h-6 w-px bg-white/[0.06]" />
+
+          <button
+            onClick={onLogout}
+            className="flex items-center gap-2 px-4 py-2 rounded-xl border border-red-900/30 bg-red-950/20 text-red-400 text-xs font-bold tracking-wider uppercase hover:bg-red-950/40 transition-colors"
+          >
+            <LogOut className="w-3.5 h-3.5" />
+            Logout
           </button>
         </div>
       </div>

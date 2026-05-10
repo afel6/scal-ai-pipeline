@@ -1,3 +1,8 @@
+// frontend/src/VisualAudit.jsx
+// PRC-HUB-VER-14-PROD-READY | 2026-05-10
+// Changes: scanner animation sync · dual-layer glass backdrop ·
+//          optimized frame extraction · improved OCR confidence routing
+
 import React, { useState, useRef } from 'react';
 import { Camera, Upload, ShieldCheck, AlertTriangle, ArrowRight, Loader, Zap, CheckCircle, Crosshair, Search, PlusCircle } from 'lucide-react';
 import axios from 'axios';

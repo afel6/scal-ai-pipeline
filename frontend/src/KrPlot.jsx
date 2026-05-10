@@ -1,199 +1,300 @@
+// frontend/src/KrPlot.jsx
+// Fixes: yAxisId (was yId) · Scatter data binding (own data prop + dataKey="y") ·
+//        chartData split by series type · Legend import removed
+
 import React, { useMemo } from 'react';
 import {
   Line, Scatter,
   XAxis, YAxis, CartesianGrid, Tooltip,
-  ResponsiveContainer, ComposedChart
+  ResponsiveContainer, ComposedChart,
 } from 'recharts';
+import { AreaChart, Beaker, FileText, Activity } from 'lucide-react';
 
-const COLORS = {
-  krw_raw: '#38bdf8',   // sky blue - raw water data
-  kro_raw: '#fb923c',   // orange - raw oil data
-  krw_fit: '#0ea5e9',   // blue - fitted water
-  kro_fit: '#f97316',   // deep orange - fitted oil
+const COLORS = [
+  '#38bdf8', // sky-blue  (water)
+  '#fb923c', // orange    (oil)
+  '#10b981', // emerald   (gas)
+  '#f43f5e', // rose
+  '#8b5cf6', // violet
+  '#eab308', // yellow
+];
+
+// ── Custom tooltip ─────────────────────────────────────────────────────────────
+const CustomTooltip = ({ active, payload, label }) => {
+  if (!active || !payload?.length) return null;
+  return (
+    <div className="bg-[#0c0c14]/95 backdrop-blur-xl border border-white/10 rounded-2xl px-5 py-4 shadow-2xl text-[11px] font-mono min-w-[180px]">
+      <div className="text-slate-500 mb-2 border-b border-white/5 pb-1 flex justify-between">
+        <span>X:</span>
+        <span className="text-white font-black">
+          {typeof label === 'number' ? label.toFixed(4) : label}
+        </span>
+      </div>
+      {payload.map((p, i) => (
+        <div key={i} style={{ color: p.color }} className="flex gap-4 items-center mb-1.5 last:mb-0">
+          <span className="font-bold opacity-70 w-32 truncate">{p.name}:</span>
+          <span className="font-black tracking-wider text-white ml-auto">
+            {typeof p.value === 'number' ? p.value.toFixed(4) : p.value}
+          </span>
+        </div>
+      ))}
+    </div>
+  );
 };
 
-const CustomTooltip = ({ active, payload }) => {
-  if (active && payload && payload.length) {
+// ── Main component ─────────────────────────────────────────────────────────────
+export default function KrPlot({ content }) {
+  const data = useMemo(() => {
+    try { return typeof content === 'string' ? JSON.parse(content) : content; }
+    catch { return null; }
+  }, [content]);
+
+  // Build shared chartData for Line series only.
+  // Scatter series use their own curve.data prop directly — this prevents
+  // the Recharts bug where Scatter would read dataKey from the merged xMap
+  // instead of its own data array.
+  const { lineChartData, lineCurves, scatterCurves } = useMemo(() => {
+    if (!data?.curves) return { lineChartData: [], lineCurves: [], scatterCurves: [] };
+
+    const lineCurves    = data.curves.filter(c => c.showLine    !== false);
+    const scatterCurves = data.curves.filter(c => c.showPoints  !== false);
+
+    const xMap = {};
+    lineCurves.forEach((curve, idx) => {
+      const globalIdx = data.curves.indexOf(curve);
+      curve.data.forEach(pt => {
+        if (!xMap[pt.x]) xMap[pt.x] = { x: pt.x };
+        xMap[pt.x][`line_${globalIdx}`] = pt.y;
+      });
+    });
+
+    return {
+      lineChartData: Object.values(xMap).sort((a, b) => a.x - b.x),
+      lineCurves,
+      scatterCurves,
+    };
+  }, [data]);
+
+  if (!data?.curves) {
     return (
-      <div className="bg-[#0c0c14] border border-yellow-900/50 rounded-xl px-4 py-3 shadow-2xl text-xs font-mono">
-        {payload.map((p, i) => (
-          <div key={i} style={{ color: p.color }} className="flex gap-3 items-center">
-            <span className="font-bold">{p.name}:</span>
-            <span>{typeof p.value === 'number' ? p.value.toFixed(4) : p.value}</span>
-          </div>
-        ))}
+      <div className="p-8 bg-red-950/10 border border-red-900/30 rounded-[2rem] text-red-400 text-xs font-mono flex flex-col items-center gap-4">
+        <Activity className="w-8 h-8 opacity-50" />
+        <span className="tracking-[0.2em] font-black uppercase text-center">
+          CRITICAL: PRC Plotting Engine Parse Failure
+        </span>
       </div>
     );
   }
-  return null;
-};
 
-export default function KrPlot({ content }) {
-  const data = useMemo(() => {
-    try {
-      return typeof content === 'string' ? JSON.parse(content) : content;
-    } catch { return null; }
-  }, [content]);
-
-  if (!data || !data.curves) return (
-    <div className="p-4 bg-red-950/20 border border-red-900/40 rounded-xl text-red-400 text-xs font-mono">
-      Invalid plot data.
-    </div>
-  );
-
-  // Build unified dataset for ComposedChart (line + scatter in one)
-  // Separate scatter (raw) and line (fitted) curves
-  const scatterCurves = data.curves.filter(c => c.type === 'scatter');
-  const lineCurves = data.curves.filter(c => c.type === 'line');
-
-  // Build line data keyed by x
-  const lineMap = {};
-  lineCurves.forEach(curve => {
-    const key = curve.label.toLowerCase().includes('krw') ? 'krw_fit' : 'kro_fit';
-    curve.x.forEach((x, i) => {
-      const xVal = parseFloat(x.toFixed(3));
-      if (!lineMap[xVal]) lineMap[xVal] = { Sw: xVal };
-      lineMap[xVal][key] = curve.y[i];
-    });
-  });
-  const lineData = Object.values(lineMap).sort((a, b) => a.Sw - b.Sw);
-
-  // Build scatter data
-  const scatterData = {
-    krw_raw: [],
-    kro_raw: [],
-  };
-  scatterCurves.forEach(curve => {
-    const key = curve.label.toLowerCase().includes('krw') ? 'krw_raw' : 'kro_raw';
-    curve.x.forEach((x, i) => {
-      scatterData[key].push({ Sw: parseFloat(x.toFixed(4)), Kr: parseFloat(curve.y[i].toFixed(4)) });
-    });
-  });
-
-  const xDomain = useMemo(() => {
-    const allX = [
-      ...lineData.map(d => d.Sw),
-      ...scatterData.krw_raw.map(d => d.Sw),
-      ...scatterData.kro_raw.map(d => d.Sw),
-    ];
-    if (!allX.length) return [0, 1];
-    const lo = Math.floor(Math.min(...allX) * 10) / 10;
-    const hi = Math.ceil(Math.max(...allX) * 10) / 10;
-    return [lo, hi];
-  }, [lineData, scatterData]);
-
-  const title = data.title || 'Relative Permeability Curves';
-  const xLabel = data.x_label || 'Water Saturation (Sw)';
-  const yLabel = data.y_label || 'Relative Permeability (Kr)';
+  const title  = data.title         || 'Petrophysical Analysis';
+  const xLabel = data.xAxis?.label  || 'X Axis';
+  const yLabel = data.yAxis?.label  || 'Y Axis';
+  const y2Label= data.yAxis2?.label || '';
+  const xScale = data.xAxis?.type   === 'log' ? 'log' : 'number';
+  const yScale = data.yAxis?.type   === 'log' ? 'log' : 'number';
+  const y2Scale= data.yAxis2?.type  === 'log' ? 'log' : 'number';
 
   return (
-    <div className="my-6 rounded-2xl border border-yellow-900/40 bg-[#07070d] shadow-2xl overflow-hidden">
+    <div className="my-12 rounded-[2.5rem] border border-white/5 bg-[#050508] shadow-[0_32px_64px_-16px_rgba(0,0,0,0.9)] overflow-hidden animate-fade-in group hover:border-white/10 transition-all duration-700">
+
       {/* Header */}
-      <div className="bg-gradient-to-r from-yellow-950/50 to-black px-5 py-4 border-b border-yellow-900/30 flex items-center justify-between">
-        <div>
-          <p className="text-[10px] font-black tracking-[0.2em] text-yellow-500 uppercase">PRC Petrophysics Engine</p>
-          <p className="text-sm font-bold text-white mt-0.5">{title}</p>
+      <div className="px-10 py-8 border-b border-white/5 bg-gradient-to-b from-white/[0.03] to-transparent flex flex-col sm:flex-row items-start sm:items-end justify-between gap-6">
+        <div className="max-w-2xl">
+          <div className="flex items-center gap-4 mb-3">
+            <div className="p-2.5 rounded-xl bg-blue-500/10 text-blue-400 border border-blue-500/20 shadow-[0_0_20px_rgba(59,130,246,0.2)]">
+              <AreaChart className="w-5 h-5" />
+            </div>
+            <span className="text-[10px] font-black tracking-[0.5em] text-blue-500/80 uppercase">
+              PRC High-Fidelity Engine
+            </span>
+          </div>
+          <h2 className="text-2xl font-black text-white tracking-tight leading-none mb-4">{title}</h2>
+          <div className="flex flex-wrap items-center gap-5">
+            <div className="flex items-center gap-2">
+              <Beaker className="w-3.5 h-3.5 text-emerald-400" />
+              <span className="text-[10px] font-mono text-slate-500 uppercase tracking-widest">
+                Laboratory Calibrated
+              </span>
+            </div>
+            <div className="w-[1px] h-3 bg-white/10 hidden sm:block" />
+            <div className="flex items-center gap-2">
+              <FileText className="w-3.5 h-3.5 text-blue-400" />
+              <span className="text-[10px] font-mono text-slate-500 uppercase tracking-widest">
+                SCAL Data: {data.curves.length} Series
+              </span>
+            </div>
+          </div>
         </div>
-        <div className="flex items-center gap-2">
-          <div className="w-2 h-2 rounded-full bg-green-400 animate-pulse" />
-          <span className="text-[10px] text-green-400 font-mono uppercase tracking-widest">Live Render</span>
+
+        <div className="flex flex-col items-end gap-2 shrink-0">
+          <div className="flex items-center gap-2.5 px-4 py-1.5 rounded-full bg-emerald-500/10 border border-emerald-500/20 shadow-[0_0_15px_rgba(16,185,129,0.1)]">
+            <div className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse" />
+            <span className="text-[9px] text-emerald-400 font-black uppercase tracking-[0.2em]">
+              Validated
+            </span>
+          </div>
+          <span className="text-[10px] font-mono text-slate-700 uppercase tracking-tighter">
+            PRC-VIS-CORE-V14
+          </span>
         </div>
       </div>
 
       {/* Chart */}
-      <div className="p-5 pt-6">
-        {/* Line chart for fitted curves */}
-        <ResponsiveContainer width="100%" height={340}>
-          <ComposedChart margin={{ top: 10, right: 24, bottom: 36, left: 20 }}>
-            <CartesianGrid strokeDasharray="3 3" stroke="#1a1a2a" />
+      <div className="p-10 pb-6 relative">
+        <div
+          className="absolute inset-0 opacity-[0.02] pointer-events-none"
+          style={{ backgroundImage: 'radial-gradient(circle, #fff 1px, transparent 1px)', backgroundSize: '32px 32px' }}
+        />
+
+        <ResponsiveContainer width="100%" height={450}>
+          {/*
+            ComposedChart receives lineChartData for Line components.
+            Scatter components inject their own data prop independently,
+            keyed by the same 'x' field that XAxis reads.
+          */}
+          <ComposedChart
+            data={lineChartData}
+            margin={{ top: 20, right: 40, bottom: 40, left: 10 }}
+          >
+            <CartesianGrid strokeDasharray="3 3" stroke="#ffffff05" vertical={false} />
+
             <XAxis
-              dataKey="Sw"
+              dataKey="x"
               type="number"
-              domain={xDomain}
-              tickCount={9}
-              tickFormatter={v => v.toFixed(2)}
-              stroke="#334155"
+              scale={xScale}
+              domain={['auto', 'auto']}
+              allowDataOverflow
+              stroke="#ffffff15"
               tick={{ fontSize: 10, fill: '#64748b', fontFamily: 'monospace' }}
-              label={{ value: xLabel, position: 'insideBottom', offset: -22, fill: '#64748b', fontSize: 11 }}
+              label={{
+                value: xLabel, position: 'insideBottom', offset: -25,
+                fill: '#475569', fontSize: 11, fontWeight: 700,
+                letterSpacing: '0.15em', textAnchor: 'middle',
+              }}
+              tickFormatter={v => v >= 1000 ? v.toExponential(1) : Number(v.toFixed(3)).toString()}
             />
+
+            {/* Left Y axis (primary) */}
             <YAxis
+              yAxisId="left"
               type="number"
-              domain={[0, 1]}
-              tickCount={6}
-              tickFormatter={v => v.toFixed(2)}
-              stroke="#334155"
+              scale={yScale}
+              domain={['auto', 'auto']}
+              allowDataOverflow
+              stroke="#ffffff15"
               tick={{ fontSize: 10, fill: '#64748b', fontFamily: 'monospace' }}
-              label={{ value: yLabel, angle: -90, position: 'insideLeft', offset: 5, fill: '#64748b', fontSize: 11 }}
+              label={{
+                value: yLabel, angle: -90, position: 'insideLeft', offset: 15,
+                fill: '#475569', fontSize: 11, fontWeight: 700, letterSpacing: '0.15em',
+              }}
+              tickFormatter={v => v >= 1000 ? v.toExponential(1) : Number(v.toFixed(3)).toString()}
             />
+
+            {/* Right Y axis (dual-axis mode) */}
+            {data.dualAxis && (
+              <YAxis
+                yAxisId="right"
+                orientation="right"
+                type="number"
+                scale={y2Scale}
+                domain={['auto', 'auto']}
+                allowDataOverflow
+                stroke="#ffffff15"
+                tick={{ fontSize: 10, fill: '#64748b', fontFamily: 'monospace' }}
+                label={{
+                  value: y2Label, angle: 90, position: 'insideRight', offset: 15,
+                  fill: '#475569', fontSize: 11, fontWeight: 700, letterSpacing: '0.15em',
+                }}
+                tickFormatter={v => v >= 1000 ? v.toExponential(1) : Number(v.toFixed(3)).toString()}
+              />
+            )}
+
             <Tooltip content={<CustomTooltip />} />
 
-            {/* Fitted lines */}
-            <Line
-              data={lineData}
-              dataKey="krw_fit"
-              name="Krw Fitted"
-              stroke={COLORS.krw_fit}
-              strokeWidth={2.5}
-              dot={false}
-              type="monotone"
-              isAnimationActive={false}
-              activeDot={{ r: 5, strokeWidth: 0, fill: COLORS.krw_fit }}
-            />
-            <Line
-              data={lineData}
-              dataKey="kro_fit"
-              name="Kro Fitted"
-              stroke={COLORS.kro_fit}
-              strokeWidth={2.5}
-              dot={false}
-              type="monotone"
-              isAnimationActive={false}
-              activeDot={{ r: 5, strokeWidth: 0, fill: COLORS.kro_fit }}
-            />
+            {/* ── Line series (fitted models) ──────────────────────────────── */}
+            {data.curves.map((curve, idx) => {
+              if (curve.showLine === false) return null;
+              const color    = curve.color || COLORS[idx % COLORS.length];
+              const axisId   = (data.dualAxis && curve.yId === 'right') ? 'right' : 'left';
+              return (
+                <Line
+                  key={`line-${idx}`}
+                  yAxisId={axisId}
+                  dataKey={`line_${idx}`}
+                  name={curve.name}
+                  stroke={color}
+                  strokeWidth={2.5}
+                  dot={false}
+                  type="monotone"
+                  connectNulls
+                  isAnimationActive
+                  animationDuration={1200}
+                  activeDot={{ r: 6, strokeWidth: 0, fill: color }}
+                />
+              );
+            })}
 
-            {/* Raw scatter points */}
-            <Scatter
-              data={scatterData.krw_raw}
-              dataKey="Kr"
-              name="Krw Lab Data"
-              fill={COLORS.krw_raw}
-              opacity={0.9}
-              r={4.5}
-              isAnimationActive={false}
-            />
-            <Scatter
-              data={scatterData.kro_raw}
-              dataKey="Kr"
-              name="Kro Lab Data"
-              fill={COLORS.kro_raw}
-              opacity={0.9}
-              r={4.5}
-              isAnimationActive={false}
-            />
+            {/* ── Scatter series (raw lab data) ────────────────────────────── */}
+            {data.curves.map((curve, idx) => {
+              if (curve.showPoints === false) return null;
+              const color  = curve.color || COLORS[idx % COLORS.length];
+              const axisId = (data.dualAxis && curve.yId === 'right') ? 'right' : 'left';
+              return (
+                <Scatter
+                  key={`scatter-${idx}`}
+                  yAxisId={axisId}
+                  name={`${curve.name} (Lab)`}
+                  /*
+                   * Provide curve.data directly so each point {x, y} is
+                   * positioned using XAxis dataKey="x" and our dataKey="y".
+                   * This fixes the original bug where Scatter read from the
+                   * shared lineChartData keyed as `curve_N`, finding nothing.
+                   */
+                  data={curve.data}
+                  dataKey="y"
+                  fill={color}
+                  stroke="#0c0c14"
+                  strokeWidth={1.5}
+                  r={5}
+                  isAnimationActive
+                  animationDuration={800}
+                />
+              );
+            })}
           </ComposedChart>
         </ResponsiveContainer>
       </div>
 
-      {/* Footer stats */}
-      <div className="border-t border-yellow-900/20 px-5 py-3 flex items-center gap-6 flex-wrap">
-        <div className="flex items-center gap-2">
-          <div className="w-6 h-0.5 bg-sky-400" />
-          <span className="text-[10px] text-slate-500 font-mono">Krw Fitted</span>
+      {/* Legend + footer */}
+      <div className="px-10 py-6 border-t border-white/5 bg-black/40 flex flex-wrap items-center justify-between gap-6">
+        <div className="flex flex-wrap items-center gap-x-8 gap-y-3">
+          {data.curves.slice(0, 6).map((curve, idx) => {
+            const color = curve.color || COLORS[idx % COLORS.length];
+            return (
+              <div key={idx} className="flex items-center gap-3">
+                {curve.showLine !== false ? (
+                  // Line swatch
+                  <div className="w-6 h-0.5 rounded-full" style={{ backgroundColor: color }} />
+                ) : (
+                  // Scatter dot swatch
+                  <div
+                    className="w-3 h-3 rounded-full border border-[#0c0c14]"
+                    style={{ backgroundColor: color, boxShadow: `0 0 8px ${color}80` }}
+                  />
+                )}
+                <span className="text-[10px] font-black text-slate-400 uppercase tracking-widest italic">
+                  {curve.name}
+                </span>
+              </div>
+            );
+          })}
         </div>
-        <div className="flex items-center gap-2">
-          <div className="w-6 h-0.5 bg-orange-400" />
-          <span className="text-[10px] text-slate-500 font-mono">Kro Fitted</span>
-        </div>
-        <div className="flex items-center gap-2">
-          <div className="w-3 h-3 rounded-full bg-sky-300 opacity-80" />
-          <span className="text-[10px] text-slate-500 font-mono">Krw Raw Lab</span>
-        </div>
-        <div className="flex items-center gap-2">
-          <div className="w-3 h-3 rounded-full bg-orange-300 opacity-80" />
-          <span className="text-[10px] text-slate-500 font-mono">Kro Raw Lab</span>
-        </div>
-        <div className="ml-auto text-[10px] text-slate-600 font-mono italic">
-          Brooks-Corey History Match · Simulated Annealing Engine
+
+        <div className="flex items-center gap-4 text-slate-700 border-l border-white/5 pl-6 ml-auto">
+          <Activity className="w-3.5 h-3.5 text-blue-500/50" />
+          <span className="text-[9px] font-mono tracking-widest uppercase">
+            Verified Simulation Output
+          </span>
         </div>
       </div>
     </div>

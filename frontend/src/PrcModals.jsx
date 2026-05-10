@@ -103,6 +103,71 @@ export function CookieConsent() {
   );
 }
 
+// ── ADMIN LOGIN MODAL ──
+export function AdminLoginModal({ isOpen, onLogin, onClose }) {
+  const [pin, setPin] = useState('');
+  const [error, setError] = useState(false);
+  const [loading, setLoading] = useState(false);
+
+  if (!isOpen) return null;
+
+  const handleSubmit = async () => {
+    setLoading(true);
+    setError(false);
+    const success = await onLogin(pin);
+    if (!success) {
+      setError(true);
+      setPin('');
+    }
+    setLoading(false);
+  };
+
+  return (
+    <div className="fixed inset-0 bg-black/80 backdrop-blur-sm z-[100] flex items-center justify-center p-4">
+      <div className="bg-[#0a0a0c] border border-amber-900/40 rounded-3xl p-8 max-w-sm w-full shadow-[0_0_50px_-12px_rgba(245,158,11,0.2)]">
+        <div className="flex flex-col items-center mb-8">
+          <div className="w-16 h-16 bg-amber-500/10 rounded-2xl flex items-center justify-center border border-amber-500/20 mb-4">
+            <Shield className="w-8 h-8 text-amber-500" />
+          </div>
+          <h2 className="text-xl font-black text-white tracking-tight">Admin Vault</h2>
+          <p className="text-[10px] text-slate-500 font-mono tracking-[0.2em] uppercase mt-1">Authorized Access Only</p>
+        </div>
+
+        <div className="space-y-6">
+          <div className="space-y-2">
+            <input
+              type="password"
+              value={pin}
+              onChange={e => { setPin(e.target.value); setError(false); }}
+              onKeyDown={e => e.key === 'Enter' && pin && handleSubmit()}
+              placeholder="Enter Admin PIN"
+              autoFocus
+              className={`w-full bg-black/40 border ${error ? 'border-red-500/50' : 'border-white/[0.06]'} rounded-xl px-4 py-3.5 text-center text-lg font-mono tracking-[0.5em] text-white outline-none focus:border-amber-500/50 transition-all`}
+            />
+            {error && <p className="text-[10px] text-red-400 font-bold uppercase tracking-widest text-center">Invalid Credentials</p>}
+          </div>
+
+          <div className="flex gap-3">
+            <button
+              onClick={onClose}
+              className="flex-1 bg-white/[0.03] hover:bg-white/[0.08] text-slate-400 font-bold py-3.5 rounded-xl text-[10px] uppercase tracking-[0.2em] transition-all"
+            >
+              Cancel
+            </button>
+            <button
+              onClick={handleSubmit}
+              disabled={!pin || loading}
+              className="flex-[2] bg-amber-500 hover:bg-amber-400 text-black font-black py-3.5 rounded-xl text-[10px] uppercase tracking-[0.2em] transition-all disabled:opacity-30 disabled:grayscale"
+            >
+              {loading ? 'Verifying...' : 'Unlock Vault'}
+            </button>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 // ── ANALYTICS TRACKER ──
 export function trackEvent(userEmail, eventType, eventData = '') {
   const fd = new FormData();
