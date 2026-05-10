@@ -297,7 +297,7 @@ _tls = threading.local()
 # ── GEMINI HA CLIENT ──────────────────────────────────────────────────────────
 class PRCChatAssistant:
     def __init__(self, keys: list[str]):
-        self.model_name   = "gemini-1.5-flash"
+        self.model_name   = "gemini-1.5-pro"
         self._keys        = keys
         self._current_idx = 0
         self._idx_lock    = threading.Lock()
@@ -313,7 +313,7 @@ class PRCChatAssistant:
             if not _key_healthy(key):
                 continue
             try:
-                client = genai_new.Client(api_key=key, http_options={'api_version': 'v1'})
+                client = genai_new.Client(api_key=key)
                 with self._client_lock:
                     self._client      = client
                     self._current_idx = idx
@@ -323,7 +323,7 @@ class PRCChatAssistant:
                 _logger.warning(f"[HA] Node {idx+1} init failed: {e}")
         try:
             with self._client_lock:
-                self._client = genai_new.Client(api_key=self._keys[0], http_options={'api_version': 'v1'})
+                self._client = genai_new.Client(api_key=self._keys[0])
         except Exception as e:
             _logger.error(f"[HA] Emergency fallback failed: {e}")
 
