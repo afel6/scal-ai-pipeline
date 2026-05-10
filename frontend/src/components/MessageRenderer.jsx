@@ -76,135 +76,142 @@ const CertificationSeal = () => {
   );
 };
 
+// Brace-counting JSON extractor — immune to whitespace, unicode, and multi-line JSON.
+// Returns the first complete root-level {...} object starting at position 0 of `str`,
+// or null if the object is not yet complete (streaming still in progress).
+function _extractFirstJsonObject(str) {
+  let depth = 0, inStr = false, esc = false;
+  for (let i = 0; i < str.length; i++) {
+    const c = str[i];
+    if (esc)                        { esc = false; continue; }
+    if (c === '\\' && inStr)        { esc = true;  continue; }
+    if (c === '"')                  { inStr = !inStr; continue; }
+    if (inStr)                      continue;
+    if (c === '{')                  depth++;
+    else if (c === '}' && --depth === 0) return str.slice(0, i + 1);
+  }
+  return null; // JSON not yet complete — caller should suppress raw output
+}
+
 export function renderMessageContent(text) {
   if (!text) return null;
 
   let cleanText = text.replace(/__INTERNAL_DATA_START__[\s\S]*?__INTERNAL_DATA_END__/g, '').trim();
   if (!cleanText && text.includes('__INTERNAL_DATA_START__')) return null;
 
-  const blocks = [];
-  const lines = cleanText.split('\n');
-  let currentCard = null;
-
-  lines.forEach(line => {
-    const cardMatch = line.match(/^\*\*(\d+\..*?)\*\*/);
-    if (cardMatch) {
-      if (currentCard) blocks.push(currentCard);
-      currentCard = { type: 'card', title: cardMatch[1], content: [] };
-    } else if (currentCard && line.trim()) {
-      currentCard.content.push(line);
-    } else {
-      if (currentCard) {
-        blocks.push(currentCard);
-        currentCard = null;
+  // ── PASS 1: __PRC_PLOT__ extraction ─────────────────────────────────────────
+  // MUST run on full text before any line-splitting, otherwise a marker on one
+  // line and its JSON on the next line end up in different segments and never match.
+  const afterPlot = [];
+  {
+    const segs = cleanText.split('__PRC_PLOT__');
+    if (segs[0]) afterPlot.push({ type: 'text', content: segs[0] });
+    for (let i = 1; i < segs.length; i++) {
+      const seg = segs[i];
+      const bi = seg.indexOf('{');
+      if (bi === -1) continue; // marker with no JSON yet — suppress during streaming
+      const jsonStr = _extractFirstJsonObject(seg.slice(bi));
+      if (!jsonStr) continue; // incomplete JSON — suppress raw output during streaming
+      try {
+        JSON.parse(jsonStr);
+        afterPlot.push({ type: 'plot', content: jsonStr });
+        const tail = seg.slice(bi + jsonStr.length).replace(/^\s*\n?/, '');
+        if (tail) afterPlot.push({ type: 'text', content: tail });
+      } catch {
+        afterPlot.push({ type: 'text', content: '__PRC_PLOT__' + seg }); // malformed — surface for debug
       }
-      blocks.push({ type: 'text', content: line });
     }
-  });
-  if (currentCard) blocks.push(currentCard);
+  }
 
+  // ── PASS 2: __MERMAID_START__ / __MERMAID_END__ ──────────────────────────────
+  const afterMermaid = [];
+  afterPlot.forEach(p => {
+    if (p.type !== 'text') { afterMermaid.push(p); return; }
+    const merRegex = /__MERMAID_START__([\s\S]*?)__MERMAID_END__/g;
+    let last = 0, m;
+    while ((m = merRegex.exec(p.content)) !== null) {
+      if (m.index > last) afterMermaid.push({ type: 'text', content: p.content.slice(last, m.index) });
+      afterMermaid.push({ type: 'mermaid', content: m[1].trim() });
+      last = m.index + m[0].length;
+    }
+    if (last < p.content.length) afterMermaid.push({ type: 'text', content: p.content.slice(last) });
+  });
+
+  // ── PASS 3: __PRC_DASHBOARD__ ─────────────────────────────────────────────────
+  const afterDash = [];
+  afterMermaid.forEach(p => {
+    if (p.type !== 'text') { afterDash.push(p); return; }
+    const dashRegex = /__PRC_DASHBOARD__([\s\S]*?)__PRC_DASHBOARD__/g;
+    let last = 0, m;
+    while ((m = dashRegex.exec(p.content)) !== null) {
+      if (m.index > last) afterDash.push({ type: 'text', content: p.content.slice(last, m.index) });
+      afterDash.push({ type: 'dashboard', content: m[1].trim() });
+      last = m.index + m[0].length;
+    }
+    if (last < p.content.length) afterDash.push({ type: 'text', content: p.content.slice(last) });
+  });
+
+  // ── PASS 4: Line splitting → card and image detection ────────────────────────
   const imgRegex = /!\[([^\]]*)\]\((data:[^)]+|https?:[^)]+)\)/g;
-  const parts = [];
-  
-  blocks.forEach(b => {
-    if (b.type === 'card') {
-      parts.push({ type: 'knowledge_card', title: b.title, content: b.content.join('\n') });
-      return;
-    }
-    
-    let lastIndex = 0;
-    let match;
-    const txt = b.content;
+  const finalParts = [];
+  afterDash.forEach(p => {
+    if (p.type !== 'text') { finalParts.push(p); return; }
 
-    while ((match = imgRegex.exec(txt)) !== null) {
-      if (match.index > lastIndex) parts.push({ type: 'text', content: txt.slice(lastIndex, match.index) });
-      parts.push({ type: 'img', alt: match[1], src: match[2] });
-      lastIndex = match.index + match[0].length;
-    }
-    if (lastIndex < txt.length) parts.push({ type: 'text', content: txt.slice(lastIndex) });
-  });
-
-  const mermaidParts = [];
-  parts.forEach(p => {
-    if (p.type === 'text') {
-      const merRegex = /__MERMAID_START__([\s\S]*?)__MERMAID_END__/g;
-      let lastMIndex = 0, mMatch;
-      while ((mMatch = merRegex.exec(p.content)) !== null) {
-        if (mMatch.index > lastMIndex) mermaidParts.push({ type: 'text', content: p.content.slice(lastMIndex, mMatch.index) });
-        mermaidParts.push({ type: 'mermaid', content: mMatch[1].trim() });
-        lastMIndex = mMatch.index + mMatch[0].length;
+    const lines = p.content.split('\n');
+    let currentCard = null;
+    const lineBlocks = [];
+    lines.forEach(line => {
+      const cardMatch = line.match(/^\*\*(\d+\..*?)\*\*/);
+      if (cardMatch) {
+        if (currentCard) lineBlocks.push(currentCard);
+        currentCard = { type: 'card', title: cardMatch[1], content: [] };
+      } else if (currentCard && line.trim()) {
+        currentCard.content.push(line);
+      } else {
+        if (currentCard) { lineBlocks.push(currentCard); currentCard = null; }
+        lineBlocks.push({ type: 'text', content: line });
       }
-      if (lastMIndex < p.content.length) mermaidParts.push({ type: 'text', content: p.content.slice(lastMIndex) });
-    } else mermaidParts.push(p);
-  });
+    });
+    if (currentCard) lineBlocks.push(currentCard);
 
-  const plotParts = [];
-  mermaidParts.forEach(p => {
-    if (p.type === 'text') {
-      const plotRegex = /__PRC_PLOT__\n?(\{[\s\S]*?\})(?=\s*(?:__|$|\n\n))/g;
-      let lastPIndex = 0, pMatch;
-      while ((pMatch = plotRegex.exec(p.content)) !== null) {
-        if (pMatch.index > lastPIndex) plotParts.push({ type: 'text', content: p.content.slice(lastPIndex, pMatch.index) });
-        plotParts.push({ type: 'plot', content: pMatch[1].trim() });
-        lastPIndex = pMatch.index + pMatch[0].length;
+    lineBlocks.forEach(b => {
+      if (b.type === 'card') {
+        finalParts.push({ type: 'knowledge_card', title: b.title, content: b.content.join('\n') });
+        return;
       }
-      if (lastPIndex < p.content.length) plotParts.push({ type: 'text', content: p.content.slice(lastPIndex) });
-    } else plotParts.push(p);
-  });
-
-  const dashboardParts = [];
-  plotParts.forEach(p => {
-    if (p.type === 'text') {
-      const dashRegex = /__PRC_DASHBOARD__([\s\S]*?)__PRC_DASHBOARD__/g;
-      let lastDIndex = 0, dMatch;
-      while ((dMatch = dashRegex.exec(p.content)) !== null) {
-        if (dMatch.index > lastDIndex) dashboardParts.push({ type: 'text', content: p.content.slice(lastDIndex, dMatch.index) });
-        dashboardParts.push({ type: 'dashboard', content: dMatch[1].trim() });
-        lastDIndex = dMatch.index + dMatch[0].length;
+      let last = 0, m;
+      const txt = b.content;
+      imgRegex.lastIndex = 0;
+      while ((m = imgRegex.exec(txt)) !== null) {
+        if (m.index > last) finalParts.push({ type: 'text', content: txt.slice(last, m.index) });
+        finalParts.push({ type: 'img', alt: m[1], src: m[2] });
+        last = m.index + m[0].length;
       }
-      if (lastDIndex < p.content.length) dashboardParts.push({ type: 'text', content: p.content.slice(lastDIndex) });
-    } else dashboardParts.push(p);
+      if (last < txt.length) finalParts.push({ type: 'text', content: txt.slice(last) });
+    });
   });
 
-  return dashboardParts.map((part, i) => {
+  // ── RENDER ───────────────────────────────────────────────────────────────────
+  return finalParts.map((part, i) => {
     if (part.type === 'img') return <img key={i} src={part.src} alt={part.alt} className="w-full rounded-2xl border border-white/10 my-8 shadow-2xl animate-fade-in" />;
     if (part.type === 'mermaid') return <Mermaid key={i} content={part.content} />;
     if (part.type === 'plot') return <KrCurvePlot key={i} plotData={part.content} />;
     if (part.type === 'dashboard') return (
       <div key={i} className="my-10 rounded-[2rem] border border-white/10 bg-[#050508] overflow-hidden shadow-2xl animate-fade-in h-[500px]">
-        <iframe 
-          srcDoc={`
-            <html>
-              <head>
-                <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
-                <style>
-                  body { background: #050508; color: white; margin: 0; padding: 20px; font-family: sans-serif; overflow: hidden; }
-                  canvas { max-height: 450px !important; }
-                </style>
-              </head>
-              <body>${part.content}</body>
-            </html>
-          `}
+        <iframe
+          srcDoc={`<html><head><script src="https://cdn.jsdelivr.net/npm/chart.js"></script><style>body{background:#050508;color:white;margin:0;padding:20px;font-family:sans-serif;overflow:hidden}canvas{max-height:450px!important}</style></head><body>${part.content}</body></html>`}
           className="w-full h-full border-0"
           title="PRC Dynamic Dashboard"
         />
       </div>
     );
     if (part.type === 'knowledge_card') return <KnowledgeCard key={i} title={part.title} content={part.content} />;
-    
     if (part.type === 'text') {
-      const text = part.content.trim();
-      if (!text) return null;
-      
-      if (text.toLowerCase().includes('data certified') || text.toLowerCase().includes('analysis complete')) {
-        return <CertificationSeal key={i} />;
-      }
-      
-      if (text.startsWith('###')) {
-        return <SectionHeader key={i} text={text} />;
-      }
-      
-      return <p key={i} className="mb-6 whitespace-pre-wrap font-serif leading-loose text-slate-300 opacity-80 text-[16px]">{text}</p>;
+      const txt = part.content.trim();
+      if (!txt) return null;
+      if (txt.toLowerCase().includes('data certified') || txt.toLowerCase().includes('analysis complete')) return <CertificationSeal key={i} />;
+      if (txt.startsWith('###')) return <SectionHeader key={i} text={txt} />;
+      return <p key={i} className="mb-6 whitespace-pre-wrap font-serif leading-loose text-slate-300 opacity-80 text-[16px]">{txt}</p>;
     }
     return null;
   });
