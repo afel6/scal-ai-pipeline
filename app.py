@@ -720,9 +720,14 @@ def verify_admin(authorization: str = Header(None)):
 
 @app.post("/api/admin/auth")
 async def admin_login(pin: str = Form(...)):
-    if not ADMIN_PIN or pin != ADMIN_PIN:
+    # Use ENV pin or fallback to 0608
+    target_pin = ADMIN_PIN or "0608"
+    if pin != target_pin:
+        _logger.warning(f"[ADMIN] Failed login attempt with PIN: {pin}")
         time.sleep(1) # Throttling
         raise HTTPException(status_code=401, detail="Invalid Admin PIN")
+    
+    _logger.info("[ADMIN] Successful login")
     token = _secrets.token_hex(16)
     _ADMIN_TOKENS[token] = time.time() + _ADMIN_TOKEN_TTL
     return {"token": token}
