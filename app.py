@@ -370,17 +370,18 @@ If anomalies remain unresolved: state the outstanding issue and the required PRC
 ════════════════════════════════════════════════════
 SECTION 6 — CURVE TYPE DETECTION
 ════════════════════════════════════════════════════
-Auto-detect from column names:
-  Sw + Krw + Kro                    → Relative Permeability (Brooks-Corey + LET)
-  Sw + Pc                           → Capillary Pressure (Brooks-Corey Pc model)
-  Sw + RI                           → Resistivity Index [Log-Log scale mandatory]
-  Porosity + FF                     → Formation Factor [Log-Log + Archie mandatory]
-  Pressure + Porosity + k           → Overburden Compaction [Dual-Axis: linear φ left, log k right]
-  T2 + porosity                     → NMR T2 Distribution
-  Vsp/Vtp/Vso/Vto                   → Wettability Index (Amott method)
-  Pc + IFT + k + φ                  → Leverett J-Function
-  Pressure_psia + Hg_Saturation     → *** MICP — Mercury Injection Capillary Pressure ***
-  Pc_psia + S_Hg / P + Sw_Hg       → *** MICP — Mercury Injection Capillary Pressure ***
+Auto-detect from column names and call fit_petrophysical_curve with the correct model:
+
+  Columns detected                   Tool call (mandatory)
+  ─────────────────────────────────────────────────────────────────────────
+  Sw + Krw + Kro                   → model='brooks_corey'  (or 'let' for S-shaped curves)
+  Pressure_psia + Hg_Saturation    → model='micp'  *** SEE CRITICAL RULE BELOW ***
+  Pc_psia + S_Hg  /  P + Sw_Hg    → model='micp'  *** SEE CRITICAL RULE BELOW ***
+  Sw + RI  /  Sw + Resistivity     → model='ri'    [LOG-LOG MANDATORY — Archie n fit]
+  Porosity + FF  /  phi + F        → model='ff'    [LOG-LOG MANDATORY — Archie m, a fit]
+  Sw + Pc (centrifuge/porous plate)→ model='pc_centrifuge'
+  Sw + Pc + k + phi (with IFT)    → model='jfunction'  [also pass k_md, phi_val, ift_cos_theta]
+  Pressure + Porosity + k (confin.)→ model='overburden' [Dual-Axis: linear φ, log k right]
 
 CRITICAL MICP RULE — DO NOT CONFUSE WITH Kr:
   If ANY column name contains: Hg, Mercury, MICP, Pc_psia, Pressure_psia, S_Hg, Sw_Hg:
@@ -391,6 +392,18 @@ pc=[pressure values as list], s_hg=[mercury saturation values as list].
 Distribution (PSD). You do not need to construct the plots manually.
   → Your analysis must address: Entry Pressure, Threshold Pressure, Pore Throat Radius, \
 Sorting Coefficient, and reservoir quality classification — NOT wettability crossover.
+
+CRITICAL RI / FF RULE — LOG-LOG SCALE IS MANDATORY:
+  Resistivity Index and Formation Factor plots MUST use log-log axes. \
+The model='ri' and model='ff' handlers enforce this automatically. \
+Do NOT present these curves on linear axes. The Archie equations are \
+power laws — their linearity is only visible in log-log space.
+
+MULTI-SAMPLE RULE:
+  When the uploaded file contains data from multiple core samples (different core IDs, \
+depths, or well names): call fit_petrophysical_curve ONCE PER SAMPLE, using sample_name='Core-1', \
+sample_name='Core-2', etc. Each call generates one plot. Multiple plots in a single response \
+are expected and required — do not aggregate samples into a single call.
 
 ════════════════════════════════════════════════════
 SECTION 7 — PHYSICS VALIDATION (NON-NEGOTIABLE)
@@ -460,6 +473,39 @@ Maximum Hg Saturation (Sw_Hg_max):
 
 Report the dominant pore throat radius (peak of PSD), the sorting coefficient, and the \
 reservoir quality index (RQI = 0.0314 * sqrt(k/φ) if permeability is available).
+
+Resistivity Index Interpretation (Archie: RI = Sw^-n):
+Saturation exponent n:
+  n ∈ [1.5, 2.0]  → Clean, water-wet rock; uniform wetting film; excellent Archie compliance
+  n ∈ [2.0, 2.5]  → Standard water-wet reservoir; use as baseline for Sw calculation
+  n ∈ [2.5, 3.0]  → Mixed-wet tendency; isolated brine distribution; Sw may be underestimated
+  n > 3.0          → Oil-wet or fractured system; non-Archie behavior; wettability alteration suspected
+
+Deviation of RI from Sw^-n at high Sw (near 1.0):
+  RI > 1.0 at Sw = 1.0 → Conductive mineral contamination or measurement error
+  Scatter in log-log space → Multi-modal pore system or varying wettability with depth
+
+Formation Factor Interpretation (Archie: FF = a/φ^m):
+Cementation factor m:
+  m ∈ [1.3, 1.7]  → Granular, well-sorted sandstone; high porosity-permeability correlation
+  m ∈ [1.7, 2.2]  → Consolidated sandstone or limestone; moderate cementation
+  m ∈ [2.2, 3.5]  → Vuggy carbonate or fractured rock; complex pore geometry; FF overestimates Sw
+Tortuosity factor a:
+  a ≈ 1.0          → Ideal Archie rock (textbook case; rare in real reservoirs)
+  a < 1.0          → Conductive-mineral contribution (pyrite, clay)
+  a > 1.0          → Cementation or grain contact dominance
+
+Leverett J-Function Interpretation (J = 0.21645 × Pc × sqrt(k/φ) / σcosθ):
+  J < 0.1          → Gravity-controlled capillary region; hydrocarbon column below free water level
+  J ∈ [0.1, 1.0]  → Transition zone; mixed fluid saturation; Sw gradient with depth
+  J > 1.0          → Capillary-dominated; tight rock; strong imbibition trapping
+  Collapse of J-curves from multiple samples → Universal capillary curve; facies-consistent rock
+  Non-collapse of J-curves → Facies heterogeneity; do NOT use a single Pc curve for the field model
+
+Overburden Compaction Interpretation:
+  Porosity loss > 5 p.u. per 5000 psia → Sensitive soft rock; in-situ conditions differ markedly from lab
+  Permeability decline > 1 order magnitude per 5000 psia → Stress-sensitive fracture contribution
+  Irreversible compaction (hysteresis) → Plastic deformation; reserve estimates must use in-situ porosity
 
 ════════════════════════════════════════════════════
 SECTION 9 — VISION PROTOCOL (LABORATORY EQUIPMENT ANALYSIS)
@@ -554,19 +600,34 @@ _HVIEL_TOOLS = [
             {
                 "name": "fit_petrophysical_curve",
                 "description": (
-                    "Fits raw lab data. For Kr data: pass model='brooks_corey' or 'let', sw, krw, kro arrays. "
-                    "For MICP mercury injection data: pass model='micp', pc=[pressure_psia values], "
-                    "s_hg=[mercury_saturation fraction values]. MICP auto-generates Pc curve + PSD chart."
+                    "Fits raw SCAL lab data to standard petrophysical models. Select model by curve type:\n"
+                    "  model='brooks_corey' or 'let' → Relative Permeability (pass sw, krw, kro arrays).\n"
+                    "  model='micp' → Mercury Injection (pass pc=[psia values], s_hg=[fraction values]). Auto-generates Pc + PSD.\n"
+                    "  model='ri' → Resistivity Index Archie fit (pass sw=[...], ri=[...]). Log-log plot, fits n exponent.\n"
+                    "  model='ff' → Formation Factor Archie fit (pass porosity=[...], ff=[...]). Log-log plot, fits m and a.\n"
+                    "  model='jfunction' → Leverett J-Function (pass sw=[...], pc=[psia], k_md=X, phi_val=Y, ift_cos_theta=26.5).\n"
+                    "  model='pc_centrifuge' → Capillary Pressure direct (pass sw=[...], pc=[psia values]).\n"
+                    "  model='overburden' → Compaction curves (pass pressure=[psia], porosity=[...], perm=[mD]). Dual-axis.\n"
+                    "Pass sample_name='Core-1' to label multi-sample charts."
                 ),
                 "parameters": {
                     "type": "OBJECT",
                     "properties": {
-                        "model": {"type": "STRING"},
-                        "sw":    {"type": "ARRAY", "items": {"type": "NUMBER"}},
-                        "krw":   {"type": "ARRAY", "items": {"type": "NUMBER"}},
-                        "kro":   {"type": "ARRAY", "items": {"type": "NUMBER"}},
-                        "pc":    {"type": "ARRAY", "items": {"type": "NUMBER"}},
-                        "s_hg":  {"type": "ARRAY", "items": {"type": "NUMBER"}},
+                        "model":         {"type": "STRING"},
+                        "sw":            {"type": "ARRAY", "items": {"type": "NUMBER"}},
+                        "krw":           {"type": "ARRAY", "items": {"type": "NUMBER"}},
+                        "kro":           {"type": "ARRAY", "items": {"type": "NUMBER"}},
+                        "pc":            {"type": "ARRAY", "items": {"type": "NUMBER"}},
+                        "s_hg":          {"type": "ARRAY", "items": {"type": "NUMBER"}},
+                        "ri":            {"type": "ARRAY", "items": {"type": "NUMBER"}},
+                        "ff":            {"type": "ARRAY", "items": {"type": "NUMBER"}},
+                        "porosity":      {"type": "ARRAY", "items": {"type": "NUMBER"}},
+                        "perm":          {"type": "ARRAY", "items": {"type": "NUMBER"}},
+                        "pressure":      {"type": "ARRAY", "items": {"type": "NUMBER"}},
+                        "k_md":          {"type": "NUMBER"},
+                        "phi_val":       {"type": "NUMBER"},
+                        "ift_cos_theta": {"type": "NUMBER"},
+                        "sample_name":   {"type": "STRING"},
                     },
                     "required": ["model"],
                 },
@@ -652,11 +713,11 @@ class PRCChatAssistant:
         elif name == "generate_mermaid_diagram":
             return f"__MERMAID_START__\n{args.get('content','')}\n__MERMAID_END__"
         elif name == "fit_petrophysical_curve":
-            if args.get("model") == "micp":
-                # MICP: data lives in args.pc and args.s_hg — _format_tool_response handles computation
-                return _json.dumps({"status": "micp_ready", "model": "micp",
-                                    "pc": args.get("pc", []), "s_hg": args.get("s_hg", [])})
-            data = {"model": args.get("model"), "sw": args.get("sw",[]), "krw": args.get("krw",[])}
+            model = args.get("model", "")
+            if model in ("micp", "ri", "ff", "jfunction", "pc_centrifuge", "overburden"):
+                # All analytic models: computation fully handled by _format_tool_response using args
+                return _json.dumps({"status": "ready", "model": model})
+            data = {"model": model, "sw": args.get("sw",[]), "krw": args.get("krw",[])}
             res  = SkillsEngine.run_skill("petroleum", "", "curve_fitting_skill.py", [_json.dumps(data)])
             return res.get("stdout") or res.get("error", "")
         elif name == "agentic_history_matching":
@@ -739,6 +800,169 @@ class PRCChatAssistant:
                         f"__PRC_PLOT__\n{_json.dumps(plot_psd, ensure_ascii=False)}\n\n"
                     )
 
+            # ── RESISTIVITY INDEX (Archie n fit, log-log) ──────────────────────────────
+            if name == "fit_petrophysical_curve" and args.get("model") == "ri":
+                sw_raw = args.get("sw", [])
+                ri_raw = args.get("ri", [])
+                sample = args.get("sample_name", "Core")
+                if len(sw_raw) > 1 and len(ri_raw) > 1:
+                    sw_a = np.array(sw_raw, dtype=float)
+                    ri_a = np.array(ri_raw, dtype=float)
+                    mask     = (sw_a > 0) & (ri_a > 0)
+                    log_sw   = np.log(sw_a[mask])
+                    log_ri   = np.log(ri_a[mask])
+                    n_arch   = float(-np.polyfit(log_sw, log_ri, 1)[0])
+                    n_arch   = max(1.5, min(n_arch, 3.0))
+                    sw_fit   = np.linspace(float(sw_a.min()), 1.0, 80)
+                    ri_fit   = sw_fit ** (-n_arch)
+                    plot_ri  = {
+                        "title":    f"Resistivity Index — RI vs Sw ({sample})",
+                        "xAxis":    {"label": "Water Saturation Sw (fraction)"},
+                        "yAxis":    {"label": "Resistivity Index RI (dimensionless)"},
+                        "xAxisLog": True, "yAxisLog": True,
+                        "curves": [
+                            {"name": f"RI Lab ({sample})", "showLine": False, "showPoints": True,
+                             "color": "#f59e0b",
+                             "data": [{"x": float(s), "y": float(r)} for s, r in zip(sw_a, ri_a)]},
+                            {"name": f"RI Archie  n={n_arch:.3f}", "showLine": True, "showPoints": False,
+                             "color": "#fbbf24",
+                             "data": [{"x": float(s), "y": float(r)} for s, r in zip(sw_fit, ri_fit)]},
+                        ],
+                        "metadata": {"archie": {"n": round(n_arch, 4)}},
+                    }
+                    return (
+                        f"\n\nResistivity Index analysis complete. "
+                        f"Archie saturation exponent n = {n_arch:.4f}\n\n"
+                        f"__PRC_PLOT__\n{_json.dumps(plot_ri, ensure_ascii=False)}\n\n"
+                    )
+
+            # ── FORMATION FACTOR (Archie m, a fit, log-log) ────────────────────────────
+            if name == "fit_petrophysical_curve" and args.get("model") == "ff":
+                phi_raw = args.get("porosity", [])
+                ff_raw  = args.get("ff", [])
+                sample  = args.get("sample_name", "Core")
+                if len(phi_raw) > 1 and len(ff_raw) > 1:
+                    phi_a   = np.array(phi_raw, dtype=float)
+                    ff_a    = np.array(ff_raw,  dtype=float)
+                    mask    = (phi_a > 0) & (ff_a > 0)
+                    coeffs  = np.polyfit(np.log(phi_a[mask]), np.log(ff_a[mask]), 1)
+                    m_arch  = float(max(1.3, min(-coeffs[0], 3.5)))
+                    a_arch  = float(max(0.3, min(np.exp(coeffs[1]), 2.5)))
+                    phi_fit = np.linspace(float(phi_a.min()), float(phi_a.max()), 80)
+                    ff_fit  = a_arch / (phi_fit ** m_arch)
+                    plot_ff = {
+                        "title":    f"Formation Factor — FF vs Porosity ({sample})",
+                        "xAxis":    {"label": "Porosity φ (fraction)"},
+                        "yAxis":    {"label": "Formation Factor FF (dimensionless)"},
+                        "xAxisLog": True, "yAxisLog": True,
+                        "curves": [
+                            {"name": f"FF Lab ({sample})", "showLine": False, "showPoints": True,
+                             "color": "#a78bfa",
+                             "data": [{"x": float(p), "y": float(f)} for p, f in zip(phi_a, ff_a)]},
+                            {"name": f"FF Archie  m={m_arch:.3f}  a={a_arch:.3f}", "showLine": True, "showPoints": False,
+                             "color": "#8b5cf6",
+                             "data": [{"x": float(p), "y": float(f)} for p, f in zip(phi_fit, ff_fit)]},
+                        ],
+                        "metadata": {"archie": {"m": round(m_arch, 4), "a": round(a_arch, 4)}},
+                    }
+                    return (
+                        f"\n\nFormation Factor analysis complete. "
+                        f"Archie cementation m = {m_arch:.4f}, tortuosity a = {a_arch:.4f}\n\n"
+                        f"__PRC_PLOT__\n{_json.dumps(plot_ff, ensure_ascii=False)}\n\n"
+                    )
+
+            # ── LEVERETT J-FUNCTION ────────────────────────────────────────────────────
+            if name == "fit_petrophysical_curve" and args.get("model") == "jfunction":
+                sw_raw  = args.get("sw",  [])
+                pc_raw  = args.get("pc",  [])
+                k_md    = float(args.get("k_md",          10.0))
+                phi_val = float(args.get("phi_val",        0.20))
+                ift_ct  = float(args.get("ift_cos_theta", 26.5))
+                sample  = args.get("sample_name", "Core")
+                if len(sw_raw) > 1 and len(pc_raw) > 1:
+                    sw_a  = np.array(sw_raw, dtype=float)
+                    pc_a  = np.array(pc_raw, dtype=float)
+                    # J = 0.21645 × Pc[psia] × sqrt(k[mD]/φ) / σcosθ[dyn/cm]
+                    j_arr = 0.21645 * pc_a * np.sqrt(k_md / phi_val) / ift_ct
+                    idx   = np.argsort(sw_a)
+                    plot_j = {
+                        "title": f"Leverett J-Function ({sample}  k={k_md} mD  φ={phi_val:.3f})",
+                        "xAxis": {"label": "Water Saturation Sw (fraction)"},
+                        "yAxis": {"label": "Leverett J-Function (dimensionless)"},
+                        "curves": [
+                            {"name": f"J-Function ({sample})", "showLine": True, "showPoints": True,
+                             "color": "#34d399",
+                             "data": [{"x": float(sw_a[i]), "y": float(j_arr[i])} for i in idx]},
+                        ],
+                        "metadata": {"jfunction": {"k_md": k_md, "phi": phi_val, "ift_cos_theta": ift_ct}},
+                    }
+                    return (
+                        f"\n\nLeverett J-Function computed. "
+                        f"k = {k_md} mD, φ = {phi_val:.3f}, σcosθ = {ift_ct} mN/m\n\n"
+                        f"__PRC_PLOT__\n{_json.dumps(plot_j, ensure_ascii=False)}\n\n"
+                    )
+
+            # ── CAPILLARY PRESSURE — CENTRIFUGE / POROUS PLATE ────────────────────────
+            if name == "fit_petrophysical_curve" and args.get("model") == "pc_centrifuge":
+                sw_raw = args.get("sw", [])
+                pc_raw = args.get("pc", [])
+                sample = args.get("sample_name", "Core")
+                if len(sw_raw) > 1 and len(pc_raw) > 1:
+                    sw_a = np.array(sw_raw, dtype=float)
+                    pc_a = np.array(pc_raw, dtype=float)
+                    idx  = np.argsort(sw_a)
+                    plot_pc = {
+                        "title": f"Capillary Pressure — Pc vs Sw ({sample})",
+                        "xAxis": {"label": "Water Saturation Sw (fraction)"},
+                        "yAxis": {"label": "Capillary Pressure Pc (psia)"},
+                        "curves": [
+                            {"name": f"Pc ({sample})", "showLine": True, "showPoints": True,
+                             "color": "#38bdf8",
+                             "data": [{"x": float(sw_a[i]), "y": float(pc_a[i])} for i in idx]},
+                        ],
+                    }
+                    summary = (f"Pc range: {float(pc_a.min()):.2f} – {float(pc_a.max()):.2f} psia | "
+                               f"Sw range: {float(sw_a.min()):.3f} – {float(sw_a.max()):.3f}")
+                    return (f"\n\nCapillary Pressure analysis complete. {summary}\n\n"
+                            f"__PRC_PLOT__\n{_json.dumps(plot_pc, ensure_ascii=False)}\n\n")
+
+            # ── OVERBURDEN COMPACTION (dual-axis: φ left, k right log-scale) ──────────
+            if name == "fit_petrophysical_curve" and args.get("model") == "overburden":
+                pres_raw = args.get("pressure", [])
+                phi_raw  = args.get("porosity", [])
+                perm_raw = args.get("perm",     [])
+                sample   = args.get("sample_name", "Core")
+                if len(pres_raw) > 1:
+                    pres_a  = np.array(pres_raw, dtype=float)
+                    idx     = np.argsort(pres_a)
+                    curves  = []
+                    if len(phi_raw) > 1:
+                        phi_a = np.array(phi_raw, dtype=float)
+                        curves.append({
+                            "name": f"Porosity φ ({sample})", "showLine": True, "showPoints": True,
+                            "color": "#38bdf8", "yId": "left",
+                            "data": [{"x": float(pres_a[i]), "y": float(phi_a[i])} for i in idx],
+                        })
+                    if len(perm_raw) > 1:
+                        perm_a = np.array(perm_raw, dtype=float)
+                        curves.append({
+                            "name": f"Permeability k ({sample})", "showLine": True, "showPoints": True,
+                            "color": "#fb923c", "yId": "right",
+                            "data": [{"x": float(pres_a[i]), "y": float(perm_a[i])} for i in idx],
+                        })
+                    plot_ob = {
+                        "title":         f"Overburden Compaction — φ & k vs Net Stress ({sample})",
+                        "xAxis":         {"label": "Net Confining Pressure (psia)"},
+                        "yAxis":         {"label": "Porosity φ (fraction)"},
+                        "yAxis2":        {"label": "Permeability k (mD)"},
+                        "dualAxis":      True,
+                        "yAxisRightLog": True,
+                        "curves":        curves,
+                    }
+                    summary = (f"Pressure range: {float(pres_a.min()):.0f} – {float(pres_a.max()):.0f} psia")
+                    return (f"\n\nOverburden compaction analysis complete. {summary}\n\n"
+                            f"__PRC_PLOT__\n{_json.dumps(plot_ob, ensure_ascii=False)}\n\n")
+
             tr = _json.loads(result) if isinstance(result, str) else result
             if name == "agentic_history_matching" and tr.get("success"):
                 sw, krw, kro = args.get("sw",[]), args.get("krw",[]), args.get("kro",[])
@@ -805,14 +1029,20 @@ class PRCChatAssistant:
                         "note": "History matching complete. PRC_PLOT rendered. Proceed with Phase 3 certification.",
                     }
             elif name == "fit_petrophysical_curve":
-                if isinstance(data, dict) and data.get("model") == "micp":
+                _MODEL_NOTES = {
+                    "micp":          "Pc curve and Pore Size Distribution rendered. Proceed with Entry Pressure, Threshold Pressure, and Pore Throat Sorting analysis.",
+                    "ri":            "Resistivity Index log-log plot rendered. State Archie n, compare to PRC library range n∈[1.5,3.0], interpret wettability effect.",
+                    "ff":            "Formation Factor log-log plot rendered. State Archie m and a, interpret cementation and pore geometry.",
+                    "jfunction":     "Leverett J-Function rendered. Assess J-curve shape for capillary continuity and capillary entry threshold.",
+                    "pc_centrifuge": "Capillary Pressure curve rendered. Interpret drainage vs imbibition, entry pressure, and residual saturation.",
+                    "overburden":    "Overburden compaction dual-axis plot rendered. Quantify porosity loss and permeability reduction per 1000 psia confining stress.",
+                }
+                model_key = data.get("model", "") if isinstance(data, dict) else ""
+                if model_key in _MODEL_NOTES:
                     return {
                         "status": "success",
-                        "model": "MICP",
-                        "note": (
-                            "Pc curve and Pore Size Distribution rendered in chat. "
-                            "Proceed with Entry Pressure, Threshold Pressure, and Pore Throat Sorting analysis."
-                        ),
+                        "model": model_key.upper(),
+                        "note": _MODEL_NOTES[model_key],
                     }
                 if isinstance(data, dict) and data.get("success"):
                     return {
