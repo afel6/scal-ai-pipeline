@@ -63,7 +63,6 @@ GEMINI_KEY_POOL: list[str] = list(dict.fromkeys(_GEMINI_POOL_RAW)) or [
     os.getenv("GEMINI_API_KEY", "DUMMY_KEY").strip(' \n\r\t"\'')
 ]
 
-CLAUDE_API_KEY   = os.getenv("CLAUDE_API_KEY",   "").strip()
 KB_INGEST_SECRET = os.getenv("KB_INGEST_SECRET", "").strip()
 ADMIN_PIN        = os.getenv("ADMIN_PIN",         "").strip()
 
@@ -164,58 +163,172 @@ def _key_healthy(key: str) -> bool:
 
 
 # ── SYSTEM PROMPT ─────────────────────────────────────────────────────────────
-SYSTEM_PROMPT = """You are a Senior AI Petrophysical Specialist embedded in the PRC SCAL Pipeline.
+SYSTEM_PROMPT = """You are Hviel — the Senior AI Petrophysical Specialist of the Petroleum Research Center (PRC), Libya. \
+You carry 20+ years of SCAL laboratory authority. Every response is a signed engineering deliverable.
 
-### DIRECTIVE 1 — AUTOMATIC CURVE DETECTION
-Inspect data and categorise immediately:
-  Sw + Krw + Kro          → Relative Permeability
-  Sw + Pc                 → Capillary Pressure
-  Sw + RI                 → Resistivity Index    [Log-Log mandatory]
-  Porosity + FF           → Formation Factor     [Log-Log / Archie mandatory]
-  Pressure + Porosity + k → Overburden Compaction [Dual-Axis mandatory]
-  T2 + porosity           → NMR T2
-  Vsp/Vtp/Vso/Vto         → Wettability (Amott)
-  Pc + IFT + k + φ        → J-Function
+════════════════════════════════════════════════════
+SECTION 1 — IDENTITY & VOICE
+════════════════════════════════════════════════════
+• Speak with the precision of a Principal Engineer authoring a PRC Executive Board report.
+• Every quantitative claim is anchored in a physical model, a fitted parameter, or a cited source.
+• Do not be vague. If a parameter cannot be determined, state why — and what additional data would resolve it.
+• Address anomalies directly: observe → trace root cause → recommend corrective action. Never silently smooth over bad data.
+• Units are always explicit: mD, psi, fraction (not percent), dimensionless where applicable.
+• Sign interpretations with physics: "nw = 3.4 confirms strongly water-wet character with tight pore throats" — not "this looks water-wet."
+• For conversational or conceptual questions, respond as a knowledgeable colleague: clear, concise, technically grounded.
 
-### DIRECTIVE 2 — VISUALIZATION PROTOCOL (__PRC_PLOT__ & __PRC_DASHBOARD__)
-Embed a visualization block for every dataset:
+════════════════════════════════════════════════════
+SECTION 2 — KNOWLEDGE BASE PROTOCOL (MANDATORY)
+════════════════════════════════════════════════════
+Each user message may contain a [CONTEXT: ...] block sourced from the PRC technical library \
+(API RP 40, Amott/USBM wettability standards, Brooks-Corey / LET references, PRC field studies).
 
-- **PRC_PLOT**: For standard SCAL curves. Use JSON schema: `{"curves": [...], "xAxis": {...}, "yAxis": {...}}`.
-- **PRC_DASHBOARD**: For complex, "no compaction" industrial dashboards. Return raw HTML/JS using Chart.js inside `__PRC_DASHBOARD__` tags. Example:
-  __PRC_DASHBOARD__
-  <canvas id="myChart"></canvas>
-  <script>
-    new Chart(document.getElementById('myChart'), { type: 'line', data: {...}, options: {...} });
-  </script>
-  __PRC_DASHBOARD__
+MANDATORY STEPS:
+1. Read the [CONTEXT: ...] block FIRST before forming any answer.
+2. Ground your response in that context. Cite it explicitly: "Per the PRC technical library (API RP 40 §4.3)..."
+3. If the context does not address the question, state plainly: \
+"This specific topic is not in the current PRC library — responding from reservoir engineering fundamentals."
 
-Rules:
-- showLine:true  + showPoints:false → fitted model (smooth curve only)
-- showLine:false + showPoints:true  → raw lab data (filled circles only)
-- Blue = water, Red/Orange = oil, Green = gas
-- Log-Log required for RI vs Sw and FF vs Phi
-- Dual-Axis required for Overburden (Phi left-linear, k right-log)
+════════════════════════════════════════════════════
+SECTION 3 — TOOL EXECUTION PROTOCOL (MANDATORY)
+════════════════════════════════════════════════════
+You have four tools. Use them proactively — do not describe what you could compute. Execute it.
 
-### DIRECTIVE 3 — 3-PHASE RESPONSE STRUCTURE
+RULE 1 — DATA DETECTED:
+  When the user provides Sw, Krw, Kro, Pc, RI, porosity, or permeability values:
+  → Call `fit_petrophysical_curve` or `execute_python_simulation` immediately.
+  → Do NOT ask for confirmation. PRC protocol mandates analysis on data receipt.
 
-### PHASE 1: INGESTION & AUDIT
-Source, sample ID, detected NaN values, data quality.
+RULE 2 — SIMULATION REQUEST:
+  For any Brooks-Corey or LET scenario (including sensitivity checks):
+  → Call `execute_python_simulation` with mode="1d" for standard 1D Kr curves.
+  → Use the exact parameters provided; if a parameter is unspecified, apply PRC defaults \
+(swr=0.20, snr=0.20, krw_max=0.65, kro_max=0.90, nw=2.5, no=2.5).
 
-### PHASE 2: HIGH-FIDELITY SIMULATION
-**1. [Curve Type Name]**
-Physics Model: [e.g. Archie's Law, Brooks-Corey]
-Visualization Spec: [scale types, dual-axis status, or dashboard mode]
-__PRC_PLOT__ { ... } OR __PRC_DASHBOARD__ ... __PRC_DASHBOARD__
+RULE 3 — WORKFLOW DIAGRAMS:
+  For multi-step QC protocols, history-matching workflows, or engineering decision trees:
+  → Call `generate_mermaid_diagram` with type="flowchart".
 
-### DIRECTIVE 4 — CLAUDE-STYLE CURVE ANALYTICS
-When presenting a curve, perform a "Deep Physics Audit" like an expert:
-- **Wettability**: Analyze the crossover point (Sw at Krw=Kro). If > 0.5, indicate water-wet; if < 0.5, oil-wet.
-- **Pore Structure**: Comment on the "L" (Linearity) and "T" (Tortuosity) parameters. High "n" values indicate a wide pore-throat distribution.
-- **Endpoint Audit**: Flag if Sor is unusually high (>0.35) or if Krw_max is too low for the lithology.
-- **Executive Interpretation**: Translate the curve shape into a business impact (e.g., "Expect early water breakthrough due to high mobility ratio").
+RULE 4 — NO BARE TABLES:
+  Never present a data table, parameter set, or fitted result without an accompanying plot.
+  If a tool did not auto-generate a plot, manually construct a __PRC_PLOT__ block.
 
-### PHASE 3: CERTIFICATION
-One-sentence engineering summary confirming readiness for PRC Executive Board.
+════════════════════════════════════════════════════
+SECTION 4 — VISUALIZATION FORMAT (EXACT SYNTAX)
+════════════════════════════════════════════════════
+PLOT BLOCKS — for Kr, Pc, RI, Formation Factor, Overburden, J-Function curves:
+
+__PRC_PLOT__
+{"title":"Relative Permeability — Kr vs Sw","xAxis":{"label":"Water Saturation Sw"},"yAxis":{"label":"Relative Permeability"},"curves":[{"name":"Krw (Lab)","data":[{"x":0.20,"y":0.000},{"x":0.35,"y":0.042},{"x":0.50,"y":0.148},{"x":0.65,"y":0.310},{"x":0.80,"y":0.540}],"color":"#38bdf8","showLine":false,"showPoints":true},{"name":"Krw (Brooks-Corey)","data":[{"x":0.20,"y":0.000},{"x":0.35,"y":0.038},{"x":0.50,"y":0.145},{"x":0.65,"y":0.315},{"x":0.80,"y":0.540}],"color":"#0ea5e9","showLine":true,"showPoints":false},{"name":"Kro (Lab)","data":[{"x":0.20,"y":0.900},{"x":0.35,"y":0.620},{"x":0.50,"y":0.340},{"x":0.65,"y":0.110},{"x":0.80,"y":0.000}],"color":"#fb923c","showLine":false,"showPoints":true},{"name":"Kro (Brooks-Corey)","data":[{"x":0.20,"y":0.900},{"x":0.35,"y":0.615},{"x":0.50,"y":0.342},{"x":0.65,"y":0.112},{"x":0.80,"y":0.000}],"color":"#f97316","showLine":true,"showPoints":false}]}
+
+CRITICAL SYNTAX RULES:
+• The JSON must be a single compact object on the line IMMEDIATELY following __PRC_PLOT__
+• The block must end with a blank line (\\n\\n) or the next __ marker
+• Blue  (#38bdf8 lab, #0ea5e9 fit) = water phase (Krw)
+• Orange (#fb923c lab, #f97316 fit) = oil phase (Kro)
+• Green (#10b981) = gas phase
+• showLine:false + showPoints:true  → raw lab measurements
+• showLine:true  + showPoints:false → fitted model curve
+
+MERMAID DIAGRAMS — for workflows and decision trees:
+
+__MERMAID_START__
+graph TD
+    A[Raw SCAL Data] --> B{Quality Gate}
+    B -->|Pass| C[Fit Brooks-Corey & LET]
+    B -->|Fail| D[Flag: Re-measurement Required]
+    C --> E[Physics Validation]
+    E -->|Valid| F[PRC Certified]
+__MERMAID_END__
+
+DASHBOARD BLOCKS — for multi-panel complex views (Chart.js only):
+
+__PRC_DASHBOARD__
+<canvas id="chart1" style="max-height:400px"></canvas>
+<script>new Chart(document.getElementById('chart1'),{type:'line',data:{datasets:[{label:'Krw',data:[],borderColor:'#38bdf8'}]},options:{responsive:true}});</script>
+__PRC_DASHBOARD__
+
+════════════════════════════════════════════════════
+SECTION 5 — SCAL RESPONSE STRUCTURE (MANDATORY FOR DATA ANALYSIS)
+════════════════════════════════════════════════════
+Structure every SCAL data analysis in three phases:
+
+### PHASE 1 — INGESTION & DATA AUDIT
+• Well name, sample ID, laboratory provenance
+• NaN check, Sw range validation: Sw ∈ [Swi, 1−Sor]
+• Endpoint check: Krw(Swi) = 0, Kro(1−Sor) = 0
+• Cite PRC library sources used
+
+### PHASE 2 — HIGH-FIDELITY SIMULATION & INTERPRETATION
+For each curve type detected:
+• State physics model selected and justify the choice
+• Execute the tool (mandatory — no exceptions)
+• Embed visualization inline (mandatory)
+• Parameter table: model | nw | no (or Lw/Ew/Tw, Lo/Eo/To) | R² | RMSE
+• Wettability diagnosis via crossover-Sw method
+• Pore structure interpretation (exponent analysis)
+• Business impact: mobility ratio, displacement efficiency, EOR candidacy
+
+### PHASE 3 — PRC CERTIFICATION
+One engineering sentence confirming readiness for reservoir simulation deployment.
+If anomalies remain unresolved: state the outstanding issue and the required PRC action item.
+
+════════════════════════════════════════════════════
+SECTION 6 — CURVE TYPE DETECTION
+════════════════════════════════════════════════════
+Auto-detect from column names:
+  Sw + Krw + Kro          → Relative Permeability (Brooks-Corey + LET)
+  Sw + Pc                 → Capillary Pressure (Brooks-Corey Pc model)
+  Sw + RI                 → Resistivity Index [Log-Log scale mandatory]
+  Porosity + FF           → Formation Factor [Log-Log + Archie mandatory]
+  Pressure + Porosity + k → Overburden Compaction [Dual-Axis: linear φ left, log k right]
+  T2 + porosity           → NMR T2 Distribution
+  Vsp/Vtp/Vso/Vto         → Wettability Index (Amott method)
+  Pc + IFT + k + φ        → Leverett J-Function
+
+════════════════════════════════════════════════════
+SECTION 7 — PHYSICS VALIDATION (NON-NEGOTIABLE)
+════════════════════════════════════════════════════
+Flag any violation immediately — do NOT silently correct.
+
+Kr curves:
+• Krw monotone increasing; Kro monotone decreasing across [Swi, 1−Sor]
+• Krw(Swi) = 0 exactly; Kro(1−Sor) = 0 exactly
+• Corey exponents nw, no ∈ (0, 15]; LET parameters L, E, T > 0
+• Swr + Sor < 1.0 (physically meaningful two-phase system)
+
+Capillary pressure:
+• Drainage Pc strictly positive for all Sw < 1−Sor
+• Imbibition Pc ≤ 0 at Sw = 1−Sor
+
+Resistivity / Archie:
+• Cementation exponent m ∈ [1.3, 3.5]; saturation exponent n ∈ [1.5, 3.0]
+• Resistivity Index RI = 1.0 exactly at Sw = 1.0
+
+════════════════════════════════════════════════════
+SECTION 8 — PHYSICAL INTERPRETATION LIBRARY
+════════════════════════════════════════════════════
+Wettability (from crossover Sw where Krw = Kro):
+  Sw_cross > 0.65           → Strongly water-wet
+  Sw_cross ∈ [0.55, 0.65]  → Water-wet
+  Sw_cross ∈ [0.45, 0.55]  → Mixed-wet
+  Sw_cross < 0.45           → Oil-wet
+
+Corey exponent diagnostics:
+  nw ∈ [1.5, 2.5]  → Clean water-wet sandstone; uniform pore throats
+  nw > 3.5         → Tight, heterogeneous pore network; strong capillary trapping
+  no > 4.0         → Micro-porosity trapping — carbonate indicator (common in Libyan fields)
+  nw ≈ no          → Symmetric pore structure; idealized Corey system
+
+Endpoint analysis:
+  Krw_max < 0.25   → Reservoir quality concern — significant pore blocking by irreducible water
+  Sor > 0.35       → Raise EOR screening flag: waterflooding efficiency is limited
+  Swi > 0.30       → Clay-bound water or fine-grained lithology — check NMR T2 if available
+
+Model selection guide:
+  Brooks-Corey → clean water-wet sandstones; simple pore networks; quick parametric studies
+  LET          → mixed-wet Libyan carbonate/dolomite; complex wettability; S-shaped Kr curves
+  When both are fitted, lead with the higher-R² model and comment on the discrepancy.
 """
 
 # ── GEMINI TOOL DECLARATIONS ──────────────────────────────────────────────────
@@ -297,7 +410,7 @@ _tls = threading.local()
 # ── GEMINI HA CLIENT ──────────────────────────────────────────────────────────
 class PRCChatAssistant:
     def __init__(self, keys: list[str]):
-        self.model_name   = "gemini-1.5-flash-002"
+        self.model_name   = "gemini-2.5-flash"
         self._keys        = keys
         self._current_idx = 0
         self._idx_lock    = threading.Lock()
@@ -403,6 +516,40 @@ class PRCChatAssistant:
             pass
         return f"\n\nTool `{name}` executed successfully.\n\n"
 
+    def _tool_result_summary(self, name: str, raw_result: str) -> dict:
+        """Returns a compact dict for the next-turn FunctionResponse so Gemini can interpret results."""
+        try:
+            if name == "generate_mermaid_diagram":
+                return {"status": "diagram_rendered", "note": "Mermaid diagram embedded in chat for the user."}
+            data = _json.loads(raw_result) if isinstance(raw_result, str) else {}
+            if name == "execute_python_simulation":
+                if isinstance(data, dict) and data.get("status") == "success" and data.get("mode") == "1d":
+                    pm = data.get("params", {})
+                    return {
+                        "status": "success",
+                        "model": "Brooks-Corey 1D",
+                        "parameters": {k: pm.get(k) for k in ("swr","snr","krw_max","kro_max","nw","no") if pm.get(k) is not None},
+                        "note": "Kr curves computed. PRC_PLOT rendered in chat. Proceed with physics interpretation.",
+                    }
+            elif name == "agentic_history_matching":
+                if isinstance(data, dict) and data.get("success"):
+                    return {
+                        "status": "success",
+                        "optimal_parameters": data.get("optimal_parameters", {}),
+                        "final_mse": data.get("final_mse"),
+                        "note": "History matching complete. PRC_PLOT rendered. Proceed with Phase 3 certification.",
+                    }
+            elif name == "fit_petrophysical_curve":
+                if isinstance(data, dict) and data.get("success"):
+                    return {
+                        "status": "success",
+                        "fit_params": data.get("params", {}),
+                        "note": "Curve fit complete. PRC_PLOT rendered. Proceed with wettability and endpoint interpretation.",
+                    }
+        except Exception:
+            pass
+        return {"status": "executed", "tool": name, "note": "Tool executed. Results and visualization rendered in chat."}
+
     def _build_contents(self, history: list, enriched_msg: str, f_parts: list) -> tuple[list, list[str]]:
         SUPPORTED = {"application/pdf","image/jpeg","image/png","image/gif","image/webp"}
         contents  = []
@@ -451,7 +598,11 @@ class PRCChatAssistant:
         return contents, uploaded_uris
 
     def chat(self, history: list, msg: str, kb_context: str = "", f_parts: list = [], stream: bool = False):
-        enriched = f"{msg}\n\n[CONTEXT: {kb_context}]" if kb_context else msg
+        # Structure the KB context clearly so Gemini's Section 2 protocol fires correctly
+        if kb_context:
+            enriched = f"{msg}\n\n[CONTEXT FROM PRC TECHNICAL LIBRARY:\n{kb_context}\nEND CONTEXT]"
+        else:
+            enriched = msg
         contents, uploaded_uris = self._build_contents(history, enriched, f_parts)
         _tls.last_file_uris = ",".join(uploaded_uris) if uploaded_uris else None
 
@@ -461,111 +612,205 @@ class PRCChatAssistant:
                     with self._client_lock:
                         client = self._client
                     cfg = genai_types.GenerateContentConfig(
-                        temperature=0.1,
+                        temperature=0.2,
                         tools=_HVIEL_TOOLS,
                         system_instruction=SYSTEM_PROMPT,
                     )
+
+                    # ── STREAMING PATH (multi-turn tool use) ──────────────────────────
                     if stream:
-                        for chunk in client.models.generate_content_stream(model=self.model_name, contents=contents, config=cfg):
-                            if not (chunk.candidates and chunk.candidates[0].content):
-                                continue
-                            for part in chunk.candidates[0].content.parts or []:
-                                if part.function_call:
-                                    yield f" [Executing {part.function_call.name}...] "
-                                    res = self._execute_tool(part.function_call)
-                                    yield self._format_tool_response(part.function_call.name, part.function_call.args, res)
-                                elif part.text:
-                                    yield part.text
-                    else:
-                        resp = client.models.generate_content(model=self.model_name, contents=contents, config=cfg)
+                        current_contents = list(contents)
+                        for _turn in range(4):
+                            tool_calls_in_turn: list = []  # (fc_obj, raw_result, formatted_str)
+                            model_parts_in_turn: list = []
+
+                            for chunk in client.models.generate_content_stream(
+                                model=self.model_name, contents=current_contents, config=cfg
+                            ):
+                                if not (chunk.candidates and chunk.candidates[0].content):
+                                    continue
+                                for part in chunk.candidates[0].content.parts or []:
+                                    model_parts_in_turn.append(part)
+                                    if part.function_call:
+                                        raw = self._execute_tool(part.function_call)
+                                        fmt = self._format_tool_response(
+                                            part.function_call.name,
+                                            dict(part.function_call.args or {}),
+                                            raw,
+                                        )
+                                        tool_calls_in_turn.append((part.function_call, raw, fmt))
+                                    elif part.text:
+                                        yield part.text
+
+                            # Emit formatted tool results (plots/mermaid) after text for this turn
+                            for _, _, fmt in tool_calls_in_turn:
+                                yield fmt
+
+                            if not tool_calls_in_turn:
+                                break  # Pure text turn — conversation complete
+
+                            # Append model turn + function responses, then loop for Gemini's interpretation
+                            if model_parts_in_turn:
+                                current_contents.append(
+                                    genai_types.Content(role="model", parts=model_parts_in_turn)
+                                )
+                            fn_parts = [
+                                genai_types.Part(
+                                    function_response=genai_types.FunctionResponse(
+                                        name=fc.name,
+                                        response=self._tool_result_summary(fc.name, raw),
+                                    )
+                                )
+                                for fc, raw, _ in tool_calls_in_turn
+                            ]
+                            current_contents.append(
+                                genai_types.Content(role="user", parts=fn_parts)
+                            )
+                        return
+
+                    # ── NON-STREAMING PATH (multi-turn tool use) ──────────────────────
+                    current_contents = list(contents)
+                    final = ""
+                    for _turn in range(4):
+                        resp = client.models.generate_content(
+                            model=self.model_name, contents=current_contents, config=cfg
+                        )
                         if not (resp and resp.candidates and resp.candidates[0].content):
-                            yield "Unable to generate a response. Please rephrase your query."
-                            return
-                        final = ""
+                            break
+                        tool_calls_in_turn = []
+                        model_parts_in_turn = []
                         for part in resp.candidates[0].content.parts or []:
+                            model_parts_in_turn.append(part)
                             if part.function_call:
-                                res    = self._execute_tool(part.function_call)
-                                final += self._format_tool_response(part.function_call.name, part.function_call.args, res)
+                                raw = self._execute_tool(part.function_call)
+                                fmt = self._format_tool_response(
+                                    part.function_call.name,
+                                    dict(part.function_call.args or {}),
+                                    raw,
+                                )
+                                tool_calls_in_turn.append((part.function_call, raw, fmt))
                             elif part.text:
                                 final += part.text
-                        yield final
-                        return
+                        for _, _, fmt in tool_calls_in_turn:
+                            final += fmt
+                        if not tool_calls_in_turn:
+                            break
+                        if model_parts_in_turn:
+                            current_contents.append(
+                                genai_types.Content(role="model", parts=model_parts_in_turn)
+                            )
+                        fn_parts = [
+                            genai_types.Part(
+                                function_response=genai_types.FunctionResponse(
+                                    name=fc.name,
+                                    response=self._tool_result_summary(fc.name, raw),
+                                )
+                            )
+                            for fc, raw, _ in tool_calls_in_turn
+                        ]
+                        current_contents.append(
+                            genai_types.Content(role="user", parts=fn_parts)
+                        )
+                    yield final or "Unable to generate a response. Please rephrase your query."
                     return
+
                 except Exception as e:
-                    err      = str(e).lower()
-                    is_auth  = any(x in err for x in ["401","403","unauthorized","permission"])
-                    is_rate  = any(x in err for x in ["429","resource_exhausted"])
+                    err     = str(e).lower()
+                    is_auth = any(x in err for x in ["401","403","unauthorized","permission"])
+                    is_rate = any(x in err for x in ["429","resource_exhausted"])
                     if (is_auth or is_rate) and attempt < len(self._keys) - 1:
                         self.rotate_key(is_hard_fail=is_auth)
                         if stream:
-                            yield " !!! Rotating Node !!! "
+                            yield f"\n[PRC Node Rotating — retrying...]\n"
                         continue
+                    _logger.error(f"[Hviel] Generation failed (attempt {attempt+1}): {e}")
                     raise
+
         return _generate() if stream else next(_generate(), "Error generating response.")
 
+    def generate_document_json(
+        self, file_type: str, message: str, history: list, kb_context: str, engineer: str
+    ) -> str:
+        """Call Gemini (no tools) to produce structured JSON for HvielDocEngine.build_from_json().
+        Returns raw JSON string — may have ```json fences which build_from_json strips."""
+        _SCHEMAS = {
+            "docx": (
+                '{"title":"...","subtitle":"...","author":"...","date":"DD Month YYYY",'
+                '"sections":[{"heading":"...","level":1,"paragraphs":["..."],"bullets":["..."]}],'
+                '"tables":[{"caption":"...","headers":["Col1","Col2"],"rows":[["val1","val2"]]}]}'
+            ),
+            "xlsx": (
+                '{"title":"...","sheets":[{"name":"Sheet Name",'
+                '"headers":["Parameter (unit)","Value"],"rows":[["Swi","0.22"]],'
+                '"column_widths":[24,16]}]}'
+            ),
+            "pptx": (
+                '{"title":"...","subtitle":"...","slides":['
+                '{"title":"...","content":"...","bullets":["..."]}]}'
+            ),
+            "pdf": (
+                '{"title":"...","author":"...","sections":['
+                '{"heading":"...","paragraphs":["..."],"bullets":["..."]}],'
+                '"tables":[{"caption":"...","headers":["Col1"],"rows":[["val1"]]}]}'
+            ),
+        }
+        schema = _SCHEMAS.get(file_type, _SCHEMAS["docx"])
 
-# ── ANTHROPIC DOCUMENT ENGINE ─────────────────────────────────────────────────
-class AnthropicAssistant:
-    _DOCX_SCHEMA = """Return ONLY valid JSON (no markdown fences, no explanation):
-{
-  "title": "Document Title",
-  "subtitle": "Optional subtitle",
-  "author": "Engineer name",
-  "sections": [
-    {
-      "heading": "Section Name",
-      "level": 1,
-      "paragraphs": ["Paragraph text or __PRC_PLOT__ {...}"],
-      "bullets": ["bullet point"]
-    }
-  ],
-  "tables": [
-    {"caption": "Table caption", "headers": ["Col1","Col2"], "rows": [["v1","v2"]]}
-  ]
-}
-Rules:
-1. Max 3 data rows per table.
-2. NO raw markdown tables inside paragraphs — use the tables array.
-3. level 1 = major section, level 2 = subsection.
-4. Embed charts as: __PRC_PLOT__ followed by a JSON object on the same line."""
+        hist_text = "".join(
+            f"{h['role'].upper()}: {h.get('text','')[:600]}\n\n" for h in history[-8:]
+        )
+        kb_section = f"\nKNOWLEDGE BASE:\n{kb_context[:2500]}\n" if kb_context else ""
 
-    _EXCEL_SCHEMA = """Return ONLY valid JSON:
-{
-  "title": "Spreadsheet Title",
-  "sheets": [
-    {"name": "Sheet Name", "headers": ["Col1 (unit)","Col2 (unit)"], "rows": [["v1","v2"]]}
-  ]
-}
-Rules: Full numerical precision. Max 5 data rows. Multiple sheets if appropriate."""
+        system_doc = (
+            f"You are Hviel — PRC Senior AI Petrophysical Specialist, Petroleum Research Center, Libya.\n"
+            f"Generate a professional {file_type.upper()} export for the PRC.\n"
+            f"CRITICAL: Respond with ONLY valid JSON. No markdown fences. No explanation. Raw JSON only.\n\n"
+            f"JSON SCHEMA (use this structure exactly):\n{schema}\n\n"
+            f"CONTENT RULES:\n"
+            f"- Populate with real petrophysical data drawn from the conversation (Sw, Kr, Pc, Archie, etc.)\n"
+            f"- Use engineering units throughout: mD, fraction, psi, m TVDSS, dimensionless\n"
+            f"- Include Executive Summary, Methodology, Results & Interpretation, and Conclusions sections\n"
+            f"- Tables must contain realistic numerical SCAL data — no placeholder values\n"
+            f"- Minimum 4 sections (docx/pdf) or 2 data sheets (xlsx) with substantive content\n"
+            f"- author field: \"{engineer}\"\n"
+            f"- Never use '...' or '[insert value]' — derive everything from the conversation\n"
+        )
 
-    @staticmethod
-    def _build_context(history: list, msg: str, kb_context: str) -> str:
-        ctx = f"--- KNOWLEDGE BASE ---\n{kb_context}\n---\n\n" if kb_context else ""
-        ctx += "--- CONVERSATION HISTORY ---\n"
-        for h in history[-6:]:
-            ctx += f"{h['role'].upper()}: {h.get('text','')[:600]}\n\n"
-        return ctx + f"--- END ---\n\nUSER REQUEST: {msg}"
+        user_content = (
+            f"CONVERSATION HISTORY:\n{hist_text}"
+            f"{kb_section}\n"
+            f"DOCUMENT REQUEST: {message}"
+        )
 
-    @staticmethod
-    def _call(system: str, msg: str, history: list, kb_context: str) -> str:
-        if not CLAUDE_API_KEY:
-            raise ValueError("CLAUDE_API_KEY environment variable is not set.")
-        import anthropic
-        client = anthropic.Anthropic(api_key=CLAUDE_API_KEY)
-        resp   = client.messages.create(
-            model="claude-3-5-sonnet-20241022", max_tokens=1500, system=system,
-            messages=[{"role":"user","content": AnthropicAssistant._build_context(history, msg, kb_context)}])
-        return resp.content[0].text
+        cfg = genai_types.GenerateContentConfig(temperature=0.1, system_instruction=system_doc)
+        contents = [genai_types.Content(role="user", parts=[genai_types.Part(text=user_content)])]
 
-    @classmethod
-    def generate_docx(cls, history, msg, kb_context) -> str:
-        system = "You are an elite petrophysics report writer for the PRC. " + cls._DOCX_SCHEMA
-        return cls._call(system, msg, history, kb_context)
+        with self._client_lock:
+            client = self._client
 
-    @classmethod
-    def generate_excel(cls, history, msg, kb_context) -> str:
-        system = "You are an elite data engineer for the PRC. " + cls._EXCEL_SCHEMA
-        return cls._call(system, msg, history, kb_context)
+        for attempt in range(len(self._keys)):
+            try:
+                resp = client.models.generate_content(
+                    model=self.model_name, contents=contents, config=cfg
+                )
+                if resp and resp.candidates and resp.candidates[0].content:
+                    raw = "".join(
+                        p.text for p in (resp.candidates[0].content.parts or []) if p.text
+                    )
+                    if raw.strip():
+                        return raw.strip()
+                raise ValueError("Empty response from model")
+            except Exception as e:
+                err     = str(e).lower()
+                is_auth = any(x in err for x in ["401","403","unauthorized","permission"])
+                is_rate = any(x in err for x in ["429","resource_exhausted"])
+                if (is_auth or is_rate) and attempt < len(self._keys) - 1:
+                    self.rotate_key(is_hard_fail=is_auth)
+                    with self._client_lock:
+                        client = self._client
+                    continue
+                raise
+        raise ValueError("Gemini document generation failed after all retries")
 
 
 # ── RAG / KNOWLEDGE BASE ──────────────────────────────────────────────────────
@@ -805,31 +1050,30 @@ async def chat_stream(
     
     async def _producer():
         try:
-            # yield first chunk as session metadata immediately to keep connection alive
-            yield f"data: {_json.dumps({'session_id': sid})}\n\n"
-            
-            # Now do the heavy lifting inside the stream
+            # Send session metadata first so the client sets the session ID
+            yield f"data: {_json.dumps({'type': 'session', 'session_id': sid})}\n\n"
+
             kb_ctx = await KnowledgeBase.search_async(message)
             db("INSERT INTO m (sid,role,text,ts,user_email) VALUES (?,?,?,?,?)", (sid, "user", message, time.time(), email))
-            
-            # history for context
-            hist_rows = db("SELECT role, text FROM m WHERE sid=? ORDER BY id LIMIT 10", (sid,))
-            history   = [{"role": r, "text": t} for r, t in hist_rows]
-            
+
+            # Fetch the most-recent 10 messages (descending), then reverse to chronological order
+            hist_rows = db("SELECT role, text FROM m WHERE sid=? ORDER BY id DESC LIMIT 10", (sid,))
+            history   = list(reversed([{"role": r, "text": t} for r, t in hist_rows]))
+
             full_reply = ""
             for chunk in assistant.chat(history, message, kb_context=kb_ctx, stream=True):
                 if chunk:
                     full_reply += chunk
-                    yield f"data: {chunk}\n\n"
-            
+                    yield f"data: {_json.dumps({'type': 'token', 'text': chunk})}\n\n"
+
             if full_reply:
                 db("INSERT INTO m (sid,role,text,ts,user_email) VALUES (?,?,?,?,?)", (sid, "model", full_reply, time.time(), email))
-            
-            yield "data: [DONE]\n\n"
+
+            yield f"data: {_json.dumps({'type': 'done'})}\n\n"
         except Exception as e:
             _logger.error(f"[SSE] Stream error: {e}")
-            yield f"data: [Error: {str(e)}]\n\n"
-            yield "data: [DONE]\n\n"
+            yield f"data: {_json.dumps({'type': 'error', 'msg': str(e)})}\n\n"
+            yield f"data: {_json.dumps({'type': 'done'})}\n\n"
 
     return StreamingResponse(
         _producer(), 
@@ -839,31 +1083,90 @@ async def chat_stream(
 
 @app.post("/api/chat")
 async def handle(
-    message:       str             = Form(...),
-    session_id:    Optional[str]   = Form(None),
-    user_email:    Optional[str]   = Form(None),
+    message:       str              = Form(...),
+    session_id:    Optional[str]    = Form(None),
+    user_email:    Optional[str]    = Form(None),
+    engineer_name: Optional[str]    = Form(None),
     files:         list[UploadFile] = File(default=[]),
 ):
-    sid = session_id or str(uuid.uuid4())
-    email = user_email.lower().strip() if user_email else None
+    sid      = session_id or str(uuid.uuid4())
+    email    = user_email.lower().strip() if user_email else None
+    engineer = (engineer_name or "PRC Engineering Staff").strip()
+
     f_parts = []
     for file in files:
         b = await file.read()
         f_parts.append((b, file.content_type))
-    
+
     kb_ctx = await KnowledgeBase.search_async(message)
-    db("INSERT INTO m (sid,role,text,ts,user_email) VALUES (?,?,?,?,?)", (sid, "user", message, time.time(), email))
-    
+    db("INSERT INTO m (sid,role,text,ts,user_email) VALUES (?,?,?,?,?)",
+       (sid, "user", message, time.time(), email))
+
+    # ── Document generation path (Gemini JSON → HvielDocEngine file) ──────────
+    file_type = hviel_engine._detect_type(message) if hviel_engine else None
+    if file_type:
+        try:
+            hist_rows = db("SELECT role, text FROM m WHERE sid=? ORDER BY id DESC LIMIT 10", (sid,))
+            history   = list(reversed([{"role": r, "text": t} for r, t in hist_rows]))
+
+            # Run blocking Gemini call + file I/O in a thread so we don't block the event loop
+            def _build_file():
+                raw_json = assistant.generate_document_json(
+                    file_type, message, history, kb_ctx, engineer
+                )
+                return hviel_engine.build_from_json(raw_json, file_type, engineer=engineer)
+
+            filepath = await asyncio.get_event_loop().run_in_executor(None, _build_file)
+            basename = os.path.basename(filepath)
+            dl_url   = f"/api/download/{basename}"
+
+            type_labels = {"docx": "Word Document", "xlsx": "Excel Spreadsheet",
+                           "pptx": "PowerPoint Presentation", "pdf": "PDF Report"}
+            reply = (
+                f"### PRC {type_labels.get(file_type, file_type.upper())} Ready\n\n"
+                f"Your professional export has been compiled from the current session analysis. "
+                f"Click **Download** to retrieve the file."
+            )
+            db("INSERT INTO m (sid,role,text,url,ts,user_email,fname) VALUES (?,?,?,?,?,?,?)",
+               (sid, "model", reply, dl_url, time.time(), email, basename))
+
+            return {
+                "status":          "success",
+                "session_id":      sid,
+                "reply":           reply,
+                "is_report_ready": True,
+                "download_url":    dl_url,
+                "doc_type":        "excel" if file_type == "xlsx" else file_type,
+            }
+        except Exception as e:
+            _logger.error(f"[DocGen] {file_type} generation failed: {e}")
+            reply = (
+                f" Document generation failed: {str(e)[:300]}. "
+                f"Please retry or contact PRC support."
+            )
+            db("INSERT INTO m (sid,role,text,ts,user_email) VALUES (?,?,?,?,?)",
+               (sid, "model", reply, time.time(), email))
+            return {"status": "error", "session_id": sid, "reply": reply}
+
+    # ── Standard chat path (Gemini with file analysis) ────────────────────────
     resp = assistant.chat([], message, kb_ctx, f_parts)
-    db("INSERT INTO m (sid,role,text,ts,user_email) VALUES (?,?,?,?,?)", (sid, "model", resp, time.time(), email))
-    
-    return {"status":"success","session_id":sid,"reply":resp}
+    db("INSERT INTO m (sid,role,text,ts,user_email) VALUES (?,?,?,?,?)",
+       (sid, "model", resp, time.time(), email))
+    return {"status": "success", "session_id": sid, "reply": resp}
+
+
+# Resolved once at startup; files are written to CWD by HvielDocEngine(output_dir=".")
+import pathlib as _pathlib
+_DOWNLOAD_ROOT = _pathlib.Path(".").resolve()
 
 @app.get("/api/download/{filename:path}")
 async def dl(filename: str):
-    path = os.path.abspath(os.path.basename(filename))
-    if not os.path.isfile(path): return {"error": "File not found"}
-    return FileResponse(path)
+    target = (_DOWNLOAD_ROOT / _pathlib.Path(filename).name).resolve()
+    if not str(target).startswith(str(_DOWNLOAD_ROOT)):
+        raise HTTPException(status_code=403, detail="Access denied")
+    if not target.is_file():
+        raise HTTPException(status_code=404, detail="File not found")
+    return FileResponse(str(target))
 
 # ── FRONTEND SERVING (SPA) ───────────────────────────────────────────────────
 _DIST_DIR = os.path.join(os.path.dirname(__file__), "frontend", "dist")

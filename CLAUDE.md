@@ -160,8 +160,9 @@ async def download_file(filename: str):
     return FileResponse(str(target))
 ```
 
-**Status:** Patch pattern documented. Verify implementation in `app.py` at the
-`/api/download/` route before next external demo or user-facing deployment.
+**Status:** RESOLVED 2026-05-10. Implemented in `app.py` — `_DOWNLOAD_ROOT` resolved once at startup,
+`_pathlib.Path(filename).name` strips any directory component, and `str(target).startswith(str(_DOWNLOAD_ROOT))`
+enforces containment. Only bare filenames in the process CWD are served.
 
 ---
 

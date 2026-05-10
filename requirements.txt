@@ -5,8 +5,8 @@ python-multipart>=0.0.12   # required for FastAPI Form() and File() uploads
 
 # ── AI / LLM SDKs ─────────────────────────────────────────────────────────────
 # google-generativeai (legacy SDK) intentionally removed — we use google-genai only
+# anthropic intentionally removed — document generation uses Gemini + local python-docx/openpyxl
 google-genai>=1.16.0
-anthropic>=0.40.0
 
 # ── Data & numerics ───────────────────────────────────────────────────────────
 numpy>=1.26.0
