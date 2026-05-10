@@ -803,7 +803,7 @@ async def chat_stream(
 
     async def _producer():
         # yield first chunk as session metadata
-        yield _json.dumps({"session_id": sid}) + "\n"
+        yield f"data: {_json.dumps({'session_id': sid})}\n\n"
         
         # history for context
         hist_rows = db("SELECT role, text FROM m WHERE sid=? ORDER BY id LIMIT 10", (sid,))
@@ -812,14 +812,14 @@ async def chat_stream(
         full_reply = ""
         try:
             for chunk in assistant.chat(history, message, kb_ctx, stream=True):
-                full_reply += chunk
-                yield chunk
-        except Exception as e:
-            _logger.error(f"[SSE] Stream error: {e}")
-            yield f" [Error: {str(e)}]"
-        
-        db("INSERT INTO m (sid,role,text,ts,user_email) VALUES (?,?,?,?,?)", (sid, "model", full_reply, time.time(), email))
-        yield "[DONE]"
+                if chunk:
+                    full_reply += chunk
+                    yield f"data: {chunk}\n\n"
+            
+            if full_reply:
+                db("INSERT INTO m (sid,role,text,ts,user_email) VALUES (?,?,?,?,?)", (sid, "model", full_reply, time.time(), email))
+            
+            yield "data: [DONE]\n\n"
 
     return StreamingResponse(_producer(), media_type="text/event-stream")
 
