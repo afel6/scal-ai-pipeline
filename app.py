@@ -798,19 +798,20 @@ async def chat_stream(
     sid   = session_id or str(uuid.uuid4())
     email = user_email.lower().strip() if user_email else None
     
-    kb_ctx = await KnowledgeBase.search_async(message)
-    db("INSERT INTO m (sid,role,text,ts,user_email) VALUES (?,?,?,?,?)", (sid, "user", message, time.time(), email))
-
     async def _producer():
-        # yield first chunk as session metadata
-        yield f"data: {_json.dumps({'session_id': sid})}\n\n"
-        
-        # history for context
-        hist_rows = db("SELECT role, text FROM m WHERE sid=? ORDER BY id LIMIT 10", (sid,))
-        history   = [{"role": r, "text": t} for r, t in hist_rows]
-        
-        full_reply = ""
         try:
+            # yield first chunk as session metadata immediately to keep connection alive
+            yield f"data: {_json.dumps({'session_id': sid})}\n\n"
+            
+            # Now do the heavy lifting inside the stream
+            kb_ctx = await KnowledgeBase.search_async(message)
+            db("INSERT INTO m (sid,role,text,ts,user_email) VALUES (?,?,?,?,?)", (sid, "user", message, time.time(), email))
+            
+            # history for context
+            hist_rows = db("SELECT role, text FROM m WHERE sid=? ORDER BY id LIMIT 10", (sid,))
+            history   = [{"role": r, "text": t} for r, t in hist_rows]
+            
+            full_reply = ""
             for chunk in assistant.chat(history, message, kb_ctx, stream=True):
                 if chunk:
                     full_reply += chunk
@@ -825,7 +826,11 @@ async def chat_stream(
             yield f"data: [Error: {str(e)}]\n\n"
             yield "data: [DONE]\n\n"
 
-    return StreamingResponse(_producer(), media_type="text/event-stream")
+    return StreamingResponse(
+        _producer(), 
+        media_type="text/event-stream",
+        headers={"X-Accel-Buffering": "no", "Cache-Control": "no-cache"}
+    )
 
 @app.post("/api/chat")
 async def handle(
