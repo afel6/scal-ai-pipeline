@@ -817,7 +817,7 @@ async def chat_stream(
             history   = [{"role": r, "text": t} for r, t in hist_rows]
             
             full_reply = ""
-            for chunk in assistant.chat(history, message, kb_ctx, stream=True):
+            for chunk in assistant.chat(history, message, kb_context=kb_ctx, stream=True):
                 if chunk:
                     full_reply += chunk
                     yield f"data: {chunk}\n\n"
