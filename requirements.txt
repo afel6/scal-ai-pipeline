@@ -35,3 +35,4 @@ psycopg2-binary>=2.9.9     # PostgreSQL driver; SQLite is stdlib (no extra dep)
 # ── Utilities ─────────────────────────────────────────────────────────────────
 python-dotenv>=1.0.0
 pydantic>=2.0.0
+aiofiles>=24.1.0

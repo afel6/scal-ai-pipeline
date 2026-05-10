@@ -17,6 +17,7 @@ import pandas as pd
 
 from fastapi import FastAPI, UploadFile, File, Form, Request, HTTPException, Header, Depends
 from fastapi.responses import FileResponse, StreamingResponse
+from fastapi.staticfiles import StaticFiles
 from fastapi.middleware.cors import CORSMiddleware
 from bs4 import BeautifulSoup
 from docx import Document
@@ -690,15 +691,6 @@ except Exception as _he:
 @app.get("/health")
 def health(): return {"status": "ok", "db": "postgres" if _PG_AVAILABLE else "sqlite"}
 
-@app.get("/")
-def root():
-    return {
-        "status": "online",
-        "system": "PRC SCAL AI Pipeline",
-        "engine": "Petrophysical Engine v14",
-        "message": "Backend is active and ready for engineering simulation."
-    }
-
 @app.get("/api/diag")
 def diag():
     with _FAILED_KEYS_LOCK: snap = dict(_FAILED_KEYS)
@@ -809,6 +801,30 @@ async def dl(filename: str):
     path = os.path.abspath(os.path.basename(filename))
     if not os.path.isfile(path): return {"error": "File not found"}
     return FileResponse(path)
+
+# ── FRONTEND SERVING (SPA) ───────────────────────────────────────────────────
+_DIST_DIR = os.path.join(os.path.dirname(__file__), "frontend", "dist")
+
+if os.path.exists(_DIST_DIR):
+    app.mount("/assets", StaticFiles(directory=os.path.join(_DIST_DIR, "assets")), name="assets")
+
+@app.get("/{full_path:path}")
+async def serve_spa(full_path: str):
+    # API 404s
+    if full_path.startswith("api/"):
+        raise HTTPException(status_code=404, detail="API endpoint not found")
+    
+    # Static files (prc_logo.jpg, etc.)
+    static_file = os.path.join(_DIST_DIR, full_path)
+    if os.path.isfile(static_file):
+        return FileResponse(static_file)
+    
+    # SPA routing -> index.html
+    index_html = os.path.join(_DIST_DIR, "index.html")
+    if os.path.exists(index_html):
+        return FileResponse(index_html)
+    
+    return {"error": "Frontend build not found. Run 'npm run build' in frontend directory."}
 
 if __name__ == "__main__":
     import uvicorn
