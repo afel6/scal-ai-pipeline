@@ -2,7 +2,7 @@
 // Fixes: yAxisId (was yId) · Scatter data binding (own data prop + dataKey="y") ·
 //        chartData split by series type · Legend import removed
 
-import React, { useMemo } from 'react';
+import React, { useMemo, useState, useEffect } from 'react';
 import {
   Line, Scatter,
   XAxis, YAxis, CartesianGrid, Tooltip,
@@ -53,6 +53,12 @@ export default function KrPlot({ content }) {
   // Scatter series use their own curve.data prop directly — this prevents
   // the Recharts bug where Scatter would read dataKey from the merged xMap
   // instead of its own data array.
+  const [visible, setVisible] = useState(false);
+  useEffect(() => {
+    const id = requestAnimationFrame(() => setVisible(true));
+    return () => cancelAnimationFrame(id);
+  }, []);
+
   const { lineChartData, lineCurves, scatterCurves } = useMemo(() => {
     if (!data?.curves) return { lineChartData: [], lineCurves: [], scatterCurves: [] };
 
@@ -95,7 +101,7 @@ export default function KrPlot({ content }) {
   const y2Scale= data.yAxis2?.type  === 'log' ? 'log' : 'number';
 
   return (
-    <div className="my-12 rounded-[2.5rem] border border-white/5 bg-[#050508] shadow-[0_32px_64px_-16px_rgba(0,0,0,0.9)] overflow-hidden animate-fade-in group hover:border-white/10 transition-all duration-700">
+    <div className={`chart-container ${visible ? 'entered' : 'entering'} my-12 rounded-[2.5rem] border border-white/5 bg-[#050508] shadow-[0_32px_64px_-16px_rgba(0,0,0,0.9)] overflow-hidden group hover:border-white/10 transition-all duration-700`}>
 
       {/* Header */}
       <div className="px-10 py-8 border-b border-white/5 bg-gradient-to-b from-white/[0.03] to-transparent flex flex-col sm:flex-row items-start sm:items-end justify-between gap-6">
@@ -297,6 +303,28 @@ export default function KrPlot({ content }) {
           </span>
         </div>
       </div>
+
+      {/* Physics audit card — rendered when backend injects metadata.physics_audit */}
+      {data.metadata?.physics_audit && (() => {
+        const a = data.metadata.physics_audit;
+        const badgeClass = a.score >= 95 ? 'pass' : a.score >= 60 ? 'warn' : 'fail';
+        return (
+          <div className="physics-audit-card mx-10 mb-8">
+            <div className="flex items-center justify-between mb-2">
+              <span className="text-[10px] font-black text-slate-500 uppercase tracking-[0.25em]">
+                Physics Health Audit · {a.rules_checked} rules checked
+              </span>
+              <span className={`score-badge ${badgeClass}`}>{a.score}%</span>
+            </div>
+            <p className="text-[10px] text-slate-400 font-mono mb-2 leading-relaxed">{a.summary}</p>
+            {a.violations.map((v, i) => (
+              <div key={i} className="violation-row">
+                [{v.severity}] {v.rule} — {v.detail}
+              </div>
+            ))}
+          </div>
+        );
+      })()}
     </div>
   );
 }

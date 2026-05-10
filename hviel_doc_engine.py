@@ -17,7 +17,10 @@ Author: Built for Hviel / PRC Libya
 
 import os
 import json
+import logging
 import time
+
+_logger = logging.getLogger("hviel-doc")
 from datetime import datetime
 
 # ── File builders ──
@@ -124,7 +127,7 @@ class HvielDocEngine:
             buf.seek(0)
             return buf
         except Exception as e:
-            print(f"[HvielDocEngine] Chart Error: {e}")
+            _logger.error("Chart render failed: %s", e)
             return None
 
     # ─────────────────────────────────────────
@@ -302,7 +305,7 @@ class HvielDocEngine:
                 text = text[4:].strip()
             return json.loads(text)
         except Exception as e:
-            print(f'[HvielDocEngine] Claude error: {e}')
+            _logger.error("Claude API call failed: %s", e)
             return None
 
     # ════════════════════════════════════════════════════════
@@ -484,7 +487,7 @@ class HvielDocEngine:
                             cr.italic = True; cr.font.size = Pt(9); cr.font.color.rgb = GRAY_RGB
                             continue # Skip adding the raw JSON as a paragraph
                     except Exception as pe:
-                        print(f"[HvielDocEngine] Skip plot injection: {pe}")
+                        _logger.warning("Skipping plot injection: %s", pe)
 
                 if '|' in para_str and '---' in para_str and '\n' in para_str.strip():
                     # Hallucination detected! Claude put a markdown table in a paragraph.

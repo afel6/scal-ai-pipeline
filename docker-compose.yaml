@@ -10,9 +10,9 @@ services:
     volumes:
       - prc_db_data:/var/lib/postgresql/data
     ports:
-      - "5432:5432"
+      - "127.0.0.1:5432:5432"  # loopback-only — not exposed to LAN/internet
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U prc_user -d prc_hub"]
+      test: ["CMD-SHELL", "pg_isready -U ${DB_POSTGRES_USER:-prc_user} -d ${DB_POSTGRES_DATABASE:-prc_hub}"]
       interval: 10s
       timeout: 5s
       retries: 5
@@ -54,6 +54,26 @@ services:
     networks:
       - prc-net
 
+  # FastAPI backend — waits for postgres to pass its healthcheck before starting
+  app:
+    build: .
+    container_name: prc-app
+    restart: unless-stopped
+    ports:
+      - "8000:8000"
+    environment:
+      - DATABASE_URL=postgresql://${DB_POSTGRES_USER:-prc_user}:${DB_POSTGRES_PASSWORD:-prc_password_1509}@postgres:5432/${DB_POSTGRES_DATABASE:-prc_hub}
+      - GEMINI_API_KEY=${GEMINI_API_KEY}
+      - KB_INGEST_PASSWORD=${KB_INGEST_PASSWORD}
+    volumes:
+      # Persistent volume for chat_history.db — survives container restarts and rebuilds
+      - app_data:/app/data
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks:
+      - prc-net
+
 networks:
   prc-net:
     driver: bridge
@@ -61,3 +81,4 @@ networks:
 volumes:
   prc_db_data:
   n8n_data:
+  app_data:   # SQLite chat_history.db persistence

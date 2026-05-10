@@ -146,3 +146,208 @@ body {
   transform: scale(0.96);
   box-shadow: 0 2px 12px rgba(251, 191, 36, 0.2);
 }
+
+
+/* ══════════════════════════════════════════════════════════════════════════
+   PREMIUM DARK MODE — SOVEREIGN FINISH LINE EDITION
+   All surfaces use CSS tokens; no inline rgba() on glass panels.
+   ══════════════════════════════════════════════════════════════════════════ */
+
+/* ── Design Token Extensions ────────────────────────────────────────────── */
+:root {
+  --prc-glass-sidebar:   rgba(10, 10, 14, 0.82);
+  --prc-glass-panel:     rgba(255, 255, 255, 0.028);
+  --prc-glass-hover:     rgba(255, 255, 255, 0.044);
+  --prc-gold-glow:       rgba(255, 215, 0,  0.14);
+  --prc-gold-glow-strong:rgba(255, 215, 0,  0.28);
+  --prc-border-gold:     rgba(255, 215, 0,  0.18);
+  --prc-border-focus:    rgba(255, 215, 0,  0.45);
+  --prc-shadow-depth:    0 24px 64px rgba(0, 0, 0, 0.72), 0 4px 16px rgba(0, 0, 0, 0.48);
+  --prc-transition-fast: 0.18s cubic-bezier(0.16, 1, 0.3, 1);
+  --prc-transition-med:  0.32s cubic-bezier(0.16, 1, 0.3, 1);
+  --prc-transition-slow: 0.52s cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+/* ── Sidebar Glassmorphism ───────────────────────────────────────────────── */
+.sidebar-glass {
+  background:          var(--prc-glass-sidebar);
+  backdrop-filter:     blur(32px) saturate(1.8) brightness(0.95);
+  -webkit-backdrop-filter: blur(32px) saturate(1.8) brightness(0.95);
+  border-right:        1px solid var(--prc-border-gold);
+  box-shadow:          var(--prc-shadow-depth),
+                       inset 1px 0 0 rgba(255, 215, 0, 0.04);
+  transition:          box-shadow var(--prc-transition-med),
+                       border-color var(--prc-transition-med);
+}
+.sidebar-glass:hover {
+  border-right-color: var(--prc-border-focus);
+  box-shadow:         var(--prc-shadow-depth),
+                      inset 1px 0 0 rgba(255, 215, 0, 0.08),
+                      4px 0 32px var(--prc-gold-glow);
+}
+
+/* ── Panel Glassmorphism (modals, cards, tool results) ──────────────────── */
+.panel-glass {
+  background:          var(--prc-glass-panel);
+  backdrop-filter:     blur(24px) saturate(1.6);
+  -webkit-backdrop-filter: blur(24px) saturate(1.6);
+  border:              1px solid var(--prc-border);
+  border-radius:       12px;
+  transition:          background var(--prc-transition-fast),
+                       border-color var(--prc-transition-fast),
+                       box-shadow var(--prc-transition-fast);
+}
+.panel-glass:hover {
+  background:    var(--prc-glass-hover);
+  border-color:  var(--prc-border-gold);
+  box-shadow:    0 0 0 1px var(--prc-border-gold),
+                 0 8px 32px rgba(0, 0, 0, 0.4);
+}
+
+/* ── Chart Container Transitions (wrapper only — data isAnimationActive=false) */
+.chart-container {
+  transition: opacity var(--prc-transition-med),
+              transform var(--prc-transition-slow);
+  will-change: opacity, transform;
+}
+.chart-container.entering {
+  opacity:   0;
+  transform: translateY(8px) scale(0.995);
+}
+.chart-container.entered {
+  opacity:   1;
+  transform: translateY(0) scale(1);
+}
+
+/* ── Sidebar Tab Buttons ─────────────────────────────────────────────────── */
+.sidebar-tab {
+  position:    relative;
+  transition:  color      var(--prc-transition-fast),
+               background var(--prc-transition-fast);
+}
+.sidebar-tab::after {
+  content:    '';
+  position:   absolute;
+  bottom:     -1px;
+  left:       0;
+  right:      0;
+  height:     2px;
+  background: var(--prc-gold);
+  transform:  scaleX(0);
+  transform-origin: center;
+  transition: transform var(--prc-transition-med);
+  border-radius: 2px 2px 0 0;
+}
+.sidebar-tab.active::after  { transform: scaleX(1); }
+.sidebar-tab:hover::after   { transform: scaleX(0.6); }
+
+/* ── Physics Audit Health Card ───────────────────────────────────────────── */
+.physics-audit-card {
+  background:    linear-gradient(135deg,
+                   rgba(10, 10, 14, 0.95) 0%,
+                   rgba(20, 16, 4,  0.90) 100%);
+  border:        1px solid var(--prc-border-gold);
+  border-radius: 10px;
+  padding:       12px 16px;
+  margin-top:    12px;
+  box-shadow:    0 0 0 1px rgba(255, 215, 0, 0.06),
+                 0 4px 24px rgba(0, 0, 0, 0.5),
+                 inset 0 1px 0 rgba(255, 215, 0, 0.06);
+  animation:     fadeSlideUp var(--prc-transition-slow) both;
+}
+.physics-audit-card .score-badge {
+  font-family:  'Consolas', monospace;
+  font-size:    1.45rem;
+  font-weight:  700;
+  letter-spacing: 0.02em;
+}
+.physics-audit-card .score-badge.pass  { color: #16a34a; text-shadow: 0 0 16px rgba(22, 163, 74, 0.5); }
+.physics-audit-card .score-badge.warn  { color: #d97706; text-shadow: 0 0 16px rgba(217, 119, 6, 0.4); }
+.physics-audit-card .score-badge.fail  { color: #dc2626; text-shadow: 0 0 16px rgba(220, 38, 38, 0.5); }
+.physics-audit-card .violation-row {
+  font-family: 'Consolas', monospace;
+  font-size:   0.72rem;
+  color:       #f87171;
+  margin-top:  4px;
+  padding:     4px 8px;
+  background:  rgba(220, 38, 38, 0.08);
+  border-left: 2px solid #dc2626;
+  border-radius: 0 4px 4px 0;
+}
+
+/* ── Smooth Tooltip for Charts ───────────────────────────────────────────── */
+.recharts-tooltip-wrapper {
+  transition: opacity 0.12s ease, transform 0.12s ease !important;
+}
+.recharts-default-tooltip {
+  background:   rgba(10, 10, 14, 0.95)   !important;
+  border:       1px solid var(--prc-border-gold) !important;
+  border-radius: 8px                     !important;
+  font-family:  'Consolas', monospace    !important;
+  font-size:    11px                     !important;
+  box-shadow:   0 8px 32px rgba(0, 0, 0, 0.6) !important;
+}
+
+/* ── Premium Scrollbar (sidebar) ─────────────────────────────────────────── */
+.sidebar-glass ::-webkit-scrollbar        { width: 2px; }
+.sidebar-glass ::-webkit-scrollbar-track  { background: transparent; }
+.sidebar-glass ::-webkit-scrollbar-thumb  {
+  background:    rgba(255, 215, 0, 0.22);
+  border-radius: 10px;
+  transition:    background var(--prc-transition-fast);
+}
+.sidebar-glass ::-webkit-scrollbar-thumb:hover { background: rgba(255, 215, 0, 0.5); }
+
+/* ── Session Item Hover ──────────────────────────────────────────────────── */
+.session-item {
+  transition: background var(--prc-transition-fast),
+              border-color var(--prc-transition-fast),
+              box-shadow var(--prc-transition-fast);
+  border: 1px solid transparent;
+}
+.session-item:hover {
+  background:   rgba(255, 215, 0, 0.04);
+  border-color: var(--prc-border-gold);
+  box-shadow:   inset 2px 0 0 var(--prc-gold);
+}
+.session-item.active {
+  background:   rgba(255, 215, 0, 0.07);
+  border-color: var(--prc-border-focus);
+  box-shadow:   inset 2px 0 0 var(--prc-gold),
+                0 2px 12px var(--prc-gold-glow);
+}
+
+/* ── KB / Skills List Items ──────────────────────────────────────────────── */
+.kb-item {
+  transition: background var(--prc-transition-fast), border-color var(--prc-transition-fast);
+  border: 1px solid transparent;
+  border-radius: 6px;
+}
+.kb-item:hover {
+  background:   rgba(255, 215, 0, 0.04);
+  border-color: rgba(255, 215, 0, 0.12);
+}
+
+/* ── Upload Drop Zone ────────────────────────────────────────────────────── */
+.upload-zone {
+  border:       2px dashed rgba(255, 215, 0, 0.22);
+  border-radius: 10px;
+  transition:   border-color var(--prc-transition-fast),
+                background   var(--prc-transition-fast),
+                box-shadow   var(--prc-transition-fast);
+}
+.upload-zone:hover,
+.upload-zone.drag-over {
+  border-color: var(--prc-border-focus);
+  background:   rgba(255, 215, 0, 0.04);
+  box-shadow:   0 0 0 4px var(--prc-gold-glow),
+                inset 0 0 32px rgba(255, 215, 0, 0.03);
+}
+
+/* ── Send Button Pulse on Streaming ─────────────────────────────────────── */
+@keyframes send-pulse {
+  0%   { box-shadow: 0 0 0 0   rgba(220, 38, 38, 0.5); }
+  70%  { box-shadow: 0 0 0 8px rgba(220, 38, 38, 0);   }
+  100% { box-shadow: 0 0 0 0   rgba(220, 38, 38, 0);   }
+}
+.btn-streaming { animation: send-pulse 1.4s infinite; }

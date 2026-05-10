@@ -420,8 +420,8 @@ export default function App() {
 
       {/* ── Sidebar ────────────────────────────────────────────────────────── */}
       <aside className={`
+        sidebar-glass
         fixed md:relative top-0 left-0 h-full z-30 flex flex-col
-        bg-[#050505] border-r border-slate-800/60
         transition-transform duration-300 ease-in-out w-72
         ${sidebarOpen ? 'translate-x-0' : '-translate-x-full md:translate-x-0 md:w-0 md:overflow-hidden md:border-0'}
       `}>
@@ -724,7 +724,7 @@ export default function App() {
                   <button
                     onClick={() => handleSend()}
                     disabled={loading || serverStatus === 'waking' || (!input.trim() && files.length === 0)}
-                    className="bg-gradient-to-br from-yellow-500 to-amber-600 hover:from-yellow-400 hover:to-amber-500 text-black p-3 rounded-xl shrink-0 transition-all active:scale-90 disabled:opacity-30 disabled:cursor-not-allowed shadow-[0_0_20px_rgba(234,179,8,0.3)] hover:shadow-[0_0_25px_rgba(234,179,8,0.5)]"
+                    className={`bg-gradient-to-br from-yellow-500 to-amber-600 hover:from-yellow-400 hover:to-amber-500 text-black p-3 rounded-xl shrink-0 transition-all active:scale-90 disabled:opacity-30 disabled:cursor-not-allowed shadow-[0_0_20px_rgba(234,179,8,0.3)] hover:shadow-[0_0_25px_rgba(234,179,8,0.5)] ${loading ? 'btn-streaming' : ''}`}
                   >
                     {loading ? <Loader className="w-5 h-5 animate-spin" /> : <Send className="w-5 h-5" />}
                   </button>

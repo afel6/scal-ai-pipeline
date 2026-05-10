@@ -1,8 +1,5 @@
-$git = "C:\Program Files\Git\cmd\git.exe"
-$gh = "C:\Program Files\GitHub CLI\gh.exe"
-
-if (-not (Test-Path $git)) { $git = "git" }
-if (-not (Test-Path $gh)) { $gh = "gh" }
+$git = "git"
+$gh = "gh"
 
 & $git init
 & $git config user.name "AI Pipeline"

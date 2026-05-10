@@ -1,5 +1,8 @@
+import logging
 import chromadb
 import uuid
+
+_logger = logging.getLogger("prc-rag")
 
 class RAGDatabase:
     """
@@ -21,7 +24,7 @@ class RAGDatabase:
             metadatas=[scal_data],
             ids=[f"{well_id}_{doc_id}"]
         )
-        print(f"✅ Successfully vectorized and stored {well_id} in ChromaDB.")
+        _logger.info("Vectorized and stored well %s in ChromaDB.", well_id)
 
     def query_analog_wells(self, current_porosity: float, current_perm: float, n_results=3) -> list:
         query_text = f"Searching for analog carbonate wells with Porosity near {current_porosity} and Permeability near {current_perm} mD."

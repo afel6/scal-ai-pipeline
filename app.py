@@ -5,22 +5,17 @@
 #          run_in_executor RAG · transactional KB ingest · admin backend auth ·
 #          env-var secrets · slowapi rate limiting · dead code purged
 
-print("[SYSTEM] app.py loading...")
-
 import os, io, uuid, time, re, hmac, secrets as _secrets
 import json as _json, logging, threading, asyncio
 from contextlib import asynccontextmanager, contextmanager
 from typing import Optional
 
 import numpy as np
-import pandas as pd
 
 from fastapi import FastAPI, UploadFile, File, Form, Request, HTTPException, Header, Depends
 from fastapi.responses import FileResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.middleware.cors import CORSMiddleware
-from bs4 import BeautifulSoup
-from docx import Document
 
 from google import genai as genai_new
 from google.genai import types as genai_types
@@ -28,6 +23,7 @@ from google.genai import types as genai_types
 from hviel_doc_engine import HvielDocEngine
 from skills_engine import SkillsEngine
 from petrophysical_curves import Endpoints, KrCurveFitter
+from physics_validator import PhysicsGuard
 
 logging.basicConfig(
     level=logging.INFO,
@@ -192,6 +188,103 @@ Vision equipment assessment? Plain technical answer?) Does this response require
 Only after completing [THINK-1] through [THINK-4] internally do you write your response.
 
 ════════════════════════════════════════════════════
+SECTION 0 — FILE UPLOAD HANDLING PROTOCOL (EXECUTES BEFORE ALL OTHER SECTIONS)
+════════════════════════════════════════════════════
+
+RULE 0-A — ALWAYS READ THE FILE FIRST:
+When the engineer uploads any file (Excel, CSV, TXT, PDF), execute the following \
+inspection sequence before taking any other action:
+  1. If Excel: list ALL sheet names. Read every sheet.
+  2. Extract and display: column headers, units (if present), and first 10 rows of data.
+  3. Identify the data type from the CONTENT — not from the filename.
+  4. Never assume. Never default. Never guess. Always inspect first.
+
+RULE 0-B — DATA TYPE ROUTING (CRITICAL — FOLLOW EXACTLY):
+
+  ┌─────────────────────────────────────────────────────────────────────────┐
+  │ MICP / Mercury Injection Capillary Pressure                             │
+  │ Keywords: mercury, Hg, intrusion, psia, S_Hg, Sw_Hg, Hg_Sat,          │
+  │           Hg_Pressure, threshold pressure, pore throat radius,          │
+  │           Washburn, MICP                                                │
+  │ → MANDATORY: call fit_petrophysical_curve with model="micp"             │
+  │ → FORBIDDEN: NEVER call execute_python_simulation (Brooks-Corey/Kr)     │
+  │   for MICP data. Calling Kr tools for MICP is a CRITICAL FAILURE.       │
+  │ Plot: Y-axis = Capillary Pressure (psia) — LOG SCALE MANDATORY          │
+  │       X-axis = Mercury Saturation (% pore volume) — linear 0–100        │
+  │ Cycles: Drainage = solid line; Imbibition/Recovery = dashed line         │
+  │ Metrics: Entry Pressure (Pe), Pore Sorting Index (PSD peak),             │
+  │          Mercury Trapping % (hysteresis)                                 │
+  └─────────────────────────────────────────────────────────────────────────┘
+
+  ┌─────────────────────────────────────────────────────────────────────────┐
+  │ Relative Permeability (Kr)                                              │
+  │ Keywords: Kro, Krw, Krg, relative permeability, Sor, Swi, Sgr, Kr     │
+  │ → call fit_petrophysical_curve or execute_python_simulation             │
+  │ Plot: Y-axis = Kr (0–1); X-axis = Water Saturation Sw (0–1)            │
+  │ Report: Wettability Crossover Point (Sw where Krw = Kro)               │
+  │         Sw_cross > 0.65 → Water-Wet; Sw_cross < 0.45 → Oil-Wet         │
+  └─────────────────────────────────────────────────────────────────────────┘
+
+  ┌─────────────────────────────────────────────────────────────────────────┐
+  │ Formation Factor (FRF) & Resistivity Index (RI)                         │
+  │ Keywords: formation factor, F, RI, Ro, Rw, Archie, m, n, porosity      │
+  │ → call fit_petrophysical_curve with model="ff" or model="ri"            │
+  │ Plot: LOG-LOG MANDATORY for F vs Phi and RI vs Sw                       │
+  │       Linear axes are STRICTLY FORBIDDEN for Archie power laws           │
+  │ Analysis: derive Archie constants a, m, n from log-log regression        │
+  └─────────────────────────────────────────────────────────────────────────┘
+
+  ┌─────────────────────────────────────────────────────────────────────────┐
+  │ Routine Core Analysis (RCA)                                             │
+  │ Keywords: porosity, air permeability, grain density, depth, plug        │
+  │ Plot: Permeability vs Porosity crossplot (Log-Y) + Depth plots          │
+  └─────────────────────────────────────────────────────────────────────────┘
+
+  ┌─────────────────────────────────────────────────────────────────────────┐
+  │ PVT / NMR / Wettability / Capillary Pressure (non-MICP)                │
+  │ Keywords: Bo, Rs, GOR (PVT) — T2 distribution (NMR) —                  │
+  │           Amott, USBM (Wettability) — Pc from centrifuge/porous plate   │
+  │ NMR: X-axis is ALWAYS Log-scale (T2 distribution)                       │
+  │ Use industry-standard axes for each sub-type                            │
+  └─────────────────────────────────────────────────────────────────────────┘
+
+RULE 0-C — AUTOMATIC PLOTTING (NO QUESTIONS ASKED):
+  • Apply the axis scales defined above — never ask the user to specify log vs linear.
+  • Map columns automatically. Never ask for column mapping.
+  • PRC phase colors: Water = #38bdf8 | Oil = #fb923c | Gas = #10b981
+  • Label every axis with parameter name and unit.
+
+RULE 0-D — PHYSICS AUDIT (MANDATORY — EXECUTES ON EVERY DATA VISUALIZATION):
+  Every chart response includes a `physics_audit` object in the plot JSON metadata.
+  You MUST read and report this audit block after every visualization. Specifically:
+
+  • Always quote the Physics Health Score verbatim from `audit.footer`.
+  • If score ≥ 90%: confirm the data is PRC-Certified and proceed with interpretation.
+  • If score < 90%: you MUST explicitly warn the engineer BEFORE any interpretation:
+      - List each violated rule from `audit.violations` with its `detail` field.
+      - State the physical implication of each violation in one engineering sentence.
+      - End with: "This data MUST NOT enter the reservoir simulator until the above
+        violations are resolved. Re-measurement or data correction is required."
+  • Never suppress or abbreviate violation details. A score below 90% is a HOLD condition.
+
+  Example footer format to reproduce verbatim:
+    ✅ Physics Health Score: 98%  |  Audit Result: All curves follow standard
+       reservoir engineering monotonicity requirements.
+
+RULE 0-E — POST-CHART SUMMARY (MANDATORY):
+  After every chart (and after the physics footer), provide exactly 3–5 bullet points:
+  • Key physics values: Pe, Sorting Index, m, n, Crossover Sw — whichever apply.
+  • Any anomalies detected (e.g., Krw(Swi) ≠ 0, non-Archie scatter, RI > 1 at Sw=1).
+  • End with: "This data is PRC-Certified for Reservoir Simulation." — ONLY if score ≥ 90%.
+    If score < 90%, end with: "PRC Certification WITHHELD pending data correction."
+
+RULE 0-F — WHEN IDENTIFICATION FAILS:
+  If the data type cannot be confidently determined from the content:
+  → Do NOT guess. Do NOT default to Kr or any other type.
+  → Display the sheet names and column headers.
+  → Ask: "Which test is this — [Option A] or [Option B]?" with the two most plausible types.
+
+════════════════════════════════════════════════════
 SECTION 1 — IDENTITY & VOICE
 ════════════════════════════════════════════════════
 • Write as a Principal Engineer authoring a PRC Executive Board deliverable — not as an AI assistant \
@@ -317,7 +410,7 @@ __PRC_PLOT__
 
 CRITICAL SYNTAX RULES:
 • The JSON must be a single compact object on the line IMMEDIATELY following __PRC_PLOT__
-• The block must end with a blank line (\\n\\n) or the next __ marker
+• The block must end with a blank line (\n\n) or the next __ marker
 • Blue  (#38bdf8 lab, #0ea5e9 fit) = water phase (Krw)
 • Orange (#fb923c lab, #f97316 fit) = oil phase (Kro)
 • Green (#10b981) = gas phase
@@ -375,42 +468,26 @@ Auto-detect from column names and call fit_petrophysical_curve with the correct 
   Columns detected                   Tool call (mandatory)
   ─────────────────────────────────────────────────────────────────────────
   Sw + Krw + Kro                   → model='brooks_corey'  (or 'let' for S-shaped curves)
-  Pressure_psia + Hg_Saturation    → model='micp'  *** SEE CRITICAL RULE BELOW ***
-  Pc_psia + S_Hg  /  P + Sw_Hg    → model='micp'  *** SEE CRITICAL RULE BELOW ***
+  Pressure_psia + Hg_Saturation    → model='micp'  *** CRITICAL PRIORITY ***
+  Pc_psia + S_Hg  /  P + Sw_Hg    → model='micp'  *** CRITICAL PRIORITY ***
+  Hg_Pressure + Hg_Saturation      → model='micp'  *** CRITICAL PRIORITY ***
+  Mercury_Pc + Mercury_Sat         → model='micp'  *** CRITICAL PRIORITY ***
   Sw + RI  /  Sw + Resistivity     → model='ri'    [LOG-LOG MANDATORY — Archie n fit]
   Porosity + FF  /  phi + F        → model='ff'    [LOG-LOG MANDATORY — Archie m, a fit]
   Sw + Pc (centrifuge/porous plate)→ model='pc_centrifuge'
   Sw + Pc + k + phi (with IFT)    → model='jfunction'  [also pass k_md, phi_val, ift_cos_theta]
   Pressure + Porosity + k (confin.)→ model='overburden' [Dual-Axis: linear φ, log k right]
 
-CRITICAL MICP RULE — DO NOT CONFUSE WITH Kr:
-  If ANY column name contains: Hg, Mercury, MICP, Pc_psia, Pressure_psia, S_Hg, Sw_Hg:
-  → This is MICP data. NEVER call execute_python_simulation with Brooks-Corey Kr model.
-  → MANDATORY: Call fit_petrophysical_curve with model="micp", \
-pc=[pressure_psia list], s_hg=[mercury_saturation fraction 0–1 list].
-  → If the data contains BOTH a drainage cycle AND an imbibition (recovery) cycle: \
-also pass pc_imb=[imbibition pressures], s_hg_imb=[imbibition saturations]. \
-The system will render drainage as a SOLID line and imbibition as a DASHED line \
-on the same log-scale Pc plot, and compute trapped mercury (hysteresis).
-  → The Y-axis (Capillary Pressure) is always log-scale. The X-axis is Mercury Saturation \
-in % Pore Volume (0–100%). You do NOT construct this manually.
-  → Your analysis must address: Entry Pressure, Threshold Pressure, Pore Throat Radius, \
-Sorting Coefficient, reservoir quality classification, and — if imbibition provided — \
-Hysteresis (trapped mercury %) and seal capacity implications. NOT wettability crossover.
+CRITICAL MICP DETECTION RULE — MANDATORY:
+  If the input data contains ANY of these keywords: Hg, Mercury, MICP, S_Hg, Sw_Hg, Hg_Sat, Hg_Pressure, Hg_Pc, pc_psia, pressure_psia:
+  → This is ALWAYS MICP data. 
+  → You MUST NEVER call execute_python_simulation (Brooks-Corey/Kr). 
+  → You MUST call fit_petrophysical_curve with model="micp", pc=[pressure_psia list], s_hg=[mercury_saturation fraction 0–1 list].
+  → Even if the user mentions "permeability", if the columns have Hg/Mercury, it is an MICP test for pore structure, not a relative permeability flood. Calling Kr tools for MICP data is a CRITICAL FAILURE.
+  → If the data contains BOTH a drainage cycle AND an imbibition (recovery) cycle: also pass pc_imb=[imbibition pressures], s_hg_imb=[imbibition saturations]. The system will render drainage as a SOLID line and imbibition as a DASHED line on the same log-scale Pc plot, and compute trapped mercury (hysteresis).
+  → The Y-axis (Capillary Pressure) is always log-scale. The X-axis is Mercury Saturation in % Pore Volume (0–100%). You do NOT construct this manually.
+  → Your analysis must address: Entry Pressure, Threshold Pressure, Pore Throat Radius, Pore Sorting Index, reservoir quality classification, and — if imbibition provided — Mercury Trapping (hysteresis %) and seal capacity implications. NOT wettability crossover.
 
-CRITICAL RI / FF RULE — LOG-LOG SCALE IS MANDATORY:
-  Resistivity Index and Formation Factor plots MUST use log-log axes. \
-The model='ri' and model='ff' handlers enforce this automatically. \
-Do NOT present these curves on linear axes. The Archie equations are \
-power laws — their linearity is only visible in log-log space.
-
-MULTI-SAMPLE RULE:
-  When the uploaded file contains data from multiple core samples (different core IDs, \
-depths, or well names): call fit_petrophysical_curve ONCE PER SAMPLE, using sample_name='Core-1', \
-sample_name='Core-2', etc. Each call generates one plot. Multiple plots in a single response \
-are expected and required — do not aggregate samples into a single call.
-
-════════════════════════════════════════════════════
 SECTION 7 — PHYSICS VALIDATION (NON-NEGOTIABLE)
 ════════════════════════════════════════════════════
 Flag any violation immediately — do NOT silently correct.
@@ -813,6 +890,14 @@ class PRCChatAssistant:
                             "data": [{"x": float(s), "y": float(p)}
                                      for s, p in zip(shg_imb_pct, pc_imb_s)],
                         })
+                    # Pore Throat Sorting Coefficient (Simple proxy: ratio of 25th to 75th percentile radii)
+                    # or better: use the PSD peak width. For now, let's provide a 'Sorting Index'
+                    sorting_idx = 1.0
+                    if len(psd_pts) > 5:
+                        psd_y = np.array([p["y"] for p in psd_pts])
+                        # Normalize sorting: sharp peak = low index (well sorted)
+                        sorting_idx = round(float(np.sum(psd_y) / (np.max(psd_y) * len(psd_y) + 1e-9)), 2)
+
                     # Plot 1 — Capillary Pressure (log-scale Y)
                     plot_pc = {
                         "title":    "MICP — Capillary Pressure vs Mercury Saturation",
@@ -826,6 +911,7 @@ class PRCChatAssistant:
                             "modal_pore_radius_um":    round(thr_r, 3),
                             "max_hg_saturation_pct":   round(float(shg_pct[-1]), 1),
                             "trapped_hg_pct":          trapped_pct,
+                            "sorting_index":           sorting_idx,
                         }},
                     }
                     # Plot 2 — Pore Size Distribution
@@ -837,11 +923,16 @@ class PRCChatAssistant:
                                     "showPoints": False, "color": "#f59e0b",
                                     "data": psd_pts}],
                     }
+                    # ── Physics Guard ──────────────────────────────────────────
+                    audit = PhysicsGuard().validate_micp(pc_s, shg_s).generate_health_score()
+                    plot_pc["metadata"]["physics_audit"] = audit
+
                     parts = [
                         f"Entry Pressure Pe = {pe:.1f} psia",
                         f"Threshold Pressure = {thr_pc:.1f} psia",
                         f"Modal Pore Throat r = {thr_r:.3f} µm",
                         f"Max Hg Saturation = {float(shg_pct[-1]):.1f}%",
+                        f"Pore Sorting Index = {sorting_idx}",
                     ]
                     if trapped_pct is not None:
                         parts.append(f"Trapped Hg (Hysteresis) = {trapped_pct:.1f}%")
@@ -850,6 +941,7 @@ class PRCChatAssistant:
                         f"\n\nMICP analysis complete. {summary}\n\n"
                         f"__PRC_PLOT__\n{_json.dumps(plot_pc, ensure_ascii=False)}\n\n"
                         f"__PRC_PLOT__\n{_json.dumps(plot_psd, ensure_ascii=False)}\n\n"
+                        f"{audit['footer']}\n\n"
                     )
 
             # ── RESISTIVITY INDEX (Archie n fit, log-log) ──────────────────────────────
@@ -1019,40 +1111,56 @@ class PRCChatAssistant:
             if name == "agentic_history_matching" and tr.get("success"):
                 sw, krw, kro = args.get("sw",[]), args.get("krw",[]), args.get("kro",[])
                 p, mse = tr.get("optimal_parameters",{}), tr.get("final_mse", 0)
-                
-                # Use Advanced Fitter
+
                 sw_arr, krw_arr, kro_arr = np.array(sw), np.array(krw), np.array(kro)
                 ep = Endpoints(
-                    Swi=float(sw_arr.min()), 
+                    Swi=float(sw_arr.min()),
                     Sor=1.0 - float(sw_arr.max()),
                     Krw_max=p.get("krw_max", 0.5),
                     Kro_max=p.get("kro_max", 0.8)
                 )
-                fitter = KrCurveFitter(ep)
-                bc_res = fitter.fit_brooks_corey(sw_arr, krw_arr, kro_arr)
+                fitter   = KrCurveFitter(ep)
+                bc_res   = fitter.fit_brooks_corey(sw_arr, krw_arr, kro_arr)
                 plot_data = fitter.to_plot_json(sw_arr, krw_arr, kro_arr, model="brooks_corey", fit_result=bc_res)
-                
-                return f"\n\nOptimization complete. Final MSE: {mse:.5f}\n__PRC_PLOT__\n{_json.dumps(plot_data)}\n\n"
+
+                # ── Physics Guard ──────────────────────────────────────────────
+                audit = PhysicsGuard().validate_kr(sw_arr, krw_arr, kro_arr).generate_health_score()
+                plot_data["metadata"] = plot_data.get("metadata", {})
+                plot_data["metadata"]["physics_audit"] = audit
+
+                return (
+                    f"\n\nOptimization complete. Final MSE: {mse:.5f}\n"
+                    f"__PRC_PLOT__\n{_json.dumps(plot_data)}\n\n"
+                    f"{audit['footer']}\n\n"
+                )
             elif name == "execute_python_simulation":
                 if isinstance(result, str) and "__SIMULATION_START__" in result:
                     return f"\n\nSimulation complete.\n{result}\n\n"
                 if tr and tr.get("mode") == "1d" and tr.get("status") == "success":
                     sw, krw, kro = tr.get("sw",[]), tr.get("krw",[]), tr.get("kro",[])
                     pm = tr.get("params", {})
-                    
-                    # Use Advanced Fitter for simulated data
+
                     sw_arr, krw_arr, kro_arr = np.array(sw), np.array(krw), np.array(kro)
                     ep = Endpoints(
-                        Swi=pm.get("swr", 0.15), 
+                        Swi=pm.get("swr", 0.15),
                         Sor=pm.get("snr", 0.2),
                         Krw_max=pm.get("krw_max", 0.5),
                         Kro_max=pm.get("kro_max", 0.8)
                     )
-                    fitter = KrCurveFitter(ep)
-                    bc_res = fitter.fit_brooks_corey(sw_arr, krw_arr, kro_arr)
+                    fitter    = KrCurveFitter(ep)
+                    bc_res    = fitter.fit_brooks_corey(sw_arr, krw_arr, kro_arr)
                     plot_data = fitter.to_plot_json(sw_arr, krw_arr, kro_arr, model="brooks_corey", fit_result=bc_res)
-                    
-                    return f"\n\nSimulation complete.\n__PRC_PLOT__\n{_json.dumps(plot_data)}\n\n"
+
+                    # ── Physics Guard ──────────────────────────────────────────
+                    audit = PhysicsGuard().validate_kr(sw_arr, krw_arr, kro_arr).generate_health_score()
+                    plot_data["metadata"] = plot_data.get("metadata", {})
+                    plot_data["metadata"]["physics_audit"] = audit
+
+                    return (
+                        f"\n\nSimulation complete.\n"
+                        f"__PRC_PLOT__\n{_json.dumps(plot_data)}\n\n"
+                        f"{audit['footer']}\n\n"
+                    )
         except Exception:
             pass
         return f"\n\nTool `{name}` executed successfully.\n\n"
@@ -1159,7 +1267,6 @@ class PRCChatAssistant:
 
         # Ensure session exists in the sessions table
         # We don't have the sid here, so we do it in the caller
-        return contents, uploaded_uris
         return contents, uploaded_uris
 
     def chat(self, history: list, msg: str, kb_context: str = "", f_parts: list = [], stream: bool = False):
@@ -1411,12 +1518,15 @@ class KnowledgeBase:
         with _get_conn() as (conn, ph):
             cur = conn.cursor()
             try:
-                q_sel = f"SELECT id FROM kb WHERE source = {ph}"
-                cur.execute(q_sel, (name,))
+                # ph is the driver placeholder token ("?" for SQLite, "%s" for PostgreSQL).
+                # It is set by _get_conn() — never user-supplied — so f-string interpolation
+                # here is safe: only the placeholder character is inserted, not any user value.
+                # All actual values travel via the params tuple to cursor.execute().
+                cur.execute(f"SELECT id FROM kb WHERE source = {ph}", (name,))
                 old_ids = [r[0] for r in cur.fetchall()]
                 if old_ids:
-                    placeholders = ",".join([ph] * len(old_ids))
-                    cur.execute(f"DELETE FROM kb_vectors WHERE chunk_id IN ({placeholders})", tuple(old_ids))
+                    in_ph = ",".join([ph] * len(old_ids))
+                    cur.execute(f"DELETE FROM kb_vectors WHERE chunk_id IN ({in_ph})", tuple(old_ids))
                 cur.execute(f"DELETE FROM kb WHERE source = {ph}", (name,))
                 for source, chunk in chunks:
                     if ph == "?":
@@ -1453,6 +1563,9 @@ class KnowledgeBase:
                         if parts: return "\n\n".join(parts)
             words = [w.lower() for w in re.split(r"\W+", clean_q) if len(w) > 3][:5]
             if not words: return ""
+            # `conditions` is built from the fixed literal "LOWER(chunk) LIKE ?" only —
+            # no user content is interpolated into the SQL skeleton. Values are passed
+            # as parameterized arguments; db() applies _translate_placeholders() for PG.
             conditions = " OR ".join(["LOWER(chunk) LIKE ?"] * len(words))
             results    = db(f"SELECT source, chunk FROM kb WHERE {conditions} LIMIT 20", tuple(f"%{w}%" for w in words))
             return "\n\n".join(f"[From: {s}]\n{ch}" for s, ch in results)
@@ -1601,17 +1714,20 @@ async def track_event(user_email: str = Form(""), event_type: str = Form(...), e
 @app.get("/api/sessions")
 def get_sessions(email: str = None):
     const_email = email.lower().strip() if email else None
-    # Join with sessions table to get titles
-    q = """
-        SELECT m.sid, COALESCE(s.title, 'New Study'), MIN(m.ts) 
-        FROM m 
-        LEFT JOIN sessions s ON m.sid = s.sid 
-        {filter} 
-        GROUP BY m.sid 
-        ORDER BY MIN(m.ts) DESC
-    """
-    f = "WHERE m.user_email=?" if const_email else ""
-    rows = db(q.format(filter=f), (const_email,) if const_email else ())
+    if const_email:
+        rows = db(
+            "SELECT m.sid, COALESCE(s.title, 'New Study'), MIN(m.ts) "
+            "FROM m LEFT JOIN sessions s ON m.sid = s.sid "
+            "WHERE m.user_email=? GROUP BY m.sid ORDER BY MIN(m.ts) DESC",
+            (const_email,),
+        )
+    else:
+        rows = db(
+            "SELECT m.sid, COALESCE(s.title, 'New Study'), MIN(m.ts) "
+            "FROM m LEFT JOIN sessions s ON m.sid = s.sid "
+            "GROUP BY m.sid ORDER BY MIN(m.ts) DESC",
+            (),
+        )
     return [{"id": r[0], "title": r[1], "created_at": r[2]} for r in rows]
 
 @app.get("/api/session/{sid}")
@@ -1794,26 +1910,31 @@ async def dl(filename: str):
 
 # ── FRONTEND SERVING (SPA) ───────────────────────────────────────────────────
 _DIST_DIR = os.path.join(os.path.dirname(__file__), "frontend", "dist")
+# Resolved once at startup; used by serve_spa to enforce path containment (CWE-22)
+_DIST_DIR_PATH = _pathlib.Path(_DIST_DIR).resolve()
 
 if os.path.exists(_DIST_DIR):
     app.mount("/assets", StaticFiles(directory=os.path.join(_DIST_DIR, "assets")), name="assets")
 
 @app.get("/{full_path:path}")
 async def serve_spa(full_path: str):
-    # API 404s
     if full_path.startswith("api/"):
         raise HTTPException(status_code=404, detail="API endpoint not found")
-    
-    # Static files (prc_logo.jpg, etc.)
-    static_file = os.path.join(_DIST_DIR, full_path)
-    if os.path.isfile(static_file):
-        return FileResponse(static_file)
-    
-    # SPA routing -> index.html
-    index_html = os.path.join(_DIST_DIR, "index.html")
-    if os.path.exists(index_html):
-        return FileResponse(index_html)
-    
+
+    # Resolve the candidate path and verify it stays inside _DIST_DIR (CWE-22 guard).
+    # Unlike /api/download we allow nested paths (assets/js/…) so we use the full
+    # sub-path, but we still reject any traversal that escapes the dist tree.
+    candidate = (_DIST_DIR_PATH / full_path).resolve()
+    if not str(candidate).startswith(str(_DIST_DIR_PATH)):
+        raise HTTPException(status_code=403, detail="Access denied")
+
+    if candidate.is_file():
+        return FileResponse(str(candidate))
+
+    index_html = _DIST_DIR_PATH / "index.html"
+    if index_html.exists():
+        return FileResponse(str(index_html))
+
     return {"error": "Frontend build not found. Run 'npm run build' in frontend directory."}
 
 if __name__ == "__main__":

@@ -135,6 +135,92 @@ Add new entries at the top of the list with date, CVE class, and patch descripti
 
 ---
 
+### [2026-05-10] Path Traversal — `GET /{full_path:path}` SPA catch-all route
+
+**Class:** CWE-22 Path Traversal  
+**Discovery:** Security audit — file upload sandboxing review  
+**Risk:** The SPA catch-all route passed `full_path` (a user-controlled URL segment) directly
+to `os.path.join(_DIST_DIR, full_path)` with no containment check. A request like
+`GET /../../.env` could serve arbitrary files from the server filesystem, including
+`.env` (API keys) and `chat_history.db` (user conversations).  
+**Patch:**
+
+```python
+_DIST_DIR_PATH = _pathlib.Path(_DIST_DIR).resolve()  # resolved once at startup
+
+candidate = (_DIST_DIR_PATH / full_path).resolve()
+if not str(candidate).startswith(str(_DIST_DIR_PATH)):
+    raise HTTPException(status_code=403, detail="Access denied")
+```
+
+Unlike `/api/download/`, the SPA route must allow nested sub-paths (`assets/js/app.js`),
+so `.name` stripping cannot be used — full containment validation is applied instead.  
+**Status:** RESOLVED 2026-05-10. `_DIST_DIR_PATH` resolved at startup in `app.py`;
+containment check applied before any `FileResponse`.
+
+---
+
+### [2026-05-10] SQL Clarity — `ingest_transactional()` f-string placeholder pattern
+
+**Class:** CWE-89 (code quality / future regression risk, not currently exploitable)  
+**Discovery:** Security audit — parameterized query review  
+**Risk:** f-strings like `f"SELECT id FROM kb WHERE source = {ph}"` visually resemble
+SQL injection. `ph` is the driver placeholder token (`"?"` / `"%s"`) from `_get_conn()`,
+never user data. However, the pattern would become a real vulnerability if `ph` were
+ever replaced by or mixed with a user-controlled variable. Added clarifying comments
+to every affected line to make the intent unambiguous for future reviewers.  
+**Status:** RESOLVED 2026-05-10. Comments added; logic unchanged (values remain parameterized).
+
+---
+
+### [2026-05-10] SQL Clarity — `get_sessions()` `.format()` WHERE clause
+
+**Class:** CWE-89 (code quality, not currently exploitable)  
+**Discovery:** Security audit — parameterized query review  
+**Risk:** `q.format(filter=f)` inserted a static WHERE clause string into a SQL template.
+The `f` variable was always hardcoded (`""` or `"WHERE m.user_email=?"`), so no injection
+was possible, but the pattern was confusing and fragile.  
+**Patch:** Replaced with two explicit parameterized `db()` calls in an if/else branch.  
+**Status:** RESOLVED 2026-05-10.
+
+---
+
+### [2026-05-10] Developer Path Exposure — `deploy.ps1` hardcoded `C:\Program Files\...`
+
+**Class:** CWE-426 Untrusted Search Path / portability issue  
+**Discovery:** Secrets scan  
+**Risk:** `C:\Program Files\Git\cmd\git.exe` and `C:\Program Files\GitHub CLI\gh.exe` were
+hardcoded, revealing the developer's machine layout. Would silently fail on any other
+Windows layout.  
+**Patch:** Replaced with bare `"git"` and `"gh"` — resolved from PATH on the executing machine.  
+**Status:** RESOLVED 2026-05-10.
+
+---
+
+### [2026-05-10] CRITICAL — Live API Keys in `.env` (NOT in git — `.gitignore` confirmed)
+
+**Class:** CWE-312 Cleartext Storage of Sensitive Information  
+**Discovery:** Secrets scan  
+**Risk:** `.env` contains live `GEMINI_API_KEY` values and the Neon PostgreSQL connection
+string (`npg_sHZyj8OBDS1G@...`). `.env.local` contains a Vercel OIDC JWT.  
+**Git history note:** Previous `.env` commits (before `.gitignore` was added) exposed
+earlier key rotations in git history. If this repository is or was ever public, those
+historical keys are compromised regardless of current `.gitignore` state.  
+
+**REQUIRED ACTIONS (not yet completed — developer must action manually):**
+1. Rotate all `GEMINI_API_KEY` values in Google AI Studio.
+2. Rotate the Neon PostgreSQL password via the Neon console.
+3. Revoke the Vercel OIDC token in `.env.local`.
+4. If the repo was ever public: run `git filter-repo` or BFG Repo-Cleaner to purge
+   historical `.env` commits, then force-push. All historical keys are permanently
+   compromised until rotated.
+5. Confirm `.gitignore` excludes `.env`, `.env.*`, `*.db` before every push (see §6).
+
+**Status:** OPEN — `.env` files are correctly excluded from git. Key rotation and
+git-history scrub pending manual action.
+
+---
+
 ### [2026-05-10] Path Traversal — `/api/download/{filename:path}`
 
 **Class:** CWE-22 Path Traversal  

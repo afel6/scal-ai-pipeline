@@ -81,22 +81,22 @@ export default function SidebarTabs({ sessionId, sessions, handleLoadSession, ha
       <div className="flex border-b border-slate-800/60 shrink-0">
         <button
           onClick={() => setTab('chats')}
-          className={`flex-1 py-2.5 text-[11px] font-bold tracking-widest uppercase flex items-center justify-center gap-1.5 transition-all
-            ${tab === 'chats' ? 'text-yellow-400 border-b-2 border-yellow-500' : 'text-slate-500 hover:text-slate-300'}`}
+          className={`sidebar-tab flex-1 py-2.5 text-[11px] font-bold tracking-widest uppercase flex items-center justify-center gap-1.5
+            ${tab === 'chats' ? 'text-yellow-400 active' : 'text-slate-500 hover:text-slate-300'}`}
         >
           <MessageSquare className="w-3.5 h-3.5" /> Chats
         </button>
         <button
           onClick={() => setTab('library')}
-          className={`flex-1 py-2.5 text-[11px] font-bold tracking-widest uppercase flex items-center justify-center gap-1.5 transition-all
-            ${tab === 'library' ? 'text-yellow-400 border-b-2 border-yellow-500' : 'text-slate-500 hover:text-slate-300'}`}
+          className={`sidebar-tab flex-1 py-2.5 text-[11px] font-bold tracking-widest uppercase flex items-center justify-center gap-1.5
+            ${tab === 'library' ? 'text-yellow-400 active' : 'text-slate-500 hover:text-slate-300'}`}
         >
           <Database className="w-3.5 h-3.5" /> Library
         </button>
         <button
           onClick={() => setTab('audit')}
-          className={`flex-1 py-2.5 text-[11px] font-bold tracking-widest uppercase flex items-center justify-center gap-1.5 transition-all
-            ${tab === 'audit' ? 'text-yellow-400 border-b-2 border-yellow-500' : 'text-slate-500 hover:text-slate-300'}`}
+          className={`sidebar-tab flex-1 py-2.5 text-[11px] font-bold tracking-widest uppercase flex items-center justify-center gap-1.5
+            ${tab === 'audit' ? 'text-yellow-400 active' : 'text-slate-500 hover:text-slate-300'}`}
         >
           <Camera className="w-3.5 h-3.5" /> Auditor
         </button>
@@ -112,10 +112,10 @@ export default function SidebarTabs({ sessionId, sessions, handleLoadSession, ha
           )}
           {sessions.map(s => (
             <div key={s.id} onClick={() => handleLoadSession(s.id)}
-              className={`group flex items-start gap-3 px-3 py-3 rounded-xl cursor-pointer transition-all border
+              className={`session-item group flex items-start gap-3 px-3 py-3 rounded-xl cursor-pointer
                 ${s.id === sessionId
-                  ? 'bg-yellow-950/40 border-yellow-800/50 text-yellow-100'
-                  : 'border-transparent hover:bg-slate-900 hover:border-slate-800 text-slate-400 hover:text-slate-200'
+                  ? 'active text-yellow-100'
+                  : 'text-slate-400 hover:text-slate-200'
                 }`}>
               <MessageSquare className="w-4 h-4 mt-0.5 shrink-0 text-yellow-500/60" />
               <div className="flex-1 min-w-0">
@@ -177,8 +177,8 @@ export default function SidebarTabs({ sessionId, sessions, handleLoadSession, ha
                 onChange={(e) => setBookPassword(e.target.value)}
                 className="w-full bg-black border border-slate-800 rounded-xl px-3 py-2.5 text-xs text-slate-200 outline-none focus:border-yellow-500/50 placeholder:text-slate-700 transition-all"
               />
-              <label className={`flex flex-col items-center justify-center gap-3 w-full border-2 border-dashed rounded-2xl py-6 cursor-pointer transition-all duration-300
-                ${uploading ? 'border-yellow-500 bg-yellow-500/5' : 'border-slate-800 hover:border-yellow-500/30 hover:bg-yellow-500/5'}`}>
+              <label className={`upload-zone flex flex-col items-center justify-center gap-3 w-full rounded-2xl py-6 cursor-pointer
+                ${uploading ? 'border-yellow-500 bg-yellow-500/5 !border-solid !border-2' : ''}`}>
                 <input type="file" className="hidden" onChange={handleBookUpload} disabled={uploading}
                   accept=".html,.htm,.txt,.pdf,.docx" />
                 {uploading ? (
@@ -241,7 +241,7 @@ export default function SidebarTabs({ sessionId, sessions, handleLoadSession, ha
               <p className="text-[10px] text-slate-500 font-black uppercase tracking-[0.2em] px-1 italic">Knowledge Base Status</p>
               <div className="space-y-2">
                 {books.map((b, i) => (
-                  <div key={i} className="flex items-center gap-3 bg-black/40 border border-slate-800/60 rounded-xl px-3 py-3 hover:border-green-500/20 transition-all group">
+                  <div key={i} className="kb-item flex items-center gap-3 bg-black/40 rounded-xl px-3 py-3 group">
                     <div className="w-2 h-2 rounded-full bg-green-500 shadow-[0_0_8px_rgba(34,197,94,0.4)]" />
                     <div className="flex-1 min-w-0">
                       <p className="text-[11px] text-slate-300 font-bold truncate group-hover:text-white transition-colors">{b.name}</p>

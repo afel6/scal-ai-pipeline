@@ -85,8 +85,20 @@ class ValidationResult:
 # ── PURE MODEL FUNCTIONS ───────────────────────────────────────────────────────
 
 def _Se(Sw: np.ndarray, Swi: float, Sor: float) -> np.ndarray:
-    """Normalised saturation, clamped to (ε, 1−ε) to prevent 0^n = 0 edge issues."""
-    return np.clip((Sw - Swi) / (1.0 - Swi - Sor), 1e-9, 1.0 - 1e-9)
+    """
+    Normalised saturation, clamped to (ε, 1−ε) to prevent 0^n = 0 edge issues.
+
+    Edge-case guard: if the mobile saturation range (1 − Swi − Sor) is at or below
+    zero (degenerate endpoints), the denominator is replaced with 1.0 to avoid
+    ZeroDivisionError / numpy divide-by-zero, and the result is still clamped to a
+    valid (ε, 1−ε) interval.
+    """
+    mobile = 1.0 - Swi - Sor
+    if abs(mobile) < 1e-9:
+        mobile = 1.0  # fallback: treat entire range as mobile to avoid divide-by-zero
+    with np.errstate(divide="ignore", invalid="ignore"):
+        se = np.where(mobile != 0.0, (Sw - Swi) / mobile, 0.5)
+    return np.clip(se, 1e-9, 1.0 - 1e-9)
 
 
 def bc_krw(Sw: np.ndarray, ep: Endpoints, nw: float) -> np.ndarray:
@@ -106,30 +118,69 @@ def bc_kro(Sw: np.ndarray, ep: Endpoints, no: float) -> np.ndarray:
 
 
 def let_krw(Sw: np.ndarray, ep: Endpoints, L: float, E: float, T: float) -> np.ndarray:
-    """LET Krw: Se^L / (Se^L + E·(1−Se)^T)."""
+    """
+    LET Krw: Se^L / (Se^L + E·(1−Se)^T).
+
+    Edge-case guard: the LET denominator (Se^L + E·(1−Se)^T) can theoretically
+    reach zero when both Se and (1−Se) are simultaneously near-zero (impossible for
+    well-clamped Se, but can occur with extreme parameter values from the optimizer).
+    np.errstate suppresses the divide-by-zero warning; np.nan_to_num replaces any
+    resulting NaN/Inf with 0.0 before endpoint overrides are applied.
+    """
     Se = _Se(Sw, ep.Swi, ep.Sor)
     num = Se ** L
-    kr  = ep.Krw_max * num / (num + E * (1.0 - Se) ** T)
-    kr  = np.where(Sw <= ep.Swi,    0.0,        kr)
-    kr  = np.where(Sw >= ep.Sw_max, ep.Krw_max, kr)
+    denom = num + E * (1.0 - Se) ** T
+    with np.errstate(divide="ignore", invalid="ignore"):
+        kr = ep.Krw_max * np.where(denom != 0.0, num / denom, 0.0)
+    kr = np.nan_to_num(kr, nan=0.0, posinf=ep.Krw_max, neginf=0.0)
+    kr = np.where(Sw <= ep.Swi,    0.0,        kr)
+    kr = np.where(Sw >= ep.Sw_max, ep.Krw_max, kr)
     return np.clip(kr, 0.0, None)
 
 
 def let_kro(Sw: np.ndarray, ep: Endpoints, L: float, E: float, T: float) -> np.ndarray:
-    """LET Kro: (1−Se)^L / ((1−Se)^L + E·Se^T)."""
+    """
+    LET Kro: (1−Se)^L / ((1−Se)^L + E·Se^T).
+
+    Edge-case guard: same denominator-zero risk as let_krw.  np.errstate suppresses
+    the divide-by-zero warning; np.nan_to_num replaces any resulting NaN/Inf with
+    0.0 before endpoint overrides are applied.
+    """
     Se = _Se(Sw, ep.Swi, ep.Sor)
     f   = 1.0 - Se
     num = f ** L
-    kr  = ep.Kro_max * num / (num + E * Se ** T)
-    kr  = np.where(Sw <= ep.Swi,    ep.Kro_max, kr)
-    kr  = np.where(Sw >= ep.Sw_max, 0.0,        kr)
+    denom = num + E * Se ** T
+    with np.errstate(divide="ignore", invalid="ignore"):
+        kr = ep.Kro_max * np.where(denom != 0.0, num / denom, 0.0)
+    kr = np.nan_to_num(kr, nan=0.0, posinf=ep.Kro_max, neginf=0.0)
+    kr = np.where(Sw <= ep.Swi,    ep.Kro_max, kr)
+    kr = np.where(Sw >= ep.Sw_max, 0.0,        kr)
     return np.clip(kr, 0.0, None)
 
 
 def bc_pc(Sw: np.ndarray, Swi: float, Pd: float, lam: float) -> np.ndarray:
-    """Brooks-Corey Pc = Pd · Se^(−1/λ). Se = (Sw−Swi)/(1−Swi)."""
-    Se = np.clip((Sw - Swi) / (1.0 - Swi), 1e-6, 1.0)
-    return Pd * Se ** (-1.0 / lam)
+    """
+    Brooks-Corey Pc = Pd · Se^(−1/λ).  Se = (Sw−Swi)/(1−Swi).
+
+    Edge-case guards:
+    - lam=0 would produce a division-by-zero in the exponent (−1/λ); it is clamped
+      to a minimum of 1e-9 so the function returns a finite (very large) Pc instead
+      of crashing.
+    - (1−Swi) can be zero only when Swi=1, which is physically nonsensical; it is
+      also clamped to avoid a silent NaN.
+    - All-identical Sw inputs (e.g. every value = Swi) collapse Se to the ε floor
+      via np.clip, which is already in place, so no extra guard is needed there.
+    - If all Sw values are 0 the clip to 1e-6 still produces a valid, finite result.
+    - Final np.nan_to_num ensures no NaN/Inf escapes to callers regardless of
+      extreme Pd or lam values.
+    """
+    lam_safe = lam if abs(lam) > 1e-9 else 1e-9  # prevent -1/0 in the exponent
+    denom = 1.0 - Swi
+    denom_safe = denom if abs(denom) > 1e-9 else 1e-9
+    Se = np.clip((Sw - Swi) / denom_safe, 1e-6, 1.0)
+    with np.errstate(divide="ignore", invalid="ignore", over="ignore"):
+        result = Pd * Se ** (-1.0 / lam_safe)
+    return np.nan_to_num(result, nan=Pd, posinf=1e15, neginf=0.0)
 
 
 # ── STATISTICS ────────────────────────────────────────────────────────────────
@@ -181,42 +232,119 @@ class KrCurveFitter:
         return self._Sw.copy(), Kr_smooth
 
     def fit_brooks_corey(self, Sw: np.ndarray, Krw: np.ndarray, Kro: np.ndarray) -> BrooksCoreyResult:
-        ep    = self.ep
+        """
+        Fit Brooks-Corey exponents nw and no to lab data.
+
+        Edge-case guards:
+        - Sw, Krw, Kro are sorted by ascending Sw and deduplicated before fitting so
+          that non-monotonic or repeated saturation arrays (common with raw lab uploads)
+          do not cause curve_fit to fail with a singular Jacobian.
+        - curve_fit failures are caught with explicit Exception (not bare except) and
+          the log-linear initial estimate is used as the fallback rather than silently
+          swallowing the error.
+        - All-identical Sw or fewer than 2 valid interior points returns a safe
+          default BrooksCoreyResult(nw=2.0, no=2.0) immediately.
+        """
+        ep = self.ep
+
+        # Sort and deduplicate by Sw to handle non-monotonic lab arrays.
+        sort_idx = np.argsort(Sw)
+        Sw, Krw, Kro = Sw[sort_idx], Krw[sort_idx], Kro[sort_idx]
+        _, uniq_idx = np.unique(Sw, return_index=True)
+        Sw, Krw, Kro = Sw[uniq_idx], Krw[uniq_idx], Kro[uniq_idx]
+
         valid = (Sw > ep.Swi) & (Sw < ep.Sw_max)
-        if not np.any(valid): return BrooksCoreyResult(nw=2.0, no=2.0, endpoints=ep)
+        if not np.any(valid):
+            return BrooksCoreyResult(nw=2.0, no=2.0, endpoints=ep)
+
         def _log_estimate(Se_v, Kr_v, Kr_max):
             mask = (Kr_v > 1e-6) & (Se_v > 1e-6)
-            if np.sum(mask) < 2: return 2.0
+            if np.sum(mask) < 2:
+                return 2.0
             lSe, lKr = np.log(Se_v[mask]), np.log(Kr_v[mask] / Kr_max)
             n = float(-np.dot(lSe, lKr) / (np.dot(lSe, lSe) + 1e-12))
             return np.clip(n, 0.5, 10.0)
-        Se_v  = _Se(Sw[valid], ep.Swi, ep.Sor)
-        nw_0  = _log_estimate(Se_v, Krw[valid], ep.Krw_max)
-        no_0  = _log_estimate(1.0 - Se_v, Kro[valid], ep.Kro_max)
+
+        Se_v = _Se(Sw[valid], ep.Swi, ep.Sor)
+        nw_0 = _log_estimate(Se_v, Krw[valid], ep.Krw_max)
+        no_0 = _log_estimate(1.0 - Se_v, Kro[valid], ep.Kro_max)
+
         try:
-            popt, _ = curve_fit(lambda s, n: bc_krw(s, ep, n), Sw[valid], Krw[valid], p0=[nw_0], bounds=(0.1, 15.0))
+            popt, _ = curve_fit(
+                lambda s, n: bc_krw(s, ep, n),
+                Sw[valid], Krw[valid], p0=[nw_0], bounds=(0.1, 15.0),
+            )
             nw = float(popt[0])
-        except: nw = nw_0
+        except Exception:
+            nw = nw_0  # fallback to log-linear estimate
+
         try:
-            popt, _ = curve_fit(lambda s, n: bc_kro(s, ep, n), Sw[valid], Kro[valid], p0=[no_0], bounds=(0.1, 15.0))
+            popt, _ = curve_fit(
+                lambda s, n: bc_kro(s, ep, n),
+                Sw[valid], Kro[valid], p0=[no_0], bounds=(0.1, 15.0),
+            )
             no = float(popt[0])
-        except: no = no_0
+        except Exception:
+            no = no_0  # fallback to log-linear estimate
+
         Krw_h, Kro_h = bc_krw(Sw, ep, nw), bc_kro(Sw, ep, no)
-        return BrooksCoreyResult(nw=round(nw,4), no=round(no,4), endpoints=ep, r2_krw=round(_r2(Krw, Krw_h),4), r2_kro=round(_r2(Kro, Kro_h),4))
+        return BrooksCoreyResult(
+            nw=round(nw, 4), no=round(no, 4), endpoints=ep,
+            r2_krw=round(_r2(Krw, Krw_h), 4), r2_kro=round(_r2(Kro, Kro_h), 4),
+        )
 
     def fit_let(self, Sw: np.ndarray, Krw: np.ndarray, Kro: np.ndarray) -> LETResult:
+        """
+        Fit LET (L, E, T) parameters for both water and oil curves.
+
+        Edge-case guards:
+        - Sw, Krw, Kro are sorted by ascending Sw and deduplicated before fitting so
+          that non-monotonic or repeated saturation arrays do not cause curve_fit to
+          fail with a singular Jacobian.
+        - curve_fit failures are caught with explicit Exception (not bare except) and
+          the initial guess p0 = [1.5, 1.0, 1.5] is used as a physically reasonable
+          fallback rather than silently discarding the error.
+        - Fewer than 2 valid interior points returns a safe default LETResult
+          immediately.
+        """
         ep = self.ep
+
+        # Sort and deduplicate by Sw to handle non-monotonic lab arrays.
+        sort_idx = np.argsort(Sw)
+        Sw, Krw, Kro = Sw[sort_idx], Krw[sort_idx], Kro[sort_idx]
+        _, uniq_idx = np.unique(Sw, return_index=True)
+        Sw, Krw, Kro = Sw[uniq_idx], Krw[uniq_idx], Kro[uniq_idx]
+
         valid = (Sw > ep.Swi) & (Sw < ep.Sw_max)
-        if not np.any(valid): return LETResult(1.5,1.0,1.5,1.5,1.0,1.5,ep)
-        p0, bounds = [1.5, 1.0, 1.5], ([0.1, 0.01, 0.1], [10.0, 100.0, 10.0])
-        try: pw, _ = curve_fit(lambda s,L,E,T: let_krw(s,ep,L,E,T), Sw[valid], Krw[valid], p0=p0, bounds=bounds)
-        except: pw = p0
-        try: po, _ = curve_fit(lambda s,L,E,T: let_kro(s,ep,L,E,T), Sw[valid], Kro[valid], p0=p0, bounds=bounds)
-        except: po = p0
+        if not np.any(valid):
+            return LETResult(1.5, 1.0, 1.5, 1.5, 1.0, 1.5, ep)
+
+        p0     = [1.5, 1.0, 1.5]
+        bounds = ([0.1, 0.01, 0.1], [10.0, 100.0, 10.0])
+
+        try:
+            pw, _ = curve_fit(
+                lambda s, L, E, T: let_krw(s, ep, L, E, T),
+                Sw[valid], Krw[valid], p0=p0, bounds=bounds,
+            )
+        except Exception:
+            pw = p0  # fallback to initial guess
+
+        try:
+            po, _ = curve_fit(
+                lambda s, L, E, T: let_kro(s, ep, L, E, T),
+                Sw[valid], Kro[valid], p0=p0, bounds=bounds,
+            )
+        except Exception:
+            po = p0  # fallback to initial guess
+
         Lw, Ew, Tw = [round(float(v), 4) for v in pw]
         Lo, Eo, To = [round(float(v), 4) for v in po]
         Krw_h, Kro_h = let_krw(Sw, ep, Lw, Ew, Tw), let_kro(Sw, ep, Lo, Eo, To)
-        return LETResult(Lw=Lw, Ew=Ew, Tw=Tw, Lo=Lo, Eo=Eo, To=To, endpoints=ep, r2_krw=round(_r2(Krw, Krw_h), 4), r2_kro=round(_r2(Kro, Kro_h), 4))
+        return LETResult(
+            Lw=Lw, Ew=Ew, Tw=Tw, Lo=Lo, Eo=Eo, To=To, endpoints=ep,
+            r2_krw=round(_r2(Krw, Krw_h), 4), r2_kro=round(_r2(Kro, Kro_h), 4),
+        )
 
     def generate_grid(self, model: str, params) -> dict:
         Sw = self._Sw
