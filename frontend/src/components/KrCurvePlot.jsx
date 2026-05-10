@@ -409,6 +409,7 @@ export default function KrCurvePlot({ plotData }) {
                   stroke={curve.color}
                   strokeWidth={2.5}
                   strokeOpacity={opacity}
+                  strokeDasharray={curve.dashed ? '8 5' : undefined}
                   dot={false}
                   type="monotone"
                   connectNulls
@@ -456,6 +457,7 @@ export default function KrCurvePlot({ plotData }) {
                   <svg width="20" height="4">
                     <line x1="0" y1="2" x2="20" y2="2"
                           stroke={curve.color} strokeWidth="2.5" strokeLinecap="round"
+                          strokeDasharray={curve.dashed ? '5 3' : undefined}
                           strokeOpacity={hidden ? 0.3 : 1} />
                   </svg>
                 ) : (

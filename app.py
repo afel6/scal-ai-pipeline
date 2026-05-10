@@ -387,11 +387,16 @@ CRITICAL MICP RULE — DO NOT CONFUSE WITH Kr:
   If ANY column name contains: Hg, Mercury, MICP, Pc_psia, Pressure_psia, S_Hg, Sw_Hg:
   → This is MICP data. NEVER call execute_python_simulation with Brooks-Corey Kr model.
   → MANDATORY: Call fit_petrophysical_curve with model="micp", \
-pc=[pressure values as list], s_hg=[mercury saturation values as list].
-  → The system will auto-generate BOTH the Capillary Pressure curve AND the Pore Size \
-Distribution (PSD). You do not need to construct the plots manually.
+pc=[pressure_psia list], s_hg=[mercury_saturation fraction 0–1 list].
+  → If the data contains BOTH a drainage cycle AND an imbibition (recovery) cycle: \
+also pass pc_imb=[imbibition pressures], s_hg_imb=[imbibition saturations]. \
+The system will render drainage as a SOLID line and imbibition as a DASHED line \
+on the same log-scale Pc plot, and compute trapped mercury (hysteresis).
+  → The Y-axis (Capillary Pressure) is always log-scale. The X-axis is Mercury Saturation \
+in % Pore Volume (0–100%). You do NOT construct this manually.
   → Your analysis must address: Entry Pressure, Threshold Pressure, Pore Throat Radius, \
-Sorting Coefficient, and reservoir quality classification — NOT wettability crossover.
+Sorting Coefficient, reservoir quality classification, and — if imbibition provided — \
+Hysteresis (trapped mercury %) and seal capacity implications. NOT wettability crossover.
 
 CRITICAL RI / FF RULE — LOG-LOG SCALE IS MANDATORY:
   Resistivity Index and Formation Factor plots MUST use log-log axes. \
@@ -466,10 +471,24 @@ Pore Throat Sorting (shape of PSD peak):
   Bimodal PSD          → Dual-porosity (fracture + matrix); common Libyan carbonate; must model separately
   Multiple PSD peaks   → Complex diagenesis; cement-lined or fractured system
 
-Maximum Hg Saturation (Sw_Hg_max):
-  > 0.85  → Well-connected pore network; low dead-end porosity
-  0.60–0.85 → Moderate connectivity; check clay content
-  < 0.60  → High micro-porosity trapping or clay-rich; NMR T2 cross-check recommended
+Maximum Hg Saturation (Sw_Hg_max %):
+  > 85%   → Well-connected pore network; low dead-end porosity
+  60–85%  → Moderate connectivity; check clay content
+  < 60%   → High micro-porosity trapping or clay-rich; NMR T2 cross-check recommended
+
+Hysteresis (Trapped Mercury = Drainage peak − Imbibition final):
+  < 10%   → Low trapping; efficient pore connectivity; good waterflood sweep candidate
+  10–25%  → Moderate trapping; wettability is mixed or oil-wet in some pore classes
+  25–40%  → High trapping; strong snap-off mechanism; waterflooding residual will be high
+  > 40%   → Severe trapping; pore geometry dominated by narrow throats with large bodies \
+(ink-bottle effect); EOR required to mobilise trapped phase
+  Hysteresis = 0 (no imbibition data): state this explicitly and flag as incomplete MICP dataset.
+
+Drainage vs Imbibition log-Pc plot conventions:
+  Solid line   → Drainage cycle (mercury invasion)
+  Dashed line  → Imbibition cycle (mercury withdrawal / recovery)
+  The area between the two curves on the Pc plot is proportional to the energy \
+dissipated by snap-off trapping.
 
 Report the dominant pore throat radius (peak of PSD), the sorting coefficient, and the \
 reservoir quality index (RQI = 0.0314 * sqrt(k/φ) if permeability is available).
@@ -602,7 +621,9 @@ _HVIEL_TOOLS = [
                 "description": (
                     "Fits raw SCAL lab data to standard petrophysical models. Select model by curve type:\n"
                     "  model='brooks_corey' or 'let' → Relative Permeability (pass sw, krw, kro arrays).\n"
-                    "  model='micp' → Mercury Injection (pass pc=[psia values], s_hg=[fraction values]). Auto-generates Pc + PSD.\n"
+                    "  model='micp' → Mercury Injection (pass pc=[psia], s_hg=[fraction 0-1]). "
+                    "For imbibition (recovery) cycle: also pass pc_imb=[psia], s_hg_imb=[fraction]. "
+                    "Auto-generates log-scale Pc curve (drainage solid, imbibition dashed) + PSD.\n"
                     "  model='ri' → Resistivity Index Archie fit (pass sw=[...], ri=[...]). Log-log plot, fits n exponent.\n"
                     "  model='ff' → Formation Factor Archie fit (pass porosity=[...], ff=[...]). Log-log plot, fits m and a.\n"
                     "  model='jfunction' → Leverett J-Function (pass sw=[...], pc=[psia], k_md=X, phi_val=Y, ift_cos_theta=26.5).\n"
@@ -618,7 +639,9 @@ _HVIEL_TOOLS = [
                         "krw":           {"type": "ARRAY", "items": {"type": "NUMBER"}},
                         "kro":           {"type": "ARRAY", "items": {"type": "NUMBER"}},
                         "pc":            {"type": "ARRAY", "items": {"type": "NUMBER"}},
-                        "s_hg":          {"type": "ARRAY", "items": {"type": "NUMBER"}},
+                        "s_hg":         {"type": "ARRAY", "items": {"type": "NUMBER"}},
+                        "pc_imb":       {"type": "ARRAY", "items": {"type": "NUMBER"}},
+                        "s_hg_imb":     {"type": "ARRAY", "items": {"type": "NUMBER"}},
                         "ri":            {"type": "ARRAY", "items": {"type": "NUMBER"}},
                         "ff":            {"type": "ARRAY", "items": {"type": "NUMBER"}},
                         "porosity":      {"type": "ARRAY", "items": {"type": "NUMBER"}},
@@ -728,31 +751,34 @@ class PRCChatAssistant:
 
     def _format_tool_response(self, name: str, args: dict, result: str) -> str:
         try:
-            # ── MICP: compute Pc curve + PSD directly from args (no curve_fitting_skill needed) ──
+            # ── MICP: Drainage + Imbibition, log-Pc, % x-axis, hysteresis ────────────
             if name == "fit_petrophysical_curve" and args.get("model") == "micp":
-                pc_raw  = args.get("pc",  [])
-                shg_raw = args.get("s_hg", [])
+                pc_raw      = args.get("pc",      [])
+                shg_raw     = args.get("s_hg",    [])
+                pc_imb_raw  = args.get("pc_imb",  [])
+                shg_imb_raw = args.get("s_hg_imb",[])
                 if len(pc_raw) > 1 and len(shg_raw) > 1:
                     pc_arr  = np.array(pc_raw,  dtype=float)
                     shg_arr = np.array(shg_raw, dtype=float)
-                    # Sort by mercury saturation
-                    idx      = np.argsort(shg_arr)
-                    pc_s     = pc_arr[idx]
-                    shg_s    = shg_arr[idx]
-                    pc_pos   = np.maximum(pc_s, 0.01)
-                    # Washburn: r(µm) = 2·γ·|cosθ| / Pc  — for Hg-air γ=480 mN/m, θ=140° → r=107.5/Pc_psia
-                    r_um     = 107.5 / pc_pos
-                    # Entry pressure = first non-trivial Pc (where Sw_Hg first exceeds 1 %)
+                    idx     = np.argsort(shg_arr)
+                    pc_s    = pc_arr[idx]
+                    shg_s   = shg_arr[idx]
+                    # X-axis: fraction → % Pore Volume
+                    shg_pct = shg_s * 100.0
+                    pc_pos  = np.maximum(pc_s, 0.1)
+                    # Washburn: r(µm) = 107.5 / Pc_psia  (Hg-air: γ=480 mN/m, θ=140°)
+                    r_um    = 107.5 / pc_pos
+                    # Entry pressure — first point where Hg_sat > 1 %
                     entry_mask = shg_s > 0.01
                     pe = float(pc_s[entry_mask][0]) if entry_mask.any() else float(pc_s[0])
-                    # Threshold pressure = Pc at maximum d(Sw)/dPc (inflection)
+                    # Threshold pressure — inflection of Pc(Sw) curve
                     if len(pc_s) > 2:
                         grad   = np.gradient(shg_s, pc_s)
                         thr_pc = float(pc_s[np.argmax(grad)])
                     else:
                         thr_pc = pe
-                    thr_r = 107.5 / max(thr_pc, 0.01)
-                    # PSD: dSw/d(log10 r)  — positive because Sw increases as r decreases
+                    thr_r = 107.5 / max(thr_pc, 0.1)
+                    # PSD: dSw/d(log10 r)
                     log_r   = np.log10(r_um)
                     psd_pts = []
                     for j in range(1, len(shg_s)):
@@ -763,37 +789,63 @@ class PRCChatAssistant:
                                 "y": float(abs((shg_s[j] - shg_s[j-1]) / dlr)),
                             })
                     psd_pts.sort(key=lambda p: p["x"])
-                    # Plot 1 — Capillary Pressure curve
+                    # ── Imbibition (recovery) cycle ────────────────────────────────
+                    has_imb       = len(pc_imb_raw) > 1 and len(shg_imb_raw) > 1
+                    trapped_pct   = None
+                    curves_pc     = [
+                        {"name": "Drainage Pc", "showLine": True, "showPoints": True,
+                         "color": "#a855f7", "dashed": False,
+                         "data": [{"x": float(s), "y": float(p)}
+                                  for s, p in zip(shg_pct, pc_s)]},
+                    ]
+                    if has_imb:
+                        pc_imb_a   = np.array(pc_imb_raw,  dtype=float)
+                        shg_imb_a  = np.array(shg_imb_raw, dtype=float)
+                        idx_imb    = np.argsort(shg_imb_a)
+                        pc_imb_s   = pc_imb_a[idx_imb]
+                        shg_imb_s  = shg_imb_a[idx_imb]
+                        shg_imb_pct= shg_imb_s * 100.0
+                        # Trapped Hg = drainage peak sat − imbibition final sat
+                        trapped_pct = round(float(shg_pct[-1]) - float(shg_imb_pct[-1]), 1)
+                        curves_pc.append({
+                            "name": "Imbibition Pc", "showLine": True, "showPoints": True,
+                            "color": "#c084fc", "dashed": True,
+                            "data": [{"x": float(s), "y": float(p)}
+                                     for s, p in zip(shg_imb_pct, pc_imb_s)],
+                        })
+                    # Plot 1 — Capillary Pressure (log-scale Y)
                     plot_pc = {
-                        "title": "MICP — Capillary Pressure vs Mercury Saturation",
-                        "xAxis": {"label": "Mercury Saturation Sw_Hg (fraction)"},
-                        "yAxis": {"label": "Capillary Pressure Pc (psia)"},
-                        "curves": [{"name": "Pc (Mercury Injection)", "showLine": True,
-                                    "showPoints": True, "color": "#a855f7",
-                                    "data": [{"x": float(s), "y": float(p)}
-                                             for s, p in zip(shg_s, pc_s)]}],
+                        "title":    "MICP — Capillary Pressure vs Mercury Saturation",
+                        "xAxis":    {"label": "Mercury Saturation (% Pore Volume)"},
+                        "yAxis":    {"label": "Capillary Pressure Pc (psia)"},
+                        "yAxisLog": True,
+                        "curves":   curves_pc,
                         "metadata": {"micp": {
                             "entry_pressure_psia":     round(pe, 2),
                             "threshold_pressure_psia": round(thr_pc, 2),
                             "modal_pore_radius_um":    round(thr_r, 3),
-                            "max_hg_saturation":       round(float(shg_s[-1]), 4),
+                            "max_hg_saturation_pct":   round(float(shg_pct[-1]), 1),
+                            "trapped_hg_pct":          trapped_pct,
                         }},
                     }
                     # Plot 2 — Pore Size Distribution
                     plot_psd = {
-                        "title": "Pore Throat Size Distribution (MICP)",
-                        "xAxis": {"label": "Pore Throat Radius r (µm)"},
-                        "yAxis": {"label": "Incremental Hg Saturation  dSw/d(log r)"},
+                        "title":  "Pore Throat Size Distribution (MICP)",
+                        "xAxis":  {"label": "Pore Throat Radius r (µm)"},
+                        "yAxis":  {"label": "Incremental Hg Saturation  dSw/d(log r)"},
                         "curves": [{"name": "Pore Throat Distribution", "showLine": True,
                                     "showPoints": False, "color": "#f59e0b",
                                     "data": psd_pts}],
                     }
-                    summary = (
-                        f"Entry Pressure Pe = {pe:.1f} psia  |  "
-                        f"Threshold Pressure = {thr_pc:.1f} psia  |  "
-                        f"Modal Pore Throat r = {thr_r:.3f} µm  |  "
-                        f"Max Hg Saturation = {float(shg_s[-1]):.3f}"
-                    )
+                    parts = [
+                        f"Entry Pressure Pe = {pe:.1f} psia",
+                        f"Threshold Pressure = {thr_pc:.1f} psia",
+                        f"Modal Pore Throat r = {thr_r:.3f} µm",
+                        f"Max Hg Saturation = {float(shg_pct[-1]):.1f}%",
+                    ]
+                    if trapped_pct is not None:
+                        parts.append(f"Trapped Hg (Hysteresis) = {trapped_pct:.1f}%")
+                    summary = "  |  ".join(parts)
                     return (
                         f"\n\nMICP analysis complete. {summary}\n\n"
                         f"__PRC_PLOT__\n{_json.dumps(plot_pc, ensure_ascii=False)}\n\n"
