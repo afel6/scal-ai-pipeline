@@ -1290,10 +1290,34 @@ class PRCChatAssistant:
 
     def chat(self, history: list, msg: str, kb_context: str = "", f_parts: list = [], stream: bool = False):
         # Structure the KB context clearly so Gemini's Section 2 protocol fires correctly
-        if kb_context:
-            enriched = f"{msg}\n\n[CONTEXT FROM PRC TECHNICAL LIBRARY:\n{kb_context}\nEND CONTEXT]"
+        extracted_context = ""
+        import tempfile
+        for data_bytes, mime in f_parts:
+            # Only process Excel/CSV with the SCAL handler
+            if "spreadsheet" in mime or "excel" in mime or "csv" in mime or "sheet" in mime:
+                with tempfile.NamedTemporaryFile(delete=False, suffix=os.path.splitext(mime)[1] if "/" not in mime else ".xlsx") as tf:
+                    tf.write(data_bytes)
+                    tmp_path = tf.name
+                try:
+                    handler = SCALFileHandler(tmp_path)
+                    result = handler.process()
+                    if result.get('data_type') != 'UNKNOWN':
+                        extracted_context += f"\n\n[EXTRACTED DATA FROM UPLOADED FILE ({result['data_type']})]:\n{json.dumps(result['extracted'], indent=2)}\n"
+                except Exception as e:
+                    print(f"SCAL Handler Error: {e}")
+                finally:
+                    try: os.unlink(tmp_path)
+                    except: pass
+
+        if kb_context or extracted_context:
+            enriched = f"{msg}"
+            if kb_context:
+                enriched += f"\n\n[CONTEXT FROM PRC TECHNICAL LIBRARY:\n{kb_context}\nEND CONTEXT]"
+            if extracted_context:
+                enriched += f"\n\n{extracted_context}\n[INSTRUCTION: Use the extracted data above to fulfill the request. Do not ask the user for data that is already extracted here.]"
         else:
             enriched = msg
+
         contents, uploaded_uris = self._build_contents(history, enriched, f_parts)
         _tls.last_file_uris = ",".join(uploaded_uris) if uploaded_uris else None
 
