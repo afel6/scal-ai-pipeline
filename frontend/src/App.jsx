@@ -193,6 +193,14 @@ export default function App() {
     }
   }, [sessionId, refreshSessions]);
 
+  // ── rename session ────────────────────────────────────────────────────────
+  const handleRenameSession = useCallback(async (sid, newTitle) => {
+    if (!sid || !newTitle) return;
+    const form = new URLSearchParams({ title: newTitle });
+    await axios.post(`${API_URL}/api/session/${sid}/title`, form);
+    await refreshSessions();
+  }, [refreshSessions]);
+
   // ── admin PIN → backend auth ───────────────────────────────────────────────
   const handleAdminAuth = useCallback(async (pin) => {
     try {
@@ -443,6 +451,7 @@ export default function App() {
           sessions={sessions}
           handleLoadSession={handleLoadSession}
           handleDeleteSession={handleDeleteSession}
+          handleRenameSession={handleRenameSession}
           tab={activeTab}
           setTab={setActiveTab}
         />

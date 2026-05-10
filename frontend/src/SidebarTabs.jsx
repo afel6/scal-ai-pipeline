@@ -11,7 +11,9 @@ function timeAgo(ts) {
   return `${Math.floor(diff / 86400)}d ago`;
 }
 
-export default function SidebarTabs({ sessionId, sessions, handleLoadSession, handleDeleteSession, tab, setTab }) {
+export default function SidebarTabs({ sessionId, sessions, handleLoadSession, handleDeleteSession, handleRenameSession, tab, setTab }) {
+  const [editingId, setEditingId] = useState(null);
+  const [editingTitle, setEditingTitle] = useState('');
 
   const [books, setBooks] = useState([]);
   const [skills, setSkills] = useState([]);
@@ -46,10 +48,9 @@ export default function SidebarTabs({ sessionId, sessions, handleLoadSession, ha
     const file = e.target.files[0];
     if (!file) return;
 
-    // Added password check
     if (bookPassword !== '1509') {
       alert("Invalid Admin Password.");
-      e.target.value = ''; // Clear the file input
+      e.target.value = '';
       return;
     }
 
@@ -118,7 +119,37 @@ export default function SidebarTabs({ sessionId, sessions, handleLoadSession, ha
                 }`}>
               <MessageSquare className="w-4 h-4 mt-0.5 shrink-0 text-yellow-500/60" />
               <div className="flex-1 min-w-0">
-                <p className="text-sm font-medium truncate">{s.title}</p>
+                {editingId === s.id ? (
+                  <input
+                    autoFocus
+                    className="w-full bg-black/50 border border-yellow-500/50 rounded px-1.5 py-0.5 text-sm text-yellow-100 outline-none"
+                    value={editingTitle}
+                    onChange={(e) => setEditingTitle(e.target.value)}
+                    onBlur={() => {
+                      handleRenameSession(s.id, editingTitle);
+                      setEditingId(null);
+                    }}
+                    onKeyDown={(e) => {
+                      if (e.key === 'Enter') {
+                        handleRenameSession(s.id, editingTitle);
+                        setEditingId(null);
+                      }
+                      if (e.key === 'Escape') setEditingId(null);
+                    }}
+                    onClick={(e) => e.stopPropagation()}
+                  />
+                ) : (
+                  <p 
+                    className="text-sm font-medium truncate"
+                    onDoubleClick={(e) => {
+                      e.stopPropagation();
+                      setEditingId(s.id);
+                      setEditingTitle(s.title);
+                    }}
+                  >
+                    {s.title}
+                  </p>
+                )}
                 <p className="text-[10px] text-slate-600 mt-0.5">{timeAgo(s.created_at)}</p>
               </div>
               <button onClick={(e) => handleDeleteSession(e, s.id)} className="opacity-0 group-hover:opacity-100 p-1 hover:text-red-400 transition-all shrink-0">
@@ -138,7 +169,6 @@ export default function SidebarTabs({ sessionId, sessions, handleLoadSession, ha
             </p>
             <p className="text-[10px] text-slate-500 font-mono leading-relaxed">Admin portal for training Hviel on proprietary laboratory manuals.</p>
             
-            {/* Upload button */}
             <div className="space-y-2">
               <input 
                 type="password" 
@@ -173,7 +203,6 @@ export default function SidebarTabs({ sessionId, sessions, handleLoadSession, ha
               </label>
             </div>
 
-            {/* Upload result message */}
             {uploadMsg && (
               <div className={`text-[10px] font-bold p-3 rounded-xl border leading-relaxed animate-in fade-in slide-in-from-top-2
                 ${uploadMsg.includes('✅') ? 'bg-green-500/5 border-green-500/20 text-green-400' : 'bg-red-500/5 border-red-500/20 text-red-400'}`}>
@@ -182,7 +211,6 @@ export default function SidebarTabs({ sessionId, sessions, handleLoadSession, ha
             )}
           </div>
 
-          {/* Autonomous Skills Section */}
           <div className="space-y-3 pt-2">
             <div className="flex items-center justify-between px-1">
               <p className="text-[10px] text-yellow-500 font-black uppercase tracking-[0.2em] flex items-center gap-2 italic">
@@ -197,9 +225,7 @@ export default function SidebarTabs({ sessionId, sessions, handleLoadSession, ha
             <div className="space-y-2.5">
               {skills.map((s, i) => (
                 <div key={i} className="group relative overflow-hidden rounded-2xl bg-[#0c0c10] border border-slate-800 hover:border-yellow-900/40 transition-all p-4 shadow-xl">
-                  {/* Subtle hover background glow */}
                   <div className="absolute top-0 right-0 w-24 h-24 bg-yellow-500/5 blur-3xl opacity-0 group-hover:opacity-100 transition-opacity" />
-                  
                   <div className="relative flex items-center gap-2 mb-2">
                     <span className="text-[8px] font-black text-yellow-600 bg-yellow-950/30 px-1.5 py-0.5 rounded uppercase tracking-[0.15em] border border-yellow-900/20">{s.category}</span>
                     <span className="text-xs font-black text-slate-200 uppercase tracking-wider">{s.name}</span>
@@ -210,7 +236,6 @@ export default function SidebarTabs({ sessionId, sessions, handleLoadSession, ha
             </div>
           </div>
 
-          {/* Knowledge Base Section */}
           {books.length > 0 && (
             <div className="space-y-3 pt-4 pb-10 border-t border-slate-800/40">
               <p className="text-[10px] text-slate-500 font-black uppercase tracking-[0.2em] px-1 italic">Knowledge Base Status</p>

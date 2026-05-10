@@ -48,6 +48,12 @@ class SCALBatchIngestion:
             ff_s = get_col_data(['ff', 'f.f.', 'formation factor'])
             sw_s = get_col_data(['sw', 'water saturation', 'brine sat'])
             ri_s = get_col_data(['ri', 'r.i.', 'resistivity index'])
+            
+            # MICP specific headers
+            pc_s = get_col_data(['pc', 'capillary pressure', 'pressure (psia)', 'pressure(psia)'])
+            shg_s = get_col_data(['shg', 'mercury saturation', 'hgsat', 'shg_frac', 'saturation_hg'])
+            shg_imb_s = get_col_data(['shg_imb', 'imb_sat', 'shg_recovery', 'mercury recovery'])
+            pc_imb_s = get_col_data(['pc_imb', 'imb_pc', 'imbibition pc'])
 
             for i in range(len(df)):
                 extracted = {
@@ -56,7 +62,11 @@ class SCALBatchIngestion:
                     "Permeability": perm_s.iloc[i] if pd.notna(perm_s.iloc[i]) else None,
                     "Formation_Factor": ff_s.iloc[i] if pd.notna(ff_s.iloc[i]) else None,
                     "Brine_Saturation": sw_s.iloc[i] if pd.notna(sw_s.iloc[i]) else None,
-                    "Resistivity_Index": ri_s.iloc[i] if pd.notna(ri_s.iloc[i]) else None
+                    "Resistivity_Index": ri_s.iloc[i] if pd.notna(ri_s.iloc[i]) else None,
+                    "Pc": pc_s.iloc[i] if pd.notna(pc_s.iloc[i]) else None,
+                    "SHg": shg_s.iloc[i] if pd.notna(shg_s.iloc[i]) else None,
+                    "SHg_Imb": shg_imb_s.iloc[i] if pd.notna(shg_imb_s.iloc[i]) else None,
+                    "Pc_Imb": pc_imb_s.iloc[i] if pd.notna(pc_imb_s.iloc[i]) else None
                 }
                 
                 # Check if it has any valid oilfield numbers

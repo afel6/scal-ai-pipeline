@@ -1107,7 +1107,12 @@ class PRCChatAssistant:
         return {"status": "executed", "tool": name, "note": "Tool executed. Results and visualization rendered in chat."}
 
     def _build_contents(self, history: list, enriched_msg: str, f_parts: list) -> tuple[list, list[str]]:
-        SUPPORTED = {"application/pdf","image/jpeg","image/png","image/gif","image/webp"}
+        SUPPORTED = {
+            "application/pdf", "image/jpeg", "image/png", "image/gif", "image/webp",
+            "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+            "text/plain", "text/csv"
+        }
         contents  = []
         for h in history:
             role  = "user" if h["role"] == "user" else "model"
@@ -1151,6 +1156,10 @@ class PRCChatAssistant:
                     pass
 
         contents.append(genai_types.Content(role="user", parts=user_parts))
+
+        # Ensure session exists in the sessions table
+        # We don't have the sid here, so we do it in the caller
+        return contents, uploaded_uris
         return contents, uploaded_uris
 
     def chat(self, history: list, msg: str, kb_context: str = "", f_parts: list = [], stream: bool = False):
@@ -1461,6 +1470,7 @@ class KnowledgeBase:
 def init_db() -> None:
     base_stmts = [
         "CREATE TABLE IF NOT EXISTS m (id INTEGER PRIMARY KEY AUTOINCREMENT, sid TEXT, role TEXT, text TEXT, url TEXT, ts REAL, user_email TEXT, fname TEXT)",
+        "CREATE TABLE IF NOT EXISTS sessions (sid TEXT PRIMARY KEY, title TEXT NOT NULL DEFAULT 'New Study', user_email TEXT, created_at REAL, updated_at REAL)",
         "CREATE TABLE IF NOT EXISTS kb (id INTEGER PRIMARY KEY AUTOINCREMENT, source TEXT, chunk TEXT)",
         "CREATE TABLE IF NOT EXISTS kb_vectors (id INTEGER PRIMARY KEY AUTOINCREMENT, chunk_id INTEGER UNIQUE, embedding BLOB)",
         "CREATE TABLE IF NOT EXISTS users (id INTEGER PRIMARY KEY AUTOINCREMENT, email TEXT UNIQUE, name TEXT, created_at REAL)",
@@ -1472,6 +1482,17 @@ def init_db() -> None:
     for s in base_stmts:
         try: db(s)
         except Exception: pass
+    # Backfill existing m rows → sessions table (migration for pre-existing installs)
+    try:
+        if _PG_AVAILABLE:
+            db("INSERT INTO sessions (sid,title,user_email,created_at,updated_at) "
+               "SELECT sid,'New Study',MAX(user_email),MIN(ts),MAX(ts) FROM m GROUP BY sid "
+               "ON CONFLICT (sid) DO NOTHING")
+        else:
+            db("INSERT OR IGNORE INTO sessions (sid,title,user_email,created_at,updated_at) "
+               "SELECT sid,'New Study',MAX(user_email),MIN(ts),MAX(ts) FROM m GROUP BY sid")
+    except Exception:
+        pass
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -1580,19 +1601,46 @@ async def track_event(user_email: str = Form(""), event_type: str = Form(...), e
 @app.get("/api/sessions")
 def get_sessions(email: str = None):
     const_email = email.lower().strip() if email else None
-    q = "SELECT DISTINCT sid, MIN(ts) FROM m {filter} GROUP BY sid ORDER BY MIN(ts) DESC"
-    f = "WHERE user_email=?" if const_email else ""
+    # Join with sessions table to get titles
+    q = """
+        SELECT m.sid, COALESCE(s.title, 'New Study'), MIN(m.ts) 
+        FROM m 
+        LEFT JOIN sessions s ON m.sid = s.sid 
+        {filter} 
+        GROUP BY m.sid 
+        ORDER BY MIN(m.ts) DESC
+    """
+    f = "WHERE m.user_email=?" if const_email else ""
     rows = db(q.format(filter=f), (const_email,) if const_email else ())
-    return [{"id": r[0], "created_at": r[1]} for r in rows]
+    return [{"id": r[0], "title": r[1], "created_at": r[2]} for r in rows]
 
 @app.get("/api/session/{sid}")
 def get_session(sid: str):
     rows = db("SELECT role, text, url, ts, fname FROM m WHERE sid=? ORDER BY id", (sid,))
-    return {"status":"ok","messages":[{"role":r,"text":t,"download_url":u,"ts":ts,"fileName":fn} for r,t,u,ts,fn in rows]}
+    # Also fetch title
+    title_row = db("SELECT title FROM sessions WHERE sid=?", (sid,))
+    title = title_row[0][0] if title_row else "New Study"
+    return {
+        "status":"ok",
+        "title": title,
+        "messages":[{"role":r,"text":t,"download_url":u,"ts":ts,"fileName":fn} for r,t,u,ts,fn in rows]
+    }
+
+@app.post("/api/session/{sid}/title")
+async def update_session_title(sid: str, title: str = Form(...)):
+    if _PG_AVAILABLE:
+        db("INSERT INTO sessions (sid, title, updated_at) VALUES (?, ?, ?) "
+           "ON CONFLICT (sid) DO UPDATE SET title = EXCLUDED.title, updated_at = EXCLUDED.updated_at",
+           (sid, title, time.time()))
+    else:
+        db("INSERT OR REPLACE INTO sessions (sid, title, updated_at) VALUES (?, ?, ?)",
+           (sid, title, time.time()))
+    return {"status": "ok"}
 
 @app.delete("/api/session/{sid}")
 def delete_session(sid: str):
     db("DELETE FROM m WHERE sid=?", (sid,))
+    db("DELETE FROM sessions WHERE sid=?", (sid,))
     return {"status": "ok"}
 
 @app.get("/api/chat/stream")
@@ -1611,6 +1659,16 @@ async def chat_stream(
 
             kb_ctx = await KnowledgeBase.search_async(message)
             db("INSERT INTO m (sid,role,text,ts,user_email) VALUES (?,?,?,?,?)", (sid, "user", message, time.time(), email))
+            
+            # Upsert into sessions table
+            if _PG_AVAILABLE:
+                db("INSERT INTO sessions (sid, title, user_email, updated_at) VALUES (?, 'New Study', ?, ?) "
+                   "ON CONFLICT (sid) DO UPDATE SET updated_at = EXCLUDED.updated_at",
+                   (sid, email, time.time()))
+            else:
+                db("INSERT OR IGNORE INTO sessions (sid, title, user_email, created_at, updated_at) VALUES (?, 'New Study', ?, ?, ?)",
+                   (sid, email, time.time(), time.time()))
+                db("UPDATE sessions SET updated_at=? WHERE sid=?", (time.time(), sid))
 
             # Fetch the most-recent 10 messages (descending), then reverse to chronological order
             hist_rows = db("SELECT role, text FROM m WHERE sid=? ORDER BY id DESC LIMIT 10", (sid,))
@@ -1657,6 +1715,16 @@ async def handle(
     kb_ctx = await KnowledgeBase.search_async(message)
     db("INSERT INTO m (sid,role,text,ts,user_email) VALUES (?,?,?,?,?)",
        (sid, "user", message, time.time(), email))
+
+    # Upsert into sessions table
+    if _PG_AVAILABLE:
+        db("INSERT INTO sessions (sid, title, user_email, updated_at) VALUES (?, 'New Study', ?, ?) "
+           "ON CONFLICT (sid) DO UPDATE SET updated_at = EXCLUDED.updated_at",
+           (sid, email, time.time()))
+    else:
+        db("INSERT OR IGNORE INTO sessions (sid, title, user_email, created_at, updated_at) VALUES (?, 'New Study', ?, ?, ?)",
+           (sid, email, time.time(), time.time()))
+        db("UPDATE sessions SET updated_at=? WHERE sid=?", (time.time(), sid))
 
     # ── Document generation path (Gemini JSON → HvielDocEngine file) ──────────
     file_type = hviel_engine._detect_type(message) if hviel_engine else None
