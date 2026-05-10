@@ -131,16 +131,20 @@ def _get_conn():
 
 def db(query: str, params: tuple = ()) -> list:
     """Execute a query written with ? placeholders against the active backend."""
-    with _get_conn() as (conn, ph):
-        q   = query if ph == "?" else _translate_placeholders(query)
-        cur = conn.cursor()
-        cur.execute(q, params)
-        try:
-            result = cur.fetchall()
-        except Exception:
-            result = []
-        conn.commit()
-        return result
+    try:
+        with _get_conn() as (conn, ph):
+            q   = query if ph == "?" else _translate_placeholders(query)
+            cur = conn.cursor()
+            cur.execute(q, params)
+            try:
+                result = cur.fetchall()
+            except Exception:
+                result = []
+            conn.commit()
+            return result
+    except Exception as e:
+        _logger.error(f"[DB ERROR] Query: {query} | Error: {e}")
+        raise
 
 
 # ── THREAD-SAFE KEY TRACKING ──────────────────────────────────────────────────
@@ -772,6 +776,45 @@ def get_sessions(email: str = None):
 def get_session(sid: str):
     rows = db("SELECT role, text, url, ts, fname FROM m WHERE sid=? ORDER BY id", (sid,))
     return {"status":"ok","messages":[{"role":r,"text":t,"download_url":u,"ts":ts,"fileName":fn} for r,t,u,ts,fn in rows]}
+
+@app.delete("/api/session/{sid}")
+def delete_session(sid: str):
+    db("DELETE FROM m WHERE sid=?", (sid,))
+    return {"status": "ok"}
+
+@app.get("/api/chat/stream")
+async def chat_stream(
+    message:       str,
+    session_id:    Optional[str]   = None,
+    user_email:    Optional[str]   = None,
+):
+    sid   = session_id or str(uuid.uuid4())
+    email = user_email.lower().strip() if user_email else None
+    
+    kb_ctx = await KnowledgeBase.search_async(message)
+    db("INSERT INTO m (sid,role,text,ts,user_email) VALUES (?,?,?,?,?)", (sid, "user", message, time.time(), email))
+
+    async def _producer():
+        # yield first chunk as session metadata
+        yield _json.dumps({"session_id": sid}) + "\n"
+        
+        # history for context
+        hist_rows = db("SELECT role, text FROM m WHERE sid=? ORDER BY id LIMIT 10", (sid,))
+        history   = [{"role": r, "text": t} for r, t in hist_rows]
+        
+        full_reply = ""
+        try:
+            for chunk in assistant.chat(history, message, kb_ctx, stream=True):
+                full_reply += chunk
+                yield chunk
+        except Exception as e:
+            _logger.error(f"[SSE] Stream error: {e}")
+            yield f" [Error: {str(e)}]"
+        
+        db("INSERT INTO m (sid,role,text,ts,user_email) VALUES (?,?,?,?,?)", (sid, "model", full_reply, time.time(), email))
+        yield "[DONE]"
+
+    return StreamingResponse(_producer(), media_type="text/event-stream")
 
 @app.post("/api/chat")
 async def handle(
