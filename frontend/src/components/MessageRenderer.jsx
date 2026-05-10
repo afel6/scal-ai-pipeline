@@ -93,15 +93,48 @@ function _extractFirstJsonObject(str) {
   return null; // JSON not yet complete — caller should suppress raw output
 }
 
+// Attempt to sanitize and parse JSON that Gemini may have generated with minor formatting errors.
+// Returns parsed object on success, null on failure.
+function _tryParseChartJson(raw) {
+  // Attempt 1 — straight parse
+  try { return JSON.parse(raw); } catch (_) {}
+
+  // Attempt 2 — strip carriage returns (\r) which Windows / Gemini occasionally injects
+  const stripped = raw.replace(/\r/g, '');
+  try { return JSON.parse(stripped); } catch (_) {}
+
+  // Attempt 3 — remove trailing commas before ] or } (common Gemini JSON quirk)
+  const noTrailing = stripped.replace(/,(\s*[}\]])/g, '$1');
+  try { return JSON.parse(noTrailing); } catch (_) {}
+
+  // Attempt 4 — replace unescaped control characters inside strings
+  const sanitized = noTrailing.replace(/[\x00-\x1F\x7F]/g, c => {
+    const map = { '\n': '\\n', '\r': '\\r', '\t': '\\t' };
+    return map[c] || '';
+  });
+  try { return JSON.parse(sanitized); } catch (e) {
+    console.error('[PRC Plot] JSON parse failed after sanitization:', e.message, '\nRaw:', raw.slice(0, 200));
+    return null;
+  }
+}
+
 export function renderMessageContent(text) {
   if (!text) return null;
 
-  let cleanText = text.replace(/__INTERNAL_DATA_START__[\s\S]*?__INTERNAL_DATA_END__/g, '').trim();
+  // Strip \r (Windows CRLF / Gemini streaming artefact) before any processing
+  let cleanText = text
+    .replace(/\r/g, '')
+    .replace(/__INTERNAL_DATA_START__[\s\S]*?__INTERNAL_DATA_END__/g, '')
+    .trim();
   if (!cleanText && text.includes('__INTERNAL_DATA_START__')) return null;
 
   // ── PASS 1: __PRC_PLOT__ extraction ─────────────────────────────────────────
   // MUST run on full text before any line-splitting, otherwise a marker on one
   // line and its JSON on the next line end up in different segments and never match.
+  if (cleanText.includes('__PRC_PLOT__')) {
+    console.log('[PRC Plot] marker detected, text length =', cleanText.length);
+  }
+
   const afterPlot = [];
   {
     const segs = cleanText.split('__PRC_PLOT__');
@@ -109,17 +142,32 @@ export function renderMessageContent(text) {
     for (let i = 1; i < segs.length; i++) {
       const seg = segs[i];
       const bi = seg.indexOf('{');
-      if (bi === -1) continue; // marker with no JSON yet — suppress during streaming
-      const jsonStr = _extractFirstJsonObject(seg.slice(bi));
-      if (!jsonStr) continue; // incomplete JSON — suppress raw output during streaming
-      try {
-        JSON.parse(jsonStr);
-        afterPlot.push({ type: 'plot', content: jsonStr });
-        const tail = seg.slice(bi + jsonStr.length).replace(/^\s*\n?/, '');
-        if (tail) afterPlot.push({ type: 'text', content: tail });
-      } catch {
-        afterPlot.push({ type: 'text', content: '__PRC_PLOT__' + seg }); // malformed — surface for debug
+
+      if (bi === -1) {
+        console.log('[PRC Plot] seg', i, '— no { found (streaming in progress)');
+        continue;
       }
+
+      const jsonStr = _extractFirstJsonObject(seg.slice(bi));
+
+      if (!jsonStr) {
+        console.log('[PRC Plot] seg', i, '— brace-counter: null (JSON incomplete)');
+        continue;
+      }
+
+      console.log('[PRC Plot] seg', i, '— extracted', jsonStr.length, 'chars |', jsonStr.slice(0, 80));
+
+      const parsed = _tryParseChartJson(jsonStr);
+
+      if (!parsed) {
+        // _tryParseChartJson already logged the error with the raw JSON
+        afterPlot.push({ type: 'plot_error', raw: jsonStr.slice(0, 400) });
+        continue;
+      }
+
+      afterPlot.push({ type: 'plot', content: jsonStr });
+      const tail = seg.slice(bi + jsonStr.length).replace(/^\s*\n?/, '');
+      if (tail) afterPlot.push({ type: 'text', content: tail });
     }
   }
 
@@ -196,6 +244,13 @@ export function renderMessageContent(text) {
     if (part.type === 'img') return <img key={i} src={part.src} alt={part.alt} className="w-full rounded-2xl border border-white/10 my-8 shadow-2xl animate-fade-in" />;
     if (part.type === 'mermaid') return <Mermaid key={i} content={part.content} />;
     if (part.type === 'plot') return <KrCurvePlot key={i} plotData={part.content} />;
+    if (part.type === 'plot_error') return (
+      <div key={i} className="my-6 px-5 py-4 bg-red-950/20 border border-red-800/40 rounded-2xl font-mono text-[11px] text-red-400">
+        <span className="font-black uppercase tracking-widest mr-2">[PRC Plot — Invalid JSON]</span>
+        <span className="text-red-600 opacity-70">Check browser console for details.</span>
+        <pre className="mt-2 text-red-700/60 whitespace-pre-wrap break-all text-[10px]">{part.raw}</pre>
+      </div>
+    );
     if (part.type === 'dashboard') return (
       <div key={i} className="my-10 rounded-[2rem] border border-white/10 bg-[#050508] overflow-hidden shadow-2xl animate-fade-in h-[500px]">
         <iframe
