@@ -690,6 +690,15 @@ except Exception as _he:
 @app.get("/health")
 def health(): return {"status": "ok", "db": "postgres" if _PG_AVAILABLE else "sqlite"}
 
+@app.get("/")
+def root():
+    return {
+        "status": "online",
+        "system": "PRC SCAL AI Pipeline",
+        "engine": "Petrophysical Engine v14",
+        "message": "Backend is active and ready for engineering simulation."
+    }
+
 @app.get("/api/diag")
 def diag():
     with _FAILED_KEYS_LOCK: snap = dict(_FAILED_KEYS)
