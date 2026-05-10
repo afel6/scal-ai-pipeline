@@ -820,6 +820,10 @@ async def chat_stream(
                 db("INSERT INTO m (sid,role,text,ts,user_email) VALUES (?,?,?,?,?)", (sid, "model", full_reply, time.time(), email))
             
             yield "data: [DONE]\n\n"
+        except Exception as e:
+            _logger.error(f"[SSE] Stream error: {e}")
+            yield f"data: [Error: {str(e)}]\n\n"
+            yield "data: [DONE]\n\n"
 
     return StreamingResponse(_producer(), media_type="text/event-stream")
 
