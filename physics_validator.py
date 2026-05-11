@@ -188,6 +188,47 @@ class PhysicsGuard:
 
         return self
 
+    def validate_archie(self, x, y, model_type="RI") -> "PhysicsGuard":
+        """
+        Validation for Resistivity Index (RI) or Formation Factor (FF).
+        RI vs Sw: Monotone non-increasing, RI(Sw=1)=1
+        FF vs Phi: Monotone non-increasing, FF(Phi=1) should be low
+        """
+        x_a = np.asarray(x, dtype=float)
+        y_a = np.asarray(y, dtype=float)
+        idx = np.argsort(x_a)
+        x_s, y_s = x_a[idx], y_a[idx]
+
+        if model_type == "RI":
+            # Sw increases -> RI should decrease
+            n_viol = int(np.sum(np.diff(y_s) > 1e-4))
+            self._check(n_viol == 0, "RI_MONOTONICITY", f"Resistivity Index increases at {n_viol} point(s) as saturation increases.")
+            self._check(bool(np.all(y_s >= 1.0 - 1e-4)), "RI_RANGE", "Resistivity Index cannot be less than 1.0.")
+            # RI(Sw=1) should be near 1.0
+            if x_s[-1] > 0.99:
+                self._check(y_s[-1] < 1.1, "RI_ENDPOINT", f"RI at Sw=1 is {y_s[-1]:.2f}, should be 1.0.", severity="MEDIUM")
+        else: # FF
+            # Phi increases -> FF should decrease
+            n_viol = int(np.sum(np.diff(y_s) > 1e-4))
+            self._check(n_viol == 0, "FF_MONOTONICITY", f"Formation Factor increases at {n_viol} point(s) as porosity increases.")
+            self._check(bool(np.all(y_s >= 1.0 - 1e-4)), "FF_RANGE", "Formation Factor cannot be less than 1.0.")
+
+        return self
+
+    def validate_pc(self, sw, pc) -> "PhysicsGuard":
+        """Validation for general Capillary Pressure (Centrifuge/Porous Plate)."""
+        sw_a = np.asarray(sw, dtype=float)
+        pc_a = np.asarray(pc, dtype=float)
+        idx  = np.argsort(sw_a)
+        sw_s, pc_s = sw_a[idx], pc_a[idx]
+
+        # Sw increases -> Pc should decrease
+        n_viol = int(np.sum(np.diff(pc_s) > 1e-4))
+        self._check(n_viol == 0, "PC_MONOTONICITY", f"Capillary Pressure increases at {n_viol} point(s) as water saturation increases.")
+        self._check(bool(np.all(pc_s >= -0.1)), "PC_RANGE", f"Capillary Pressure must be positive (found min={pc_s.min():.2f}).")
+        
+        return self
+
     # ── score generation ──────────────────────────────────────────────────────
 
     def generate_health_score(self) -> dict:

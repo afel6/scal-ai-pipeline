@@ -39,5 +39,11 @@ The prompt engineering forces the agent into a **4-Phase Root Cause Analysis** l
 - **Credential `1509`**: Controls access to the `/api/kb/ingest` and `/api/kb/status` endpoints.
 - **Sandbox Environment**: All Python simulations are executed in an isolated process space to prevent host contamination.
 
+## 6. Data Accountability (Auditor's Ledger)
+To ensure industrial-grade accountability, every interpretation is automatically audited:
+- **Ledger Storage**: SQLite `physics_audits` table (persistent across restarts).
+- **Verification Hook**: Every plot generation triggers an automatic `PhysicsGuard` validation.
+- **Traceability**: Maintains a permanent link between session metadata, source filename, and numerical health scores.
+
 ---
 *Developed for the Petroleum Research Center Libya.*

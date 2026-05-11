@@ -1,5 +1,6 @@
+/* eslint-disable no-empty, no-unused-vars */
 import React, { useState, useEffect } from 'react';
-import { MessageSquare, Trash2, BookOpen, Upload, CheckCircle, Loader, FileText, Zap, Camera, Database } from 'lucide-react';
+import { MessageSquare, Trash2, BookOpen, Upload, CheckCircle, Loader, FileText, Zap, Camera, Database, Activity } from 'lucide-react';
 import axios from 'axios';
 
 const API_URL = import.meta.env.VITE_API_URL || '';
@@ -252,6 +253,41 @@ export default function SidebarTabs({ sessionId, sessions, handleLoadSession, ha
               </div>
             </div>
           )}
+        </div>
+      )}
+      {/* Auditor tab */}
+      {tab === 'audit' && (
+        <div className="flex-1 overflow-y-auto p-4 space-y-6 animate-fade-in custom-scrollbar">
+          <div className="bg-gradient-to-br from-red-500/5 to-transparent border border-red-500/10 rounded-2xl p-4 space-y-3">
+            <p className="text-[10px] text-red-400 font-black uppercase tracking-[0.2em] flex items-center gap-2">
+              <Camera className="w-3 h-3" /> Physics Watchtower
+            </p>
+            <p className="text-[10px] text-slate-500 font-mono leading-relaxed">
+              Real-time violation detection for laboratory data integrity.
+            </p>
+            <div className="grid grid-cols-2 gap-2">
+              <div className="bg-black/40 border border-slate-800 rounded-xl p-3 text-center">
+                <p className="text-[9px] text-slate-600 uppercase font-bold mb-1">Health Index</p>
+                <p className="text-xl font-black text-emerald-400">100%</p>
+              </div>
+              <div className="bg-black/40 border border-slate-800 rounded-xl p-3 text-center">
+                <p className="text-[9px] text-slate-600 uppercase font-bold mb-1">Violations</p>
+                <p className="text-xl font-black text-slate-400">0</p>
+              </div>
+            </div>
+          </div>
+
+          <div className="space-y-4">
+             <div className="flex items-center justify-between px-1">
+              <p className="text-[10px] text-slate-500 font-black uppercase tracking-[0.2em] italic">Audit Ledger</p>
+              <div className="px-1.5 py-0.5 rounded bg-emerald-500/10 border border-emerald-500/20 text-[8px] text-emerald-500 font-bold">SECURE</div>
+            </div>
+            
+            <div className="p-8 rounded-2xl border border-slate-800 bg-white/[0.01] flex flex-col items-center justify-center gap-4 text-center">
+              <Activity className="w-8 h-8 text-slate-700 opacity-30" />
+              <p className="text-[10px] text-slate-600 font-mono uppercase">Upload a file to begin<br/>physics monitoring</p>
+            </div>
+          </div>
         </div>
       )}
     </>

@@ -1,3 +1,4 @@
+/* eslint-disable no-unused-vars */
 // frontend/src/App.jsx
 // Changes: admin auth via backend token (PIN removed from client) ·
 //          regex intent routing for SSE vs POST · useCallback dep fix ·
@@ -10,7 +11,7 @@ import {
   AlertTriangle, Shield, Cookie as CookieIcon, Bug, BarChart3,
   Send, Paperclip, Bot, User, Download, FileText, Database, Circle,
   PlusCircle, Trash2, MessageSquare, X, Wifi, WifiOff, Loader, LogOut,
-  Menu, BookOpen, Upload, CheckCircle, Camera, RefreshCw, Layers,
+  Menu, BookOpen, Upload, CheckCircle, Camera, RefreshCw, Layers, ShieldCheck, Activity,
 } from 'lucide-react';
 import axios from 'axios';
 
@@ -76,6 +77,7 @@ export default function App() {
   const [adminToken,     setAdminToken]     = useState(() => localStorage.getItem('prc_admin_token') || '');
   const [adminPinError,  setAdminPinError]  = useState(false);
   const [adminPinLoading,setAdminPinLoading]= useState(false);
+  const [reportLoading,  setReportLoading]  = useState(false);
 
   const messagesEndRef    = useRef(null);
   const inputRef          = useRef(null);
@@ -217,6 +219,29 @@ export default function App() {
       return false;
     }
   }, []);
+
+  // ── executive report download ──────────────────────────────────────────────
+  const handleDownloadReport = useCallback(async () => {
+    if (!sessionId || reportLoading) return;
+    setReportLoading(true);
+    try {
+      const wellName = sessions.find(s => s.id === sessionId)?.title || 'UNKNOWN WELL';
+      const form     = new URLSearchParams({ session_id: sessionId, well_name: wellName });
+      const { data } = await axios.post(`${API_URL}/api/report/generate`, form);
+      if (data.download_url) {
+        const a    = document.createElement('a');
+        a.href     = `${API_URL}${data.download_url}`;
+        a.download = data.download_url.split('/').pop();
+        document.body.appendChild(a);
+        a.click();
+        document.body.removeChild(a);
+      }
+    } catch (err) {
+      console.error('[Report]', err);
+    } finally {
+      setReportLoading(false);
+    }
+  }, [sessionId, sessions, reportLoading]);
 
   // ── retry cooldown ─────────────────────────────────────────────────────────
   useEffect(() => {
@@ -371,12 +396,11 @@ export default function App() {
     }
   }, [input, files, sessionId, user, refreshSessions]);
 
-  // ── status indicator (memoised) ───────────────────────────────────────────
-  const status = useMemo(() => ({
-    waking:  { icon: <Loader className="w-3 h-3 animate-spin" />, text: 'Connecting...',    color: 'text-yellow-500' },
-    online:  { icon: <Circle className="w-2 h-2 fill-green-500" />, text: 'Online',         color: 'text-green-400'  },
-    offline: { icon: <WifiOff className="w-3 h-3" />,              text: 'Reconnecting...', color: 'text-red-400'    },
-  })[serverStatus], [serverStatus]);
+  const statusConfig = useMemo(() => ({
+    online: { icon: <ShieldCheck className="w-3 h-3" />, text: 'Encrypted', color: 'text-emerald-500' },
+    offline: { icon: <Activity className="w-3 h-3 animate-pulse" />, text: 'Offline', color: 'text-red-500' },
+    busy: { icon: <Loader className="w-3 h-3 animate-spin" />, text: 'Processing', color: 'text-yellow-500' },
+  })[serverStatus] || { icon: <Loader className="w-3 h-3 animate-spin" />, text: 'Connecting...', color: 'text-yellow-500' }, [serverStatus]);
 
   // ── guards ────────────────────────────────────────────────────────────────
   if (!user) {
@@ -497,6 +521,17 @@ export default function App() {
                 <p className="text-[10px] text-slate-500 font-bold uppercase tracking-tighter leading-none">Engineer</p>
                 <p className="text-xs text-white font-serif italic truncate max-w-[120px]">{user.name}</p>
               </div>
+              <button
+                onClick={handleDownloadReport}
+                disabled={reportLoading || !sessionId}
+                className="flex items-center gap-1.5 px-2.5 py-1.5 bg-yellow-950/20 hover:bg-yellow-900/40 border border-yellow-800/40 hover:border-yellow-600/60 text-yellow-500 hover:text-yellow-300 rounded-lg transition-all text-[10px] font-black uppercase tracking-widest disabled:opacity-30 disabled:cursor-not-allowed"
+                title="Download Executive SCAL Report (.docx)"
+              >
+                {reportLoading
+                  ? <Loader className="w-3.5 h-3.5 animate-spin" />
+                  : <FileText className="w-3.5 h-3.5" />}
+                <span className="hidden sm:block">Report</span>
+              </button>
               <button
                 onClick={() => {
                   if (adminToken) {

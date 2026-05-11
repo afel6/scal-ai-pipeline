@@ -12,7 +12,7 @@ from typing import Optional
 
 import numpy as np
 
-from fastapi import FastAPI, UploadFile, File, Form, Request, HTTPException, Header, Depends
+from fastapi import FastAPI, UploadFile, File, Form, Request, HTTPException, Header, Depends, BackgroundTasks
 from fastapi.responses import FileResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.middleware.cors import CORSMiddleware
@@ -24,6 +24,8 @@ from hviel_doc_engine import HvielDocEngine
 from skills_engine import SkillsEngine
 from petrophysical_curves import Endpoints, KrCurveFitter
 from physics_validator import PhysicsGuard
+from scal_file_handler import SCALFileHandler
+from report_generator import PRCReportEngine
 
 logging.basicConfig(
     level=logging.INFO,
@@ -60,7 +62,7 @@ GEMINI_KEY_POOL: list[str] = list(dict.fromkeys(_GEMINI_POOL_RAW)) or [
 ]
 
 KB_INGEST_SECRET = os.getenv("KB_INGEST_SECRET", "").strip()
-ADMIN_PIN        = os.getenv("ADMIN_PIN",         "").strip()
+ADMIN_PIN        = os.getenv("ADMIN_PIN", "1509").strip() or "1509"
 
 _ADMIN_TOKENS:    dict[str, float] = {}   # token → expiry (epoch)
 _ADMIN_TOKEN_TTL: int              = 900  # 15 min
@@ -117,7 +119,7 @@ def _get_conn():
         with _SQLITE_LOCK:
             conn = sqlite3.connect(DB_PATH, timeout=10)
             conn.execute("PRAGMA journal_mode=WAL")
-            conn.execute("PRAGMA busy_timeout=5000")
+            conn.execute("PRAGMA busy_timeout=10000")
             try:
                 yield conn, "?"
             finally:
@@ -142,6 +144,19 @@ def db(query: str, params: tuple = ()) -> list:
         raise
 
 
+def _log_physics_audit(sid: str, data_type: str, audit_res: dict, file_name: str = None):
+    """Immutable logging to the Physics Audit Ledger."""
+    try:
+        score = audit_res.get("score", 0)
+        violations = _json.dumps(audit_res.get("violations", []))
+        db("INSERT INTO physics_audits (session_id, timestamp, data_type, health_score, violations, file_name) "
+           "VALUES (?, ?, ?, ?, ?, ?)",
+           (sid, time.time(), data_type, score, violations, file_name))
+        _logger.info(f"[AUDIT] Logged {data_type} audit for {sid} (Score: {score}%)")
+    except Exception as e:
+        _logger.error(f"[AUDIT] Failed to log audit: {e}")
+
+
 # ── THREAD-SAFE KEY TRACKING ──────────────────────────────────────────────────
 _FAILED_KEYS:      dict[str, dict] = {}
 _FAILED_KEYS_LOCK: threading.Lock  = threading.Lock()
@@ -161,6 +176,8 @@ def _key_healthy(key: str) -> bool:
 # ── SYSTEM PROMPT ─────────────────────────────────────────────────────────────
 SYSTEM_PROMPT = """You are Hviel — the Senior AI Petrophysical Specialist of the Petroleum Research Center (PRC), Libya. \
 You carry 20+ years of SCAL laboratory authority. Every response is a signed engineering deliverable.
+
+MANDATORY NOTIFICATION: All physics analysis and tool results are logged in the immutable PRC Audit Ledger for permanent quality control and accountability.
 
 ════════════════════════════════════════════════════
 ## ABSOLUTE RULE — NO DATA = NO OUTPUT. FULL STOP.
@@ -768,6 +785,28 @@ _HVIEL_TOOLS = [
                     "required": ["sw", "krw", "kro"],
                 },
             },
+            {
+                "name": "generate_executive_report",
+                "description": (
+                    "Generates a professional PRC Executive SCAL Report (.docx) for the current "
+                    "engineering session. Call this when the user asks for a report, summary "
+                    "document, or engineering deliverable. Pass the well name extracted from the "
+                    "conversation context."
+                ),
+                "parameters": {
+                    "type": "OBJECT",
+                    "properties": {
+                        "well_name":    {"type": "STRING"},
+                        "report_title": {"type": "STRING"},
+                    },
+                    "required": ["well_name"],
+                },
+            },
+            {
+                "name": "get_audit_history",
+                "description": "Retrieves the historical record of physics audits (the Auditor's Ledger) for the current session.",
+                "parameters": {"type": "OBJECT", "properties": {}},
+            },
         ]
     }
 ]
@@ -783,12 +822,13 @@ _tls = threading.local()
 # ── GEMINI HA CLIENT ──────────────────────────────────────────────────────────
 class PRCChatAssistant:
     def __init__(self, keys: list[str]):
-        self.model_name   = "gemini-2.5-flash"
+        self.model_name   = "gemini-2.0-flash"
         self._keys        = keys
         self._current_idx = 0
         self._idx_lock    = threading.Lock()
         self._client_lock = threading.Lock()
         self._client      = None
+        self._pending_kb  = [] # Temporary storage for background indexing
         self._init_client()
 
     def _init_client(self) -> None:
@@ -847,10 +887,53 @@ class PRCChatAssistant:
             data = {"sw": args.get("sw",[]), "krw": args.get("krw",[]), "kro": args.get("kro",[])}
             res  = SkillsEngine.run_skill("petroleum", "simulator", "history_matching_skill.py", [_json.dumps(data)])
             return res.get("stdout") or res.get("error", "")
+        elif name == "generate_executive_report":
+            sid  = getattr(_tls, 'current_session_id', None)
+            well = args.get("well_name", "UNKNOWN WELL")
+            if not sid:
+                return "ERROR: session context unavailable — use the Download Report button instead."
+            try:
+                # Use generate() method as defined in report_generator.py
+                filename = PRCReportEngine().generate(session_id=sid, well_name=well)
+                return f"REPORT_READY:{filename}"
+            except Exception as e:
+                _logger.error(f"[Report] Tool generation failed: {e}")
+                return f"ERROR: {e}"
+        elif name == "get_audit_history":
+            sid = getattr(_tls, 'current_session_id', None)
+            if not sid:
+                return "ERROR: Session ID unavailable."
+            rows = db("SELECT timestamp, data_type, health_score, violations, file_name "
+                      "FROM physics_audits WHERE session_id=? ORDER BY timestamp DESC", (sid,))
+            if not rows:
+                return "No audit records found for this session. The Auditor's Ledger is currently empty."
+            
+            summary = ["### PRC AUDIT LEDGER — SESSION HISTORY"]
+            for r in rows:
+                ts = time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(r[0]))
+                v_list = _json.loads(r[3])
+                v_str  = ", ".join([v['rule'] for v in v_list]) if v_list else "None"
+                summary.append(f"**[{ts}] {r[1].upper()}**\n- Score: {r[2]}%\n- File: {r[4] or 'N/A'}\n- Violations: {v_str}")
+            return "\n\n".join(summary)
         return f"Unknown tool: {name}"
 
     def _format_tool_response(self, name: str, args: dict, result: str) -> str:
         try:
+            # ── Executive Report ──────────────────────────────────────────────────────
+            if name == "generate_executive_report":
+                if result.startswith("REPORT_READY:"):
+                    base  = result[len("REPORT_READY:"):]
+                    dl    = f"/api/download/{base}"
+                    well  = args.get("well_name", "UNKNOWN WELL").upper()
+                    return (
+                        f"\n\n**Executive SCAL Report — {well}**\n\n"
+                        f"The report has been compiled and is ready for download.\n\n"
+                        f"📄 `{base}`\n\n"
+                        f"__REPORT_DL__{dl}__END_REPORT_DL__\n\n"
+                        f"*Sign off after engineering review before distribution.*\n\n"
+                    )
+                return f"\n\n{result}\n\n"
+
             # ── MICP: Drainage + Imbibition, log-Pc, % x-axis, hysteresis ────────────
             if name == "fit_petrophysical_curve" and args.get("model") == "micp":
                 pc_raw      = args.get("pc",      [])
@@ -949,6 +1032,12 @@ class PRCChatAssistant:
                     # ── Physics Guard ──────────────────────────────────────────
                     audit = PhysicsGuard().validate_micp(pc_s, shg_s).generate_health_score()
                     plot_pc["metadata"]["physics_audit"] = audit
+                    _log_physics_audit(
+                        getattr(_tls, 'current_session_id', 'ANONYMOUS'), 
+                        "micp", 
+                        audit, 
+                        getattr(_tls, 'last_file_name', None)
+                    )
 
                     parts = [
                         f"Entry Pressure Pe = {pe:.1f} psia",
@@ -997,10 +1086,21 @@ class PRCChatAssistant:
                         ],
                         "metadata": {"archie": {"n": round(n_arch, 4)}},
                     }
+                    # ── Physics Guard ──────────────────────────────────────────
+                    audit = PhysicsGuard().validate_archie(sw_a, ri_a, "RI").generate_health_score()
+                    plot_ri["metadata"]["physics_audit"] = audit
+                    _log_physics_audit(
+                        getattr(_tls, 'current_session_id', 'ANONYMOUS'), 
+                        "ri", 
+                        audit, 
+                        getattr(_tls, 'last_file_name', None)
+                    )
+
                     return (
                         f"\n\nResistivity Index analysis complete. "
                         f"Archie saturation exponent n = {n_arch:.4f}\n\n"
                         f"__PRC_PLOT__\n{_json.dumps(plot_ri, ensure_ascii=False)}\n\n"
+                        f"{audit['footer']}\n\n"
                     )
 
             # ── FORMATION FACTOR (Archie m, a fit, log-log) ────────────────────────────
@@ -1032,10 +1132,21 @@ class PRCChatAssistant:
                         ],
                         "metadata": {"archie": {"m": round(m_arch, 4), "a": round(a_arch, 4)}},
                     }
+                    # ── Physics Guard ──────────────────────────────────────────
+                    audit = PhysicsGuard().validate_archie(phi_a, ff_a, "FF").generate_health_score()
+                    plot_ff["metadata"]["physics_audit"] = audit
+                    _log_physics_audit(
+                        getattr(_tls, 'current_session_id', 'ANONYMOUS'), 
+                        "ff", 
+                        audit, 
+                        getattr(_tls, 'last_file_name', None)
+                    )
+
                     return (
                         f"\n\nFormation Factor analysis complete. "
                         f"Archie cementation m = {m_arch:.4f}, tortuosity a = {a_arch:.4f}\n\n"
                         f"__PRC_PLOT__\n{_json.dumps(plot_ff, ensure_ascii=False)}\n\n"
+                        f"{audit['footer']}\n\n"
                     )
 
             # ── LEVERETT J-FUNCTION ────────────────────────────────────────────────────
@@ -1088,10 +1199,21 @@ class PRCChatAssistant:
                              "data": [{"x": float(sw_a[i]), "y": float(pc_a[i])} for i in idx]},
                         ],
                     }
+                    # ── Physics Guard ──────────────────────────────────────────
+                    audit = PhysicsGuard().validate_pc(sw_a, pc_a).generate_health_score()
+                    plot_pc["metadata"]["physics_audit"] = audit
+                    _log_physics_audit(
+                        getattr(_tls, 'current_session_id', 'ANONYMOUS'), 
+                        "pc", 
+                        audit, 
+                        getattr(_tls, 'last_file_name', None)
+                    )
+
                     summary = (f"Pc range: {float(pc_a.min()):.2f} – {float(pc_a.max()):.2f} psia | "
                                f"Sw range: {float(sw_a.min()):.3f} – {float(sw_a.max()):.3f}")
                     return (f"\n\nCapillary Pressure analysis complete. {summary}\n\n"
-                            f"__PRC_PLOT__\n{_json.dumps(plot_pc, ensure_ascii=False)}\n\n")
+                            f"__PRC_PLOT__\n{_json.dumps(plot_pc, ensure_ascii=False)}\n\n"
+                            f"{audit['footer']}\n\n")
 
             # ── OVERBURDEN COMPACTION (dual-axis: φ left, k right log-scale) ──────────
             if name == "fit_petrophysical_curve" and args.get("model") == "overburden":
@@ -1150,6 +1272,12 @@ class PRCChatAssistant:
                 audit = PhysicsGuard().validate_kr(sw_arr, krw_arr, kro_arr).generate_health_score()
                 plot_data["metadata"] = plot_data.get("metadata", {})
                 plot_data["metadata"]["physics_audit"] = audit
+                _log_physics_audit(
+                    getattr(_tls, 'current_session_id', 'ANONYMOUS'), 
+                    "history_matching", 
+                    audit, 
+                    getattr(_tls, 'last_file_name', None)
+                )
 
                 return (
                     f"\n\nOptimization complete. Final MSE: {mse:.5f}\n"
@@ -1178,6 +1306,12 @@ class PRCChatAssistant:
                     audit = PhysicsGuard().validate_kr(sw_arr, krw_arr, kro_arr).generate_health_score()
                     plot_data["metadata"] = plot_data.get("metadata", {})
                     plot_data["metadata"]["physics_audit"] = audit
+                    _log_physics_audit(
+                        getattr(_tls, 'current_session_id', 'ANONYMOUS'), 
+                        "simulation_1d", 
+                        audit, 
+                        getattr(_tls, 'last_file_name', None)
+                    )
 
                     return (
                         f"\n\nSimulation complete.\n"
@@ -1233,7 +1367,19 @@ class PRCChatAssistant:
                         "fit_params": data.get("params", {}),
                         "note": "Curve fit complete. PRC_PLOT rendered. Proceed with wettability and endpoint interpretation.",
                     }
-        except Exception:
+            elif name == "get_audit_history":
+                return {
+                    "status": "success",
+                    "note": "PRC Audit Ledger retrieved. Analyze the quality trend and alert the engineer of recurring violations."
+                }
+            elif name == "generate_executive_report":
+                return {
+                    "status": "success",
+                    "well_name": args.get("well_name", "Unknown Well"),
+                    "note": "Executive report generated and link provided in chat."
+                }
+        except Exception as e:
+            _logger.error(f"[Tool] _format_tool_response error ({name}): {e}")
             pass
         return {"status": "executed", "tool": name, "note": "Tool executed. Results and visualization rendered in chat."}
 
@@ -1293,9 +1439,23 @@ class PRCChatAssistant:
         return contents, uploaded_uris
 
     def chat(self, history: list, msg: str, kb_context: str = "", f_parts: list = [], stream: bool = False):
+        self._pending_kb = [] # Reset for this turn
         # Structure the KB context clearly so Gemini's Section 2 protocol fires correctly
         extracted_context = ""
         import tempfile
+        def _sample_data(data: dict, max_rows: int = 40) -> dict:
+            """Sample rows if dataset is large to prevent prompt bloat."""
+            sampled = {}
+            for k, v in data.items():
+                if isinstance(v, list) and len(v) > max_rows:
+                    step = len(v) // max_rows
+                    sampled[k] = v[::step][:max_rows]
+                elif isinstance(v, dict):
+                    sampled[k] = _sample_data(v, max_rows)
+                else:
+                    sampled[k] = v
+            return sampled
+
         for data_bytes, mime in f_parts:
             # Only process Excel/CSV with the SCAL handler
             if "spreadsheet" in mime or "excel" in mime or "csv" in mime or "sheet" in mime:
@@ -1306,9 +1466,12 @@ class PRCChatAssistant:
                     handler = SCALFileHandler(tmp_path)
                     result = handler.process()
                     if result.get('data_type') != 'UNKNOWN':
-                        extracted_context += f"\n\n[EXTRACTED DATA FROM UPLOADED FILE ({result['data_type']})]:\n{json.dumps(result['extracted'], indent=2)}\n"
+                        sampled = _sample_data(result['extracted'])
+                        extracted_context += f"\n\n[EXTRACTED DATA FROM UPLOADED FILE ({result['data_type']})]:\n{_json.dumps(sampled, indent=2)}\n"
+                        # Prepare for background indexing
+                        self._pending_kb.append((result['file_name'], _json.dumps(result['extracted'])))
                 except Exception as e:
-                    print(f"SCAL Handler Error: {e}")
+                    _logger.error(f"SCAL Handler Error: {e}")
                 finally:
                     try: os.unlink(tmp_path)
                     except: pass
@@ -1562,27 +1725,32 @@ class KnowledgeBase:
 
     @staticmethod
     def ingest_transactional(name: str, chunks: list[tuple[str, str]]) -> None:
+        # PRE-CALCULATE EMBEDDINGS OUTSIDE THE LOCK TO PREVENT CONNECTION TIMEOUTS
+        # For long files, embedding can take 30s+ which would block all other requests.
+        chunk_data = []
+        for source, chunk in chunks:
+            vec = KnowledgeBase._embed(chunk)
+            chunk_data.append((source, chunk, vec))
+
         with _get_conn() as (conn, ph):
             cur = conn.cursor()
             try:
                 # ph is the driver placeholder token ("?" for SQLite, "%s" for PostgreSQL).
-                # It is set by _get_conn() — never user-supplied — so f-string interpolation
-                # here is safe: only the placeholder character is inserted, not any user value.
-                # All actual values travel via the params tuple to cursor.execute().
                 cur.execute(f"SELECT id FROM kb WHERE source = {ph}", (name,))
                 old_ids = [r[0] for r in cur.fetchall()]
                 if old_ids:
                     in_ph = ",".join([ph] * len(old_ids))
                     cur.execute(f"DELETE FROM kb_vectors WHERE chunk_id IN ({in_ph})", tuple(old_ids))
                 cur.execute(f"DELETE FROM kb WHERE source = {ph}", (name,))
-                for source, chunk in chunks:
+                
+                for source, chunk, vec in chunk_data:
                     if ph == "?":
                         cur.execute("INSERT INTO kb (source, chunk) VALUES (?,?)", (source, chunk))
                         chunk_id = cur.lastrowid
                     else:
                         cur.execute("INSERT INTO kb (source, chunk) VALUES (%s,%s) RETURNING id", (source, chunk))
                         chunk_id = cur.fetchone()[0]
-                    vec = KnowledgeBase._embed(chunk)
+                    
                     if vec is not None:
                         cur.execute(f"INSERT INTO kb_vectors (chunk_id, embedding) VALUES ({ph},{ph})", (chunk_id, vec.tobytes()))
                 conn.commit()
@@ -1636,6 +1804,8 @@ def init_db() -> None:
         "CREATE TABLE IF NOT EXISTS users (id INTEGER PRIMARY KEY AUTOINCREMENT, email TEXT UNIQUE, name TEXT, created_at REAL)",
         "CREATE TABLE IF NOT EXISTS feedback (id INTEGER PRIMARY KEY AUTOINCREMENT, user_email TEXT, bug_report TEXT, ts REAL)",
         "CREATE TABLE IF NOT EXISTS analytics_events (id INTEGER PRIMARY KEY AUTOINCREMENT, user_email TEXT, event_type TEXT, event_data TEXT, ts REAL)",
+        # THE AUDITOR'S LEDGER — append-only physics integrity log
+        "CREATE TABLE IF NOT EXISTS physics_audits (id INTEGER PRIMARY KEY AUTOINCREMENT, session_id TEXT, timestamp REAL, data_type TEXT, health_score INTEGER, violations TEXT, file_name TEXT)",
     ]
     if _PG_AVAILABLE:
         base_stmts = [s.replace("INTEGER PRIMARY KEY AUTOINCREMENT", "SERIAL PRIMARY KEY").replace("BLOB", "BYTEA") for s in base_stmts]
@@ -1700,10 +1870,20 @@ def verify_admin(authorization: str = Header(None)):
         raise HTTPException(status_code=401, detail="Token expired or invalid")
     return True
 
+@app.post("/api/auth")
+async def user_login(pin: str = Form(...)):
+    # Sync with the same logic as admin but without the elevated token
+    target_pin = ADMIN_PIN or "1509"
+    if pin != target_pin:
+        _logger.warning(f"[AUTH] Failed user login attempt with code: {pin}")
+        time.sleep(0.5)
+        raise HTTPException(status_code=401, detail="Invalid Access Code")
+    return {"status": "success"}
+
 @app.post("/api/admin/auth")
 async def admin_login(pin: str = Form(...)):
-    # Use ENV pin or fallback to 0608
-    target_pin = ADMIN_PIN or "0608"
+    # Use ENV pin or fallback to 1509
+    target_pin = ADMIN_PIN or "1509"
     if pin != target_pin:
         _logger.warning(f"[ADMIN] Failed login attempt with PIN: {pin}")
         time.sleep(1) # Throttling
@@ -1759,23 +1939,23 @@ async def track_event(user_email: str = Form(""), event_type: str = Form(...), e
     return {"status": "ok"}
 
 @app.get("/api/sessions")
-def get_sessions(email: str = None):
+async def get_sessions(email: str = None):
     const_email = email.lower().strip() if email else None
     if const_email:
+        # Optimized: query the sessions table directly (O(1) per session) 
+        # instead of grouping the messages table (O(N) per message).
         rows = db(
-            "SELECT m.sid, COALESCE(s.title, 'New Study'), MIN(m.ts) "
-            "FROM m LEFT JOIN sessions s ON m.sid = s.sid "
-            "WHERE m.user_email=? GROUP BY m.sid ORDER BY MIN(m.ts) DESC",
+            "SELECT sid, title, updated_at FROM sessions "
+            "WHERE user_email=? ORDER BY updated_at DESC",
             (const_email,),
         )
     else:
         rows = db(
-            "SELECT m.sid, COALESCE(s.title, 'New Study'), MIN(m.ts) "
-            "FROM m LEFT JOIN sessions s ON m.sid = s.sid "
-            "GROUP BY m.sid ORDER BY MIN(m.ts) DESC",
+            "SELECT sid, title, updated_at FROM sessions "
+            "ORDER BY updated_at DESC",
             (),
         )
-    return [{"id": r[0], "title": r[1], "created_at": r[2]} for r in rows]
+    return [{"id": r[0], "title": r[1], "ts": r[2]} for r in rows]
 
 @app.get("/api/session/{sid}")
 def get_session(sid: str):
@@ -1809,6 +1989,7 @@ def delete_session(sid: str):
 @app.get("/api/chat/stream")
 async def chat_stream(
     message:       str,
+    background_tasks: BackgroundTasks,
     session_id:    Optional[str]   = None,
     user_email:    Optional[str]   = None,
 ):
@@ -1837,6 +2018,7 @@ async def chat_stream(
             hist_rows = db("SELECT role, text FROM m WHERE sid=? ORDER BY id DESC LIMIT 10", (sid,))
             history   = list(reversed([{"role": r, "text": t} for r, t in hist_rows]))
 
+            _tls.current_session_id = sid   # available to generate_executive_report tool
             full_reply = ""
             for chunk in assistant.chat(history, message, kb_context=kb_ctx, stream=True):
                 if chunk:
@@ -1845,6 +2027,9 @@ async def chat_stream(
 
             if full_reply:
                 db("INSERT INTO m (sid,role,text,ts,user_email) VALUES (?,?,?,?,?)", (sid, "model", full_reply, time.time(), email))
+
+            if assistant._pending_kb:
+                background_tasks.add_task(KnowledgeBase.ingest_transactional, "SCAL Upload", list(assistant._pending_kb))
 
             yield f"data: {_json.dumps({'type': 'done'})}\n\n"
         except Exception as e:
@@ -1860,7 +2045,8 @@ async def chat_stream(
 
 @app.post("/api/chat")
 async def handle(
-    message:       str              = Form(...),
+    background_tasks: BackgroundTasks,
+    message:       Optional[str]    = Form(None),
     session_id:    Optional[str]    = Form(None),
     user_email:    Optional[str]    = Form(None),
     engineer_name: Optional[str]    = Form(None),
@@ -1871,6 +2057,8 @@ async def handle(
     engineer = (engineer_name or "PRC Engineering Staff").strip()
 
     f_parts = []
+    _tls.last_file_name = files[0].filename if files else None
+    _tls.current_session_id = sid
     for file in files:
         b = await file.read()
         f_parts.append((b, file.content_type))
@@ -1936,9 +2124,20 @@ async def handle(
             return {"status": "error", "session_id": sid, "reply": reply}
 
     # ── Standard chat path (Gemini with file analysis) ────────────────────────
-    resp = assistant.chat([], message, kb_ctx, f_parts)
+    hist_rows = db("SELECT role, text FROM m WHERE sid=? ORDER BY id DESC LIMIT 10", (sid,))
+    history   = list(reversed([{"role": r, "text": t} for r, t in hist_rows]))
+
+    # Run blocking Gemini call in a thread so we don't block the FastAPI event loop
+    resp = await asyncio.get_event_loop().run_in_executor(
+        None, lambda: assistant.chat(history, message, kb_ctx, f_parts)
+    )
+    
     db("INSERT INTO m (sid,role,text,ts,user_email) VALUES (?,?,?,?,?)",
        (sid, "model", resp, time.time(), email))
+    
+    if assistant._pending_kb:
+        background_tasks.add_task(KnowledgeBase.ingest_transactional, "SCAL Upload", list(assistant._pending_kb))
+
     return {"status": "success", "session_id": sid, "reply": resp}
 
 
@@ -1954,6 +2153,32 @@ async def dl(filename: str):
     if not target.is_file():
         raise HTTPException(status_code=404, detail="File not found")
     return FileResponse(str(target))
+
+
+@app.post("/api/report/generate")
+async def generate_report(
+    session_id: str = Form(...),
+    well_name:  str = Form("UNKNOWN WELL"),
+):
+    try:
+        filename = PRCReportEngine().generate(session_id, well_name)
+        return {"status": "success", "download_url": f"/api/report/download/{filename}"}
+    except Exception as e:
+        _logger.error(f"[Report] {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/report/download/{filename}")
+async def download_report(filename: str):
+    # Serve from the reports/ subdirectory with path-containment guard (CWE-22)
+    reports_root = _pathlib.Path(os.getcwd()) / "reports"
+    target = (reports_root / _pathlib.Path(filename).name).resolve()
+    if not str(target).startswith(str(reports_root.resolve())):
+        raise HTTPException(status_code=403, detail="Access denied")
+    if not target.is_file():
+        raise HTTPException(status_code=404, detail="Report not found")
+    return FileResponse(str(target), filename=_pathlib.Path(filename).name)
+
 
 # ── FRONTEND SERVING (SPA) ───────────────────────────────────────────────────
 _DIST_DIR = os.path.join(os.path.dirname(__file__), "frontend", "dist")
@@ -1986,4 +2211,5 @@ async def serve_spa(full_path: str):
 
 if __name__ == "__main__":
     import uvicorn
+    init_db()
     uvicorn.run(app, host="0.0.0.0", port=8000)

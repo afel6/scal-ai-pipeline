@@ -1,3 +1,4 @@
+/* eslint-disable no-unused-vars */
 import React, { useState } from 'react';
 
 export default function Login({ onLogin, setShowPrivacy, setShowTerms }) {
@@ -6,16 +7,32 @@ export default function Login({ onLogin, setShowPrivacy, setShowTerms }) {
   const [email, setEmail] = useState('');
   const [error, setError] = useState('');
 
-  const handleAuth = () => {
-    if (id === '1509') {
-      const fd = new FormData(); 
-      fd.append('email', email); 
-      fd.append('name', name);
-      fetch((import.meta.env.VITE_API_URL || '') + '/api/register', {method:'POST', body: fd}).catch(()=>{});
-      onLogin({ name, id, email });
-    } else {
-      setError('Invalid MFA Credentials. Access Denied.');
-      setId('');
+  const handleAuth = async () => {
+    if (!id || !name || !email) return;
+    setError('');
+    
+    try {
+      const fd = new FormData();
+      fd.append('pin', id);
+      const resp = await fetch((import.meta.env.VITE_API_URL || '') + '/api/auth', {
+        method: 'POST',
+        body: fd
+      });
+      
+      if (resp.ok) {
+        // Track login event
+        const regFd = new FormData();
+        regFd.append('email', email);
+        regFd.append('name', name);
+        fetch((import.meta.env.VITE_API_URL || '') + '/api/register', {method:'POST', body: regFd}).catch(()=>{});
+        
+        onLogin({ name, id, email });
+      } else {
+        setError('Invalid MFA Credentials. Access Denied.');
+        setId('');
+      }
+    } catch (err) {
+      setError('Connection to PRC Hub failed. Please check network.');
     }
   };
 

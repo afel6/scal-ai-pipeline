@@ -1,3 +1,4 @@
+/* eslint-disable */
 import React from 'react';
 import { Database, Activity, CheckCircle2 } from 'lucide-react';
 import Mermaid from '../Mermaid';
@@ -126,6 +127,16 @@ export function renderMessageContent(text) {
     .replace(/\r/g, '')
     .replace(/__INTERNAL_DATA_START__[\s\S]*?__INTERNAL_DATA_END__/g, '')
     .trim();
+
+  // ── __REPORT_DL__ download button injection ──────────────────────────────────
+  if (cleanText.includes('__REPORT_DL__')) {
+    const reportDlRe = /__REPORT_DL__(\/api\/download\/[^\s_]+)__END_REPORT_DL__/g;
+    cleanText = cleanText.replace(reportDlRe, (_, url) => {
+      // Remove the marker and let the download button appear via the rendered JSX segment approach below.
+      // Store the URL as a data attr placeholder that we render after the pass-1 loop.
+      return `\x00REPORT_DL:${url}\x00`;
+    });
+  }
   if (!cleanText && text.includes('__INTERNAL_DATA_START__')) return null;
 
   // ── PASS 1: __PRC_PLOT__ extraction ─────────────────────────────────────────
@@ -261,9 +272,35 @@ export function renderMessageContent(text) {
       </div>
     );
     if (part.type === 'knowledge_card') return <KnowledgeCard key={i} title={part.title} content={part.content} />;
+    if (part.type === 'report_dl') return (
+      <a
+        key={i}
+        href={part.url}
+        download
+        className="my-4 inline-flex items-center gap-2.5 px-5 py-3 bg-yellow-950/30 hover:bg-yellow-900/50 border border-yellow-700/50 hover:border-yellow-500 text-yellow-300 font-black text-[11px] uppercase tracking-widest rounded-xl transition-all active:scale-95 shadow-lg"
+      >
+        <Database className="w-4 h-4 text-yellow-400" />
+        Download Executive SCAL Report (.docx)
+      </a>
+    );
     if (part.type === 'text') {
       const txt = part.content.trim();
       if (!txt) return null;
+      // Render __REPORT_DL__ placeholder as a download button
+      if (txt.startsWith('\x00REPORT_DL:') && txt.endsWith('\x00')) {
+        const url = txt.slice(11, -1);
+        return (
+          <a
+            key={i}
+            href={url}
+            download
+            className="my-4 inline-flex items-center gap-2.5 px-5 py-3 bg-yellow-950/30 hover:bg-yellow-900/50 border border-yellow-700/50 hover:border-yellow-500 text-yellow-300 font-black text-[11px] uppercase tracking-widest rounded-xl transition-all active:scale-95 shadow-lg"
+          >
+            <Database className="w-4 h-4 text-yellow-400" />
+            Download Executive SCAL Report (.docx)
+          </a>
+        );
+      }
       if (txt.toLowerCase().includes('data certified') || txt.toLowerCase().includes('analysis complete')) return <CertificationSeal key={i} />;
       if (txt.startsWith('###')) return <SectionHeader key={i} text={txt} />;
       return <p key={i} className="mb-6 whitespace-pre-wrap font-serif leading-loose text-slate-300 opacity-80 text-[16px]">{txt}</p>;

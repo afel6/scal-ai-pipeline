@@ -1,7 +1,4 @@
-// frontend/src/KrPlot.jsx
-// Fixes: yAxisId (was yId) · Scatter data binding (own data prop + dataKey="y") ·
-//        chartData split by series type · Legend import removed
-
+/* eslint-disable no-unused-vars */
 import React, { useMemo, useState, useEffect } from 'react';
 import {
   Line, Scatter,

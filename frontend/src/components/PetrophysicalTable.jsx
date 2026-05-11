@@ -4,7 +4,10 @@ import { Database } from 'lucide-react';
 export default function PetrophysicalTable({ content }) {
   try {
     const data = JSON.parse(content);
-    const headers = data.headers || Object.keys(data.rows[0] || {});
+    const rows = Array.isArray(data.rows) ? data.rows : [];
+    const headers = data.headers || (rows.length > 0 ? Object.keys(rows[0] || {}) : []);
+
+    if (rows.length === 0 && !data.headers) throw new Error("No data found");
 
     return (
       <div className="my-6 overflow-hidden rounded-2xl border border-yellow-900/40 bg-[#0c0c10] shadow-2xl">

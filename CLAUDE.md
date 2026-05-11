@@ -325,3 +325,30 @@ Before every push to `master` (which triggers Render auto-deploy):
 - [ ] Chat smoke test passes (see §5)
 - [ ] No new `db()` call sites use string interpolation
 - [ ] New download paths (if any) use the path traversal guard from §4
+
+---
+
+## 7. The Auditor’s Ledger — Immutable Accountability
+
+As of 2026-05-10, every physical interpretation and simulation output is logged in the
+**PRC Audit Ledger** (`physics_audits` table in `chat_history.db`). This is a non-negotiable
+accountability requirement for industrial deployment.
+
+### Database Schema
+
+| Column | Type | Description |
+|---|---|---|
+| `id` | INTEGER/SERIAL | Primary Key |
+| `session_id` | TEXT | Link to the chat session |
+| `timestamp` | REAL | Unix timestamp of the audit |
+| `data_type` | TEXT | Category (micp, history_matching, simulation_1d) |
+| `health_score` | INTEGER | 0-100 score from PhysicsGuard |
+| `violations` | TEXT (JSON) | Detailed list of physical law violations |
+| `file_name` | TEXT | Source laboratory filename |
+
+### Operational Rules
+
+- **Auto-Logging:** Every tool path that invokes `PhysicsGuard` (e.g., MICP plotting, Kr simulation) **MUST** call `_log_physics_audit()` before returning the result. Failure to log an audit for a physical interpretation is a critical safety violation.
+- **Tool Access:** Hviel accesses this ledger via the `get_audit_history` tool. Use this tool to verify the quality trend of user-uploaded data and alert the engineer to recurring violations (e.g., non-monotonic Kr curves).
+- **System Notification:** The system prompt mandates that the user is notified of this logging. Never disable the audit-ledger notification in the `SYSTEM_PROMPT`.
+- **Immutability:** Audit records are append-only. The database helper provides no `DELETE` or `UPDATE` methods for the `physics_audits` table.

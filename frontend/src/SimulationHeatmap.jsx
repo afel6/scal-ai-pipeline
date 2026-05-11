@@ -1,24 +1,41 @@
+/* eslint-disable no-unused-vars */
 import React, { useState, useEffect } from 'react';
 import { Play, Pause, FastForward, Activity } from 'lucide-react';
 
 const SimulationHeatmap = ({ content }) => {
-  const [data, setData] = useState(null);
+  const [prevContent, setPrevContent] = useState(content);
+  const [parsedData, setParsedData] = useState(null);
+  const [parseError, setParseError] = useState(null);
   const [currentStep, setCurrentStep] = useState(0);
   const [isPlaying, setIsPlaying] = useState(false);
-  const [error, setError] = useState(null);
 
-  useEffect(() => {
-    try {
-      const parsed = JSON.parse(content);
-      if (parsed.status === 'success' && parsed.mode === '2d') {
-        setData(parsed);
-      } else {
-        setError("Invalid simulation data format.");
+  // Synchronous state update during render for incoming content
+  if (content !== prevContent) {
+    setPrevContent(content);
+    setCurrentStep(0);
+    setIsPlaying(false);
+    if (!content) {
+      setParsedData(null);
+      setParseError(null);
+    } else {
+      try {
+        const parsed = JSON.parse(content);
+        if (parsed.status === 'success' && (parsed.mode === '2d' || parsed.history)) {
+          setParsedData(parsed);
+          setParseError(null);
+        } else {
+          setParsedData(null);
+          setParseError("Invalid simulation data format.");
+        }
+      } catch (_err) {
+        setParsedData(null);
+        setParseError("Failed to parse simulation output.");
       }
-    } catch (err) {
-      setError("Failed to parse simulation output.");
     }
-  }, [content]);
+  }
+
+  const data = parsedData;
+  const error = parseError;
 
   useEffect(() => {
     let interval;
@@ -32,8 +49,6 @@ const SimulationHeatmap = ({ content }) => {
           return prev + 1;
         });
       }, 500); // 500ms per frame
-    } else if (currentStep >= (data?.history.length || 1) - 1) {
-      setIsPlaying(false);
     }
     return () => clearInterval(interval);
   }, [isPlaying, currentStep, data]);

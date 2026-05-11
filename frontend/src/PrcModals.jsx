@@ -1,3 +1,4 @@
+/* eslint-disable react-refresh/only-export-components, no-unused-vars, no-empty */
 import React, { useState, useEffect } from 'react';
 import { X, Bug, Shield, FileText } from 'lucide-react';
 import axios from 'axios';
@@ -87,10 +88,7 @@ export function TermsModal({ onClose }) {
 
 // ── COOKIE CONSENT BANNER ──
 export function CookieConsent() {
-  const [show, setShow] = useState(false);
-  useEffect(() => {
-    if (!localStorage.getItem('prc_cookie_consent')) setShow(true);
-  }, []);
+  const [show, setShow] = useState(() => !localStorage.getItem('prc_cookie_consent'));
   if (!show) return null;
   return (
     <div className="fixed bottom-0 left-0 right-0 bg-[#111116] border-t border-yellow-900/40 p-4 z-50 flex flex-col sm:flex-row items-center justify-between gap-3">

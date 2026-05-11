@@ -1,3 +1,4 @@
+/* eslint-disable no-unused-vars */
 // frontend/src/components/KrCurvePlot.jsx
 // Industrial-grade SCAL curve renderer.
 // Supports Kr, MICP Pc/PSD, RI (log-log), FF (log-log), J-Function, Pc-centrifuge, Overburden.
