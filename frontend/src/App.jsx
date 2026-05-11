@@ -505,8 +505,8 @@ export default function App() {
             >
               <Menu className="w-5 h-5" />
             </button>
-            <span className="text-sm font-bold tracking-widest text-yellow-50 uppercase truncate hidden sm:block">
-              {sessions.find(s => s.id === sessionId)?.title || 'New Study'}
+            <span className="text-sm font-bold tracking-[0.2em] text-yellow-500 uppercase truncate hidden sm:block">
+              PRC PETROPHYSICS ENGINE
             </span>
           </div>
 
@@ -519,7 +519,7 @@ export default function App() {
             <div className="flex items-center gap-2">
               <div className="text-right hidden sm:block">
                 <p className="text-[10px] text-slate-500 font-bold uppercase tracking-tighter leading-none">Engineer</p>
-                <p className="text-xs text-white font-serif italic truncate max-w-[120px]">{user.name}</p>
+                <p className="text-xs text-white font-sans italic truncate max-w-[120px]">{user.name}</p>
               </div>
               <button
                 onClick={handleDownloadReport}
@@ -677,7 +677,7 @@ export default function App() {
                     {uploadStatus === 'uploading' ? (
                       <>
                         <Loader className="w-4 h-4 text-yellow-400 animate-spin shrink-0" />
-                        <span className="text-sm text-yellow-300/80 font-serif">Uploading file</span>
+                        <span className="text-sm text-yellow-300/80 font-mono tracking-wide">Uploading file</span>
                       </>
                     ) : (
                       <>

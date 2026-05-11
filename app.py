@@ -1412,7 +1412,8 @@ class PRCChatAssistant:
 
         import tempfile
         for data_bytes, mime in f_parts:
-            if mime not in SUPPORTED:
+            safe_mime = mime or "application/octet-stream"
+            if safe_mime not in SUPPORTED:
                 continue
             with tempfile.NamedTemporaryFile(delete=False) as tf:
                 tf.write(data_bytes)
@@ -1457,9 +1458,10 @@ class PRCChatAssistant:
             return sampled
 
         for data_bytes, mime in f_parts:
+            safe_mime = mime or "application/octet-stream"
             # Only process Excel/CSV with the SCAL handler
-            if "spreadsheet" in mime or "excel" in mime or "csv" in mime or "sheet" in mime:
-                with tempfile.NamedTemporaryFile(delete=False, suffix=os.path.splitext(mime)[1] if "/" not in mime else ".xlsx") as tf:
+            if "spreadsheet" in safe_mime or "excel" in safe_mime or "csv" in safe_mime or "sheet" in safe_mime:
+                with tempfile.NamedTemporaryFile(delete=False, suffix=os.path.splitext(safe_mime)[1] if "/" not in safe_mime else ".xlsx") as tf:
                     tf.write(data_bytes)
                     tmp_path = tf.name
                 try:
@@ -1469,7 +1471,7 @@ class PRCChatAssistant:
                         sampled = _sample_data(result['extracted'])
                         extracted_context += f"\n\n[EXTRACTED DATA FROM UPLOADED FILE ({result['data_type']})]:\n{_json.dumps(sampled, indent=2)}\n"
                         # Prepare for background indexing
-                        self._pending_kb.append((result['file_name'], _json.dumps(result['extracted'])))
+                        self._pending_kb.append((file.filename, _json.dumps(result['extracted'])))
                 except Exception as e:
                     _logger.error(f"SCAL Handler Error: {e}")
                 finally:

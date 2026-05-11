@@ -98,7 +98,7 @@ export default function KrPlot({ content }) {
   const y2Scale= data.yAxis2?.type  === 'log' ? 'log' : 'number';
 
   return (
-    <div className={`chart-container ${visible ? 'entered' : 'entering'} my-12 rounded-[2.5rem] border border-white/5 bg-[#050508] shadow-[0_32px_64px_-16px_rgba(0,0,0,0.9)] overflow-hidden group hover:border-white/10 transition-all duration-700`}>
+    <div className={`chart-container ${visible ? 'entered' : 'entering'} my-12 rounded-[2.5rem] border border-[var(--prc-border-gold)] bg-[#050508] shadow-[0_32px_64px_-16px_rgba(0,0,0,0.9)] overflow-hidden group hover:border-[var(--prc-border-focus)] transition-all duration-700`}>
 
       {/* Header */}
       <div className="px-10 py-8 border-b border-white/5 bg-gradient-to-b from-white/[0.03] to-transparent flex flex-col sm:flex-row items-start sm:items-end justify-between gap-6">

@@ -37,7 +37,7 @@ export default function PetrophysicalTable({ content }) {
                 return (
                   <tr key={i} className="hover:bg-yellow-900/5 transition-colors group">
                     {values.map((v, j) => (
-                      <td key={j} className={`px-4 py-3 text-xs font-serif ${v === null || v === 'NaN' || v === 'nan' ? 'text-slate-700 italic' : 'text-slate-300'}`}>
+                      <td key={j} className={`px-4 py-3 text-xs font-mono ${v === null || v === 'NaN' || v === 'nan' ? 'text-slate-700 italic' : 'text-slate-300'}`}>
                         {v === null || v === 'NaN' || v === 'nan' ? '--' : (typeof v === 'number' ? v.toFixed(3) : v)}
                       </td>
                     ))}

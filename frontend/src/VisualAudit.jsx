@@ -166,7 +166,7 @@ export default function VisualAudit({ content }) {
                 </div>
               </div>
               
-              <div className="text-slate-300 text-[15px] leading-loose font-serif whitespace-pre-wrap">
+              <div className="text-slate-300 text-[13px] leading-loose font-mono whitespace-pre-wrap">
                 {scanning ? 'Analyzing visual data...' : result}
               </div>
             </div>

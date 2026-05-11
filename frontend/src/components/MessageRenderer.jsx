@@ -48,7 +48,7 @@ const KnowledgeCard = ({ title, content }) => {
             {title.replace(/^\d+[\.\s]+/, '')}
           </h4>
         </div>
-        <div className="p-6 text-slate-300 leading-relaxed font-serif text-[15px] opacity-90">
+        <div className="p-6 text-slate-300 leading-relaxed font-sans text-[15px] opacity-90">
           {content}
         </div>
       </div>
@@ -303,7 +303,7 @@ export function renderMessageContent(text) {
       }
       if (txt.toLowerCase().includes('data certified') || txt.toLowerCase().includes('analysis complete')) return <CertificationSeal key={i} />;
       if (txt.startsWith('###')) return <SectionHeader key={i} text={txt} />;
-      return <p key={i} className="mb-6 whitespace-pre-wrap font-serif leading-loose text-slate-300 opacity-80 text-[16px]">{txt}</p>;
+      return <p key={i} className="mb-6 whitespace-pre-wrap font-sans leading-loose text-slate-300 opacity-80 text-[16px]">{txt}</p>;
     }
     return null;
   });

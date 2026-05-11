@@ -45,7 +45,7 @@ export function PrivacyModal({ onClose }) {
           <div className="flex items-center gap-2"><Shield className="w-5 h-5 text-yellow-400" /><h3 className="text-yellow-50 font-bold tracking-widest uppercase text-sm">Privacy Policy</h3></div>
           <button onClick={onClose}><X className="w-4 h-4 text-slate-500 hover:text-white" /></button>
         </div>
-        <div className="text-slate-300 text-xs space-y-3 font-serif leading-relaxed">
+        <div className="text-slate-300 text-xs space-y-3 font-sans leading-relaxed">
           <p><strong>Last Updated:</strong> May 2026</p>
           <p>PRC SCAL AI Pipeline ("Hviel") is developed and operated by SCAL AI Solutions for the Petroleum Research Center. This policy describes how we collect, use, and protect your information.</p>
           <p><strong>1. Data Collection:</strong> We collect your name, email address, and chat session data to provide personalized AI assistance and track productivity.</p>
@@ -70,7 +70,7 @@ export function TermsModal({ onClose }) {
           <div className="flex items-center gap-2"><FileText className="w-5 h-5 text-yellow-400" /><h3 className="text-yellow-50 font-bold tracking-widest uppercase text-sm">Terms of Service</h3></div>
           <button onClick={onClose}><X className="w-4 h-4 text-slate-500 hover:text-white" /></button>
         </div>
-        <div className="text-slate-300 text-xs space-y-3 font-serif leading-relaxed">
+        <div className="text-slate-300 text-xs space-y-3 font-sans leading-relaxed">
           <p><strong>Last Updated:</strong> May 2026</p>
           <p>By accessing the PRC SCAL AI Pipeline, you agree to the following terms:</p>
           <p><strong>1. Authorized Use:</strong> This system is provided exclusively for authorized PRC personnel and partners. Unauthorized access is prohibited.</p>
@@ -92,7 +92,7 @@ export function CookieConsent() {
   if (!show) return null;
   return (
     <div className="fixed bottom-0 left-0 right-0 bg-[#111116] border-t border-yellow-900/40 p-4 z-50 flex flex-col sm:flex-row items-center justify-between gap-3">
-      <p className="text-xs text-slate-400 font-serif">This application uses cookies and local storage to maintain your session and preferences. By continuing, you consent to our use of cookies.</p>
+      <p className="text-xs text-slate-400 font-sans">This application uses cookies and local storage to maintain your session and preferences. By continuing, you consent to our use of cookies.</p>
       <div className="flex gap-2 shrink-0">
         <button onClick={() => { localStorage.setItem('prc_cookie_consent', 'true'); setShow(false); }} className="bg-yellow-600 hover:bg-yellow-500 text-black font-bold px-4 py-2 rounded-lg text-xs uppercase tracking-widest transition-all">Accept</button>
         <button onClick={() => setShow(false)} className="border border-slate-700 text-slate-400 hover:text-white px-4 py-2 rounded-lg text-xs uppercase tracking-widest transition-all">Dismiss</button>
