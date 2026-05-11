@@ -22,7 +22,7 @@ def test_rag_database_ingest_and_query():
     
     assert len(results) == 1
     assert "test_well_01" in results[0]["id"]
-    assert results[0]["historical_data"]["Porosity"] == 0.25
+    assert results[0]["historical_data"]["porosity"] == 0.25
     assert "test report" in results[0]["context"]
 
     # Cleanup

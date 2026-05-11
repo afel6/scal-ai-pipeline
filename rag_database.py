@@ -18,10 +18,12 @@ class RAGDatabase:
 
     def ingest_report(self, well_id: str, scal_data: dict, report_text: str):
         doc_id = str(uuid.uuid4())
+        # Standardize keys to lowercase for robust metadata filtering
+        clean_scal_data = {k.lower(): v for k, v in scal_data.items()}
         
         self.collection.add(
             documents=[report_text],
-            metadatas=[scal_data],
+            metadatas=[clean_scal_data],
             ids=[f"{well_id}_{doc_id}"]
         )
         _logger.info("Vectorized and stored well %s in ChromaDB.", well_id)
