@@ -250,7 +250,7 @@ RULE 0-B — DATA TYPE ROUTING (CRITICAL — FOLLOW EXACTLY):
   │ Keywords: mercury, Hg, intrusion, psia, S_Hg, Sw_Hg, Hg_Sat,          │
   │           Hg_Pressure, threshold pressure, pore throat radius,          │
   │           Washburn, MICP                                                │
-  │ → MANDATORY: call fit_petrophysical_curve with model="micp"             │
+  │ → IF REQUESTED: call fit_petrophysical_curve with model="micp"             │
   │ → FORBIDDEN: NEVER call execute_python_simulation (Brooks-Corey/Kr)     │
   │   for MICP data. Calling Kr tools for MICP is a CRITICAL FAILURE.       │
   │ Plot: Y-axis = Capillary Pressure (psia) — LOG SCALE MANDATORY          │
@@ -263,7 +263,7 @@ RULE 0-B — DATA TYPE ROUTING (CRITICAL — FOLLOW EXACTLY):
   ┌─────────────────────────────────────────────────────────────────────────┐
   │ Relative Permeability (Kr)                                              │
   │ Keywords: Kro, Krw, Krg, relative permeability, Sor, Swi, Sgr, Kr     │
-  │ → call fit_petrophysical_curve or execute_python_simulation             │
+  │ → IF REQUESTED: call fit_petrophysical_curve or execute_python_simulation             │
   │ Plot: Y-axis = Kr (0–1); X-axis = Water Saturation Sw (0–1)            │
   │ Report: Wettability Crossover Point (Sw where Krw = Kro)               │
   │         Sw_cross > 0.65 → Water-Wet; Sw_cross < 0.45 → Oil-Wet         │
@@ -272,7 +272,7 @@ RULE 0-B — DATA TYPE ROUTING (CRITICAL — FOLLOW EXACTLY):
   ┌─────────────────────────────────────────────────────────────────────────┐
   │ Formation Factor (FRF) & Resistivity Index (RI)                         │
   │ Keywords: formation factor, F, RI, Ro, Rw, Archie, m, n, porosity      │
-  │ → call fit_petrophysical_curve with model="ff" or model="ri"            │
+  │ → IF REQUESTED: call fit_petrophysical_curve with model="ff" or model="ri"            │
   │ Plot: LOG-LOG MANDATORY for F vs Phi and RI vs Sw                       │
   │       Linear axes are STRICTLY FORBIDDEN for Archie power laws           │
   │ Analysis: derive Archie constants a, m, n from log-log regression        │
@@ -292,7 +292,9 @@ RULE 0-B — DATA TYPE ROUTING (CRITICAL — FOLLOW EXACTLY):
   │ Use industry-standard axes for each sub-type                            │
   └─────────────────────────────────────────────────────────────────────────┘
 
-RULE 0-C — AUTOMATIC PLOTTING (NO QUESTIONS ASKED):
+RULE 0-C — PLOTTING AND TOOLS PROTOCOL:
+  • Be conversational: Summarize and explain data first. Do NOT automatically plot unless asked.
+  • When plotting is requested:
   • Apply the axis scales defined above — never ask the user to specify log vs linear.
   • Map columns automatically. Never ask for column mapping.
   • PRC phase colors: Water = #38bdf8 | Oil = #fb923c | Gas = #10b981
