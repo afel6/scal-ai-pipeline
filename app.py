@@ -142,10 +142,10 @@ def _get_conn():
 
 
 def db(query: str, params: tuple = ()) -> list:
-    """Execute a query written with ? placeholders against the active backend."""
+    """Execute a query with ? placeholders, falling back to SQLite if PostgreSQL fails."""
     try:
         with _get_conn() as (conn, ph):
-            q   = query if ph == "?" else _translate_placeholders(query)
+            q = query if ph == "?" else _translate_placeholders(query)
             cur = conn.cursor()
             cur.execute(q, params)
             try:

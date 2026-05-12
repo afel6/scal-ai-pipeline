@@ -331,18 +331,18 @@ export default function App() {
         } catch { /* non-JSON frame — ignore */ }
       };
 
-      es.onerror = () => {
+      es.onerror = (err) => {
         if (streamedText) {
-          // Partial response received before clean close — treat as success
           es.close();
           setLoading(false);
           setUploadStatus('');
           refreshSessions();
         } else {
           es.close();
+          const detail = (err && err.message) ? `: ${err.message}` : '';
           setMessages(prev => [...prev, {
             role: 'model',
-            text: '[!] Connection error. Unable to reach the PRC Hub.',
+            text: `[!] Connection error. Unable to reach the PRC Hub${detail}. Please check your internet or try refreshing.`,
             isError: true,
           }]);
           setLoading(false);
