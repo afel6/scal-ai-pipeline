@@ -82,6 +82,7 @@ export default function App() {
   const [adminPinLoading,setAdminPinLoading]= useState(false);
   const [reportLoading,  setReportLoading]  = useState(false);
   const [simProgress,    setSimProgress]    = useState(null); // { val, text }
+  const [cognitiveMode,  setCognitiveMode]  = useState('');
 
   const messagesEndRef    = useRef(null);
   const inputRef          = useRef(null);
@@ -302,6 +303,8 @@ export default function App() {
           if (data.type === 'session') {
             setSessionId(data.session_id);
             localStorage.setItem('prc_session_id', data.session_id);
+          } else if (data.type === 'mode') {
+            setCognitiveMode(data.text);
           } else if (data.type === 'progress') {
             const match = data.text.match(/PROGRESS:\s*(\d+)\/(\d+)/);
             if (match) {
@@ -329,6 +332,7 @@ export default function App() {
             setLoading(false);
             setUploadStatus('');
             setSimProgress(null);
+            setCognitiveMode('');
             refreshSessions();
           } else if (data.type === 'error') {
             es.close();
@@ -339,6 +343,7 @@ export default function App() {
             setLoading(false);
             setUploadStatus('');
             setSimProgress(null);
+            setCognitiveMode('');
             setServerStatus('offline');
           }
         } catch { /* non-JSON frame — ignore */ }
@@ -372,6 +377,7 @@ export default function App() {
         setLoading(false);
         setUploadStatus('');
         setSimProgress(null);
+        setCognitiveMode('');
         setServerStatus('offline');
       };
 
@@ -705,33 +711,47 @@ export default function App() {
                     {simProgress ? (
                       <>
                         <div className="flex justify-between items-center gap-4">
-                          <span className="text-[10px] text-yellow-500 font-black uppercase tracking-widest animate-pulse">
-                            Simulation in Progress
-                          </span>
+                          <div className="flex items-center gap-2">
+                            <Activity className="w-3.5 h-3.5 text-yellow-500 animate-pulse" />
+                            <span className="text-[10px] text-yellow-500 font-black uppercase tracking-widest">
+                              {cognitiveMode || 'Simulation in Progress'}
+                            </span>
+                          </div>
                           <span className="text-[10px] text-slate-500 font-mono">
                             {simProgress.val !== null ? `${Math.round(simProgress.val)}%` : '...'}
                           </span>
                         </div>
                         <div className="w-full h-1 bg-slate-800 rounded-none overflow-hidden">
                           <div 
-                            className="h-full bg-yellow-500 transition-all duration-300 ease-out"
+                            className="h-full bg-yellow-500 transition-all duration-300 ease-out shadow-[0_0_8px_rgba(234,179,8,0.5)]"
                             style={{ width: `${simProgress.val ?? 0}%` }}
                           />
                         </div>
-                        <span className="text-[9px] text-slate-400 font-mono truncate">
+                        <span className="text-[9px] text-slate-400 font-mono truncate italic opacity-70">
                           {simProgress.text}
                         </span>
                       </>
                     ) : uploadStatus === 'uploading' ? (
-                      <div className="flex items-center gap-2">
-                        <Loader className="w-4 h-4 text-yellow-400 animate-spin shrink-0" />
-                        <span className="text-sm text-yellow-300/80 font-mono tracking-wide">Uploading file</span>
+                      <div className="flex items-center gap-2 py-1">
+                        <Upload className="w-4 h-4 text-yellow-500 animate-bounce shrink-0" />
+                        <span className="text-[11px] text-yellow-300 font-mono tracking-widest uppercase font-bold">Transferring Data Packets</span>
                       </div>
                     ) : (
-                      <div className="flex items-center gap-2">
-                        <span className="w-2 h-2 bg-yellow-500 rounded-none animate-bounce" />
-                        <span className="w-2 h-2 bg-yellow-500 rounded-none animate-bounce [animation-delay:0.15s]" />
-                        <span className="w-2 h-2 bg-yellow-500 rounded-none animate-bounce [animation-delay:0.3s]" />
+                      <div className="flex flex-col gap-3 py-1">
+                        {cognitiveMode && (
+                          <div className="flex items-center gap-2 bg-yellow-500/10 px-2 py-1 border border-yellow-500/20 w-fit">
+                            <Layers className="w-3 h-3 text-yellow-500 animate-pulse" />
+                            <span className="text-[9px] text-yellow-400 font-black uppercase tracking-[0.2em]">{cognitiveMode}</span>
+                          </div>
+                        )}
+                        <div className="flex items-center gap-2">
+                          <div className="flex items-center gap-1.5">
+                            <span className="w-1.5 h-1.5 bg-yellow-500 rounded-none animate-bounce" />
+                            <span className="w-1.5 h-1.5 bg-yellow-500 rounded-none animate-bounce [animation-delay:0.2s]" />
+                            <span className="w-1.5 h-1.5 bg-yellow-500 rounded-none animate-bounce [animation-delay:0.4s]" />
+                          </div>
+                          {!cognitiveMode && <span className="text-[10px] text-slate-500 font-mono uppercase tracking-widest ml-2 italic">Thinking...</span>}
+                        </div>
                       </div>
                     )}
                   </div>
