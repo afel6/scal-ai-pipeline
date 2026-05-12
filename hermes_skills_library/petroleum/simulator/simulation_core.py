@@ -141,6 +141,7 @@ class SCALSimulator:
             sw = sw_new
             
             if step % 5 == 0:
+                print(f"PROGRESS: {step}/{total_steps}", flush=True)
                 saturations_history.append(sw.tolist())
                 
         return sw, saturations_history
@@ -169,11 +170,23 @@ def main():
         
         if data.get('mode') == '2d':
             final_sw, history = simulator.solve_2d_displacement(data)
-            result = {
+            full_result = {
                 "status": "success",
                 "mode": "2d",
                 "final_sw": final_sw.tolist(),
                 "history": history,
+                "params": data
+            }
+            
+            # Write to a temporary JSON file to minimize token usage
+            filename = f"simulation_output_{int(time.time())}.json"
+            with open(filename, 'w') as f:
+                json.dump(full_result, f)
+                
+            result = {
+                "status": "success",
+                "mode": "2d",
+                "file_path": f"/api/download/{filename}",
                 "params": data
             }
         else:

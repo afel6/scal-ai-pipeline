@@ -13,42 +13,65 @@ SKILLS_PATH = os.path.join(os.path.dirname(__file__), "hermes_skills_library")
 class SkillsEngine:
     @staticmethod
     def run_skill(category, skill_name, script_name, args=None):
-        """
-        Executes a script within the hermes_skills_library.
-        Args:
-            category: e.g., 'research'
-            skill_name: e.g., 'arxiv'
-            script_name: e.g., 'search_arxiv.py'
-            args: list of strings
-        """
-        script_path = os.path.join(SKILLS_PATH, category, skill_name, "scripts", script_name)
-        
-        if not os.path.exists(script_path):
-            # Fallback check: some skills might not have a /scripts directory
-            script_path = os.path.join(SKILLS_PATH, category, skill_name, script_name)
-            if not os.path.exists(script_path):
-                return {"error": f"Skill script not found: {script_path}"}
+        """Synchronous version for simple calls."""
+        return SkillsEngine._run_impl(category, skill_name, script_name, args)
 
-        cmd = [sys.executable, script_path]
-        if args:
-            cmd.extend(args)
+    @staticmethod
+    def run_skill_stream(category, skill_name, script_name, args=None):
+        """Generator version for long-running scripts with progress."""
+        script_path = SkillsEngine._get_script_path(category, skill_name, script_name)
+        if isinstance(script_path, dict): # error
+            yield script_path
+            return
+
+        python_exe = os.environ.get("PYTHON_EXE", r"C:\Users\Asus\AppData\Local\Programs\Python\Python313\python.exe")
+        cmd = [python_exe, script_path]
+        if args: cmd.extend(args)
 
         try:
-            logger.info(f"Executing Skill: {' '.join(cmd)}")
-            result = subprocess.run(
+            process = subprocess.Popen(
                 cmd,
-                capture_output=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
                 text=True,
-                check=False,
-                timeout=30 # Safety timeout for production
+                bufsize=1
             )
-            return {
-                "stdout": result.stdout,
-                "stderr": result.stderr,
-                "exit_code": result.returncode
-            }
-        except subprocess.TimeoutExpired:
-            return {"error": "Skill execution timed out (30s limit)"}
+            
+            # Read stdout line by line
+            for line in process.stdout:
+                yield {"stdout": line}
+            
+            # Read stderr if any (after stdout completes or partially)
+            stderr_out = process.stderr.read()
+            if stderr_out:
+                yield {"stderr": stderr_out}
+                
+            process.wait(timeout=5)
+            yield {"exit_code": process.returncode}
+        except Exception as e:
+            yield {"error": str(e)}
+
+    @staticmethod
+    def _get_script_path(category, skill_name, script_name):
+        script_path = os.path.join(SKILLS_PATH, category, skill_name, "scripts", script_name)
+        if not os.path.exists(script_path):
+            script_path = os.path.join(SKILLS_PATH, category, skill_name, script_name)
+            if not os.path.exists(script_path):
+                return {"error": f"Skill script not found: {script_name}"}
+        return script_path
+
+    @staticmethod
+    def _run_impl(category, skill_name, script_name, args=None):
+        script_path = SkillsEngine._get_script_path(category, skill_name, script_name)
+        if isinstance(script_path, dict): return script_path
+
+        python_exe = os.environ.get("PYTHON_EXE", r"C:\Users\Asus\AppData\Local\Programs\Python\Python313\python.exe")
+        cmd = [python_exe, script_path]
+        if args: cmd.extend(args)
+
+        try:
+            result = subprocess.run(cmd, capture_output=True, text=True, check=False, timeout=60)
+            return {"stdout": result.stdout, "stderr": result.stderr, "exit_code": result.returncode}
         except Exception as e:
             return {"error": str(e)}
 

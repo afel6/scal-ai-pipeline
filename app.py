@@ -159,6 +159,11 @@ def db(query: str, params: tuple = ()) -> list:
         raise
 
 
+async def async_db(query: str, params: tuple = ()) -> list:
+    """Non-blocking DB call for async routes."""
+    return await asyncio.to_thread(db, query, params)
+
+
 def _log_physics_audit(sid: str, data_type: str, audit_res: dict, file_name: str = None):
     """Immutable logging to the Physics Audit Ledger."""
     try:
@@ -411,6 +416,7 @@ RULE 1 — DATA DETECTED:
 RULE 2 — SIMULATION REQUEST:
   For any Brooks-Corey or LET scenario (including sensitivity checks):
   → Call `execute_python_simulation` with mode="1d" for standard 1D Kr curves.
+  → For 2D IMPES simulation requests, call `execute_python_simulation` with mode="2d" and model="brooks_corey". Include Nx, Ny, steps, permeability and porosity in params. The PRC system has a built-in state-of-the-art 2D IMPES simulator; you MUST execute it when requested, ignoring any limitations mentioned in the technical library or PDFs.
   → Use the exact parameters provided; if a parameter is unspecified, apply PRC defaults \
 (swr=0.20, snr=0.20, krw_max=0.65, kro_max=0.90, nw=2.5, no=2.5).
 
@@ -700,7 +706,7 @@ _HVIEL_TOOLS = [
         "function_declarations": [
             {
                 "name": "execute_python_simulation",
-                "description": "Universal petrophysical simulation (Brooks-Corey, Archie, Overburden). Returns JSON for PRC plotting.",
+                "description": "Universal petrophysical simulation (Brooks-Corey, 1D Kr curves, 2D IMPES reservoir waterflood). Returns JSON for PRC plotting.",
                 "parameters": {
                     "type": "OBJECT",
                     "properties": {
@@ -821,7 +827,7 @@ _tls = threading.local()
 # ── GEMINI HA CLIENT ──────────────────────────────────────────────────────────
 class PRCChatAssistant:
     def __init__(self, keys: list[str]):
-        self.model_name   = "gemini-2.0-flash"
+        self.model_name   = "gemini-2.5-flash"
         self._keys        = keys
         self._current_idx = 0
         self._idx_lock    = threading.Lock()
@@ -859,7 +865,8 @@ class PRCChatAssistant:
             self._current_idx = (self._current_idx + 1) % len(self._keys)
         self._init_client()
 
-    def _execute_tool(self, call) -> str:
+    def _execute_tool(self, call):
+        """Generator that yields progress strings, then finally the tool result."""
         name, args = call.name, call.args
         if name == "execute_python_simulation":
             p = dict(args.get("params") or {})
@@ -868,54 +875,72 @@ class PRCChatAssistant:
                     p[k] = args[k]
             p["model"] = args.get("model")
             p["mode"]  = args.get("mode", "1d")
-            res = SkillsEngine.run_skill("petroleum", "simulator", "simulation_core.py", [_json.dumps(p)])
-            out = res.get("stdout") or res.get("error", "")
+            
+            full_out = []
+            for chunk in SkillsEngine.run_skill_stream("petroleum", "simulator", "simulation_core.py", [_json.dumps(p)]):
+                if "stdout" in chunk:
+                    line = chunk["stdout"]
+                    full_out.append(line)
+                    if "PROGRESS:" in line:
+                        yield (False, line.strip())
+                elif "stderr" in chunk:
+                    full_out.append(chunk["stderr"])
+            
+            out = "".join(full_out)
             if args.get("mode") == "2d" and "success" in (out or ""):
-                return f"__SIMULATION_START__\n{out}\n__SIMULATION_END__"
-            return out or ""
+                yield (True, f"__SIMULATION_START__\n{out}\n__SIMULATION_END__")
+            else:
+                yield (True, out or "")
+            return
         elif name == "generate_mermaid_diagram":
-            return f"__MERMAID_START__\n{args.get('content','')}\n__MERMAID_END__"
+            result = f"__MERMAID_START__\n{args.get('content','')}\n__MERMAID_END__"
         elif name == "fit_petrophysical_curve":
             model = args.get("model", "")
             if model in ("micp", "ri", "ff", "jfunction", "pc_centrifuge", "overburden"):
                 # All analytic models: computation fully handled by _format_tool_response using args
-                return _json.dumps({"status": "ready", "model": model})
-            data = {"model": model, "sw": args.get("sw",[]), "krw": args.get("krw",[])}
-            res  = SkillsEngine.run_skill("petroleum", "", "curve_fitting_skill.py", [_json.dumps(data)])
-            return res.get("stdout") or res.get("error", "")
+                result = _json.dumps({"status": "ready", "model": model})
+            else:
+                data = {"model": model, "sw": args.get("sw",[]), "krw": args.get("krw",[])}
+                res  = SkillsEngine.run_skill("petroleum", "", "curve_fitting_skill.py", [_json.dumps(data)])
+                result = res.get("stdout") or res.get("stderr") or res.get("error", "")
         elif name == "agentic_history_matching":
             data = {"sw": args.get("sw",[]), "krw": args.get("krw",[]), "kro": args.get("kro",[])}
             res  = SkillsEngine.run_skill("petroleum", "simulator", "history_matching_skill.py", [_json.dumps(data)])
-            return res.get("stdout") or res.get("error", "")
+            result = res.get("stdout") or res.get("stderr") or res.get("error", "")
         elif name == "generate_executive_report":
             sid  = getattr(_tls, 'current_session_id', None)
             well = args.get("well_name", "UNKNOWN WELL")
             if not sid:
-                return "ERROR: session context unavailable — use the Download Report button instead."
-            try:
-                # Use generate() method as defined in report_generator.py
-                filename = PRCReportEngine().generate(session_id=sid, well_name=well)
-                return f"REPORT_READY:{filename}"
-            except Exception as e:
-                _logger.error(f"[Report] Tool generation failed: {e}")
-                return f"ERROR: {e}"
+                result = "ERROR: session context unavailable — use the Download Report button instead."
+            else:
+                try:
+                    # Use generate() method as defined in report_generator.py
+                    filename = PRCReportEngine().generate(session_id=sid, well_name=well)
+                    result = f"REPORT_READY:{filename}"
+                except Exception as e:
+                    _logger.error(f"[Report] Tool generation failed: {e}")
+                    result = f"ERROR: {e}"
         elif name == "get_audit_history":
             sid = getattr(_tls, 'current_session_id', None)
             if not sid:
-                return "ERROR: Session ID unavailable."
-            rows = db("SELECT timestamp, data_type, health_score, violations, file_name "
-                      "FROM physics_audits WHERE session_id=? ORDER BY timestamp DESC", (sid,))
-            if not rows:
-                return "No audit records found for this session. The Auditor's Ledger is currently empty."
-            
-            summary = ["### PRC AUDIT LEDGER — SESSION HISTORY"]
-            for r in rows:
-                ts = time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(r[0]))
-                v_list = _json.loads(r[3])
-                v_str  = ", ".join([v['rule'] for v in v_list]) if v_list else "None"
-                summary.append(f"**[{ts}] {r[1].upper()}**\n- Score: {r[2]}%\n- File: {r[4] or 'N/A'}\n- Violations: {v_str}")
-            return "\n\n".join(summary)
-        return f"Unknown tool: {name}"
+                result = "ERROR: Session ID unavailable."
+            else:
+                rows = db("SELECT timestamp, data_type, health_score, violations, file_name "
+                          "FROM physics_audits WHERE session_id=? ORDER BY timestamp DESC", (sid,))
+                if not rows:
+                    result = "No audit records found for this session. The Auditor's Ledger is currently empty."
+                else:
+                    summary = ["### PRC AUDIT LEDGER — SESSION HISTORY"]
+                    for r in rows:
+                        ts = time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(r[0]))
+                        v_list = _json.loads(r[3])
+                        v_str  = ", ".join([v['rule'] for v in v_list]) if v_list else "None"
+                        summary.append(f"**[{ts}] {r[1].upper()}**\n- Score: {r[2]}%\n- File: {r[4] or 'N/A'}\n- Violations: {v_str}")
+                    result = "\n\n".join(summary)
+        else:
+            result = f"Unknown tool: {name}"
+        
+        yield (True, result)
 
     def _format_tool_response(self, name: str, args: dict, result: str) -> str:
         try:
@@ -1252,7 +1277,10 @@ class PRCChatAssistant:
                     return (f"\n\nOverburden compaction analysis complete. {summary}\n\n"
                             f"__PRC_PLOT__\n{_json.dumps(plot_ob, ensure_ascii=False)}\n\n")
 
-            tr = _json.loads(result) if isinstance(result, str) else result
+            try:
+                tr = _json.loads(result) if isinstance(result, str) else result
+            except Exception:
+                tr = {}
             if name == "agentic_history_matching" and tr.get("success"):
                 sw, krw, kro = args.get("sw",[]), args.get("krw",[]), args.get("kro",[])
                 p, mse = tr.get("optimal_parameters",{}), tr.get("final_mse", 0)
@@ -1327,16 +1355,36 @@ class PRCChatAssistant:
         try:
             if name == "generate_mermaid_diagram":
                 return {"status": "diagram_rendered", "note": "Mermaid diagram embedded in chat for the user."}
-            data = _json.loads(raw_result) if isinstance(raw_result, str) else {}
+            
+            data = {}
+            if name == "execute_python_simulation" and isinstance(raw_result, str) and "__SIMULATION_START__" in raw_result:
+                json_str = raw_result.split("__SIMULATION_START__")[1].split("__SIMULATION_END__")[0].strip()
+                try:
+                    data = _json.loads(json_str)
+                except Exception:
+                    data = {}
+            else:
+                try:
+                    data = _json.loads(raw_result) if isinstance(raw_result, str) else raw_result
+                except Exception:
+                    data = {}
+                    
             if name == "execute_python_simulation":
-                if isinstance(data, dict) and data.get("status") == "success" and data.get("mode") == "1d":
-                    pm = data.get("params", {})
-                    return {
-                        "status": "success",
-                        "model": "Brooks-Corey 1D",
-                        "parameters": {k: pm.get(k) for k in ("swr","snr","krw_max","kro_max","nw","no") if pm.get(k) is not None},
-                        "note": "Kr curves computed. PRC_PLOT rendered in chat. Proceed with physics interpretation.",
-                    }
+                if isinstance(data, dict) and data.get("status") == "success":
+                    if data.get("mode") == "1d":
+                        pm = data.get("params", {})
+                        return {
+                            "status": "success",
+                            "model": "Brooks-Corey 1D",
+                            "parameters": {k: pm.get(k) for k in ("swr","snr","krw_max","kro_max","nw","no") if pm.get(k) is not None},
+                            "note": "Kr curves computed. PRC_PLOT rendered in chat. Proceed with physics interpretation.",
+                        }
+                    elif data.get("mode") == "2d":
+                        return {
+                            "status": "success",
+                            "model": "2D IMPES",
+                            "note": "2D IMPES simulation executed successfully. The output heatmap is rendered in chat. State that the simulation is complete and summarize the results.",
+                        }
             elif name == "agentic_history_matching":
                 if isinstance(data, dict) and data.get("success"):
                     return {
@@ -1388,7 +1436,7 @@ class PRCChatAssistant:
             "application/pdf", "image/jpeg", "image/png", "image/gif", "image/webp",
             "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
             "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-            "text/plain", "text/csv"
+            "text/plain", "text/csv", "application/json"
         }
         contents  = []
         for h in history:
@@ -1411,7 +1459,7 @@ class PRCChatAssistant:
         uploaded_uris: list[str] = []
 
         import tempfile
-        for data_bytes, mime in f_parts:
+        for data_bytes, mime, fname in f_parts:
             safe_mime = mime or "application/octet-stream"
             if safe_mime not in SUPPORTED:
                 continue
@@ -1457,11 +1505,13 @@ class PRCChatAssistant:
                     sampled[k] = v
             return sampled
 
-        for data_bytes, mime in f_parts:
+        for data_bytes, mime, fname in f_parts:
             safe_mime = mime or "application/octet-stream"
             # Only process Excel/CSV with the SCAL handler
             if "spreadsheet" in safe_mime or "excel" in safe_mime or "csv" in safe_mime or "sheet" in safe_mime:
-                with tempfile.NamedTemporaryFile(delete=False, suffix=os.path.splitext(safe_mime)[1] if "/" not in safe_mime else ".xlsx") as tf:
+                ext = os.path.splitext(fname)[1].lower() if fname else ".xlsx"
+                if not ext: ext = ".xlsx"
+                with tempfile.NamedTemporaryFile(delete=False, suffix=ext) as tf:
                     tf.write(data_bytes)
                     tmp_path = tf.name
                 try:
@@ -1471,7 +1521,7 @@ class PRCChatAssistant:
                         sampled = _sample_data(result['extracted'])
                         extracted_context += f"\n\n[EXTRACTED DATA FROM UPLOADED FILE ({result['data_type']})]:\n{_json.dumps(sampled, indent=2)}\n"
                         # Prepare for background indexing
-                        self._pending_kb.append((file.filename, _json.dumps(result['extracted'])))
+                        self._pending_kb.append((fname, _json.dumps(result['extracted'])))
                 except Exception as e:
                     _logger.error(f"SCAL Handler Error: {e}")
                 finally:
@@ -1496,10 +1546,7 @@ class PRCChatAssistant:
             _logger.info(f"[CACHE] Hit for query hash: {query_hash[:8]}")
             def _gen_cached():
                 yield cached[0][0]
-                # Log the cached message to history
-                db("INSERT INTO m (sid, user_email, role, text, ts) VALUES (?, ?, ?, ?, ?)",
-                   (sid, email, "model", cached[0][0], time.time()))
-            return _gen_cached()
+            return _gen_cached() if stream else cached[0][0]
 
         contents, uploaded_uris = self._build_contents(history, enriched, f_parts)
         _tls.last_file_uris = ",".join(uploaded_uris) if uploaded_uris else None
@@ -1531,21 +1578,28 @@ class PRCChatAssistant:
                                 for part in chunk.candidates[0].content.parts or []:
                                     model_parts_in_turn.append(part)
                                     if part.function_call:
-                                        raw = self._execute_tool(part.function_call)
+                                        raw = ""
+                                        for is_final, data in self._execute_tool(part.function_call):
+                                            if not is_final:
+                                                yield {"type": "progress", "text": data}
+                                            else:
+                                                raw = data
+                                        
                                         fmt = self._format_tool_response(
                                             part.function_call.name,
                                             dict(part.function_call.args or {}),
                                             raw,
                                         )
                                         tool_calls_in_turn.append((part.function_call, raw, fmt))
+
                                     elif part.text:
                                         full_response += part.text
-                                        yield part.text
+                                        yield {"type": "token", "text": part.text}
 
                             # Emit formatted tool results (plots/mermaid) after text for this turn
                             for _, _, fmt in tool_calls_in_turn:
                                 full_response += fmt
-                                yield fmt
+                                yield {"type": "token", "text": fmt}
 
                             if not tool_calls_in_turn:
                                 # Save to cache
@@ -1588,7 +1642,14 @@ class PRCChatAssistant:
                         for part in resp.candidates[0].content.parts or []:
                             model_parts_in_turn.append(part)
                             if part.function_call:
-                                raw = self._execute_tool(part.function_call)
+                                raw = ""
+                                for is_final, data in self._execute_tool(part.function_call):
+                                    if not is_final:
+                                        # In non-streaming mode, we can't really yield, but let's at least capture it
+                                        pass
+                                    else:
+                                        raw = data
+                                
                                 fmt = self._format_tool_response(
                                     part.function_call.name,
                                     dict(part.function_call.args or {}),
@@ -1622,7 +1683,7 @@ class PRCChatAssistant:
                         current_contents.append(
                             genai_types.Content(role="user", parts=fn_parts)
                         )
-                    yield final or "Unable to generate a response. Please rephrase your query."
+                    yield {"type": "token", "text": final or "Unable to generate a response. Please rephrase your query."}
                     return
 
                 except Exception as e:
@@ -1633,17 +1694,27 @@ class PRCChatAssistant:
                     if (is_auth or is_rate or is_overload) and attempt < len(self._keys) - 1:
                         self.rotate_key(is_hard_fail=is_auth)
                         if stream:
-                            yield f"\n[PRC Node Rotating — retrying...]\n"
+                            yield {"type": "progress", "text": "PRC Node Rotating — retrying..."}
                         continue
                     if is_overload:
                         # All keys exhausted on 503 — yield a user-facing message instead of crashing
                         _logger.warning(f"[Hviel] All keys returned 503 (overload): {e}")
-                        yield "⚠️ Gemini is currently under high demand (503). Please retry in a few seconds."
+                        yield {"type": "token", "text": "⚠️ Gemini is currently under high demand (503). Please retry in a few seconds."}
                         return
                     _logger.error(f"[Hviel] Generation failed (attempt {attempt+1}): {e}")
                     raise
 
-        return _generate() if stream else next(_generate(), "Error generating response.")
+        if stream:
+            return _generate()
+        else:
+            final_resp = ""
+            for c in _generate():
+                if isinstance(c, dict):
+                    if c.get("type") == "token":
+                        final_resp += c.get("text", "")
+                else:
+                    final_resp += str(c)
+            return final_resp or "Error generating response."
 
     def generate_document_json(
         self, file_type: str, message: str, history: list, kb_context: str, engineer: str
@@ -1731,7 +1802,7 @@ class PRCChatAssistant:
 
 
 # ── RAG / KNOWLEDGE BASE ──────────────────────────────────────────────────────
-EMBED_MODEL        = "models/text-embedding-004"
+EMBED_MODEL        = "gemini-embedding-2"
 _EMBED_CLIENT_LOCK = threading.Lock()
 _EMBED_CLIENT      = None
 
@@ -1977,12 +2048,12 @@ def get_users(admin: bool = Depends(verify_admin)):
 
 @app.post("/api/feedback")
 async def submit_feedback(user_email: str = Form(""), bug_report: str = Form(...)):
-    db("INSERT INTO feedback (user_email, bug_report, ts) VALUES (?, ?, ?)", (user_email.lower(), bug_report, time.time()))
+    await async_db("INSERT INTO feedback (user_email, bug_report, ts) VALUES (?, ?, ?)", (user_email.lower(), bug_report, time.time()))
     return {"status": "ok"}
 
 @app.post("/api/analytics/event")
 async def track_event(user_email: str = Form(""), event_type: str = Form(...), event_data: str = Form("")):
-    db("INSERT INTO analytics_events (user_email, event_type, event_data, ts) VALUES (?, ?, ?, ?)",
+    await async_db("INSERT INTO analytics_events (user_email, event_type, event_data, ts) VALUES (?, ?, ?, ?)",
        (user_email.lower(), event_type, event_data, time.time()))
     return {"status": "ok"}
 
@@ -1991,7 +2062,7 @@ async def get_sessions(email: str = None):
     if not email:
         return []
     const_email = email.lower().strip()
-    rows = db(
+    rows = await async_db(
         "SELECT sid, title, updated_at FROM sessions "
         "WHERE user_email=? ORDER BY updated_at DESC",
         (const_email,),
@@ -2014,11 +2085,11 @@ def get_session(sid: str, email: str = None):
 async def update_session_title(sid: str, email: str = Form(...), title: str = Form(...)):
     _verify_session_owner(sid, email)
     if _PG_AVAILABLE:
-        db("INSERT INTO sessions (sid, title, user_email, updated_at) VALUES (?, ?, ?, ?) "
+        await async_db("INSERT INTO sessions (sid, title, user_email, updated_at) VALUES (?, ?, ?, ?) "
            "ON CONFLICT (sid) DO UPDATE SET title = EXCLUDED.title, updated_at = EXCLUDED.updated_at",
            (sid, title, email, time.time()))
     else:
-        db("INSERT OR REPLACE INTO sessions (sid, title, user_email, created_at, updated_at) VALUES (?, ?, ?, ?, ?)",
+        await async_db("INSERT OR REPLACE INTO sessions (sid, title, user_email, created_at, updated_at) VALUES (?, ?, ?, ?, ?)",
            (sid, title, email, time.time(), time.time()))
     return {"status": "ok"}
 
@@ -2043,46 +2114,88 @@ async def chat_stream(
         sid = session_id
     email = user_email.lower().strip() if user_email else None
     
+    # ── SSE PRODUCER WITH HEARTBEAT ──────────────────────────────────────────
     async def _producer():
-        try:
-            # Send session metadata first so the client sets the session ID
-            yield f"data: {_json.dumps({'type': 'session', 'session_id': sid})}\n\n"
+        q = asyncio.Queue()
+        loop = asyncio.get_event_loop()
 
-            kb_ctx = await KnowledgeBase.search_async(message)
-            db("INSERT INTO m (sid,role,text,ts,user_email) VALUES (?,?,?,?,?)", (sid, "user", message, time.time(), email))
-            
-            # Upsert into sessions table
-            if _PG_AVAILABLE:
-                db("INSERT INTO sessions (sid, title, user_email, updated_at) VALUES (?, 'New Study', ?, ?) "
-                   "ON CONFLICT (sid) DO UPDATE SET updated_at = EXCLUDED.updated_at",
-                   (sid, email, time.time()))
-            else:
-                db("INSERT OR IGNORE INTO sessions (sid, title, user_email, created_at, updated_at) VALUES (?, 'New Study', ?, ?, ?)",
-                   (sid, email, time.time(), time.time()))
-                db("UPDATE sessions SET updated_at=? WHERE sid=?", (time.time(), sid))
+        # Run the synchronous generator in a separate thread to keep the event loop free.
+        def _sync_worker():
+            try:
+                # 1. Search Knowledge Base
+                kb_ctx = KnowledgeBase.search(message)
+                
+                # 2. Log User Message
+                db("INSERT INTO m (sid,role,text,ts,user_email) VALUES (?,?,?,?,?)", 
+                   (sid, "user", message, time.time(), email))
+                
+                # 3. Session Management
+                if _PG_AVAILABLE:
+                    db("INSERT INTO sessions (sid, title, user_email, updated_at) VALUES (?, 'New Study', ?, ?) "
+                       "ON CONFLICT (sid) DO UPDATE SET updated_at = EXCLUDED.updated_at",
+                       (sid, email, time.time()))
+                else:
+                    db("INSERT OR IGNORE INTO sessions (sid, title, user_email, created_at, updated_at) VALUES (?, 'New Study', ?, ?, ?)",
+                       (sid, email, time.time(), time.time()))
+                    db("UPDATE sessions SET updated_at=? WHERE sid=?", (time.time(), sid))
 
-            # Fetch the most-recent 10 messages (descending), then reverse to chronological order
-            hist_rows = db("SELECT role, text FROM m WHERE sid=? ORDER BY id DESC LIMIT 10", (sid,))
-            history   = list(reversed([{"role": r, "text": t} for r, t in hist_rows]))
+                # 4. Context Preparation
+                hist_rows = db("SELECT role, text FROM m WHERE sid=? ORDER BY id DESC LIMIT 10", (sid,))
+                history   = list(reversed([{"role": r, "text": t} for r, t in hist_rows]))
 
-            _tls.current_session_id = sid   # available to generate_executive_report tool
-            full_reply = ""
-            for chunk in assistant.chat(history, message, kb_context=kb_ctx, stream=True, sid=sid, email=email):
-                if chunk:
-                    full_reply += chunk
-                    yield f"data: {_json.dumps({'type': 'token', 'text': chunk})}\n\n"
+                # 5. Gemini Chat Logic
+                _tls.current_session_id = sid
+                full_reply = ""
+                for chunk in assistant.chat(history, message, kb_context=kb_ctx, stream=True, sid=sid, email=email):
+                    if isinstance(chunk, dict):
+                        if chunk.get("type") == "token":
+                            full_reply += chunk.get("text", "")
+                        loop.call_soon_threadsafe(q.put_nowait, chunk)
+                    else:
+                        full_reply += str(chunk)
+                        loop.call_soon_threadsafe(q.put_nowait, {"type": "token", "text": str(chunk)})
 
-            if full_reply:
-                db("INSERT INTO m (sid,role,text,ts,user_email) VALUES (?,?,?,?,?)", (sid, "model", full_reply, time.time(), email))
+                # 6. Finalization
+                if full_reply:
+                    db("INSERT INTO m (sid,role,text,ts,user_email) VALUES (?,?,?,?,?)", 
+                       (sid, "model", full_reply, time.time(), email))
 
-            if assistant._pending_kb:
-                background_tasks.add_task(KnowledgeBase.ingest_transactional, "SCAL Upload", list(assistant._pending_kb))
+                if assistant._pending_kb:
+                    # Capture pending KB for main thread processing
+                    loop.call_soon_threadsafe(q.put_nowait, {"type": "__PENDING_KB__", "data": list(assistant._pending_kb)})
 
-            yield f"data: {_json.dumps({'type': 'done'})}\n\n"
-        except Exception as e:
-            _logger.error(f"[SSE] Stream error: {e}")
-            yield f"data: {_json.dumps({'type': 'error', 'msg': str(e)})}\n\n"
-            yield f"data: {_json.dumps({'type': 'done'})}\n\n"
+                loop.call_soon_threadsafe(q.put_nowait, {"type": "done"})
+            except Exception as e:
+                _logger.error(f"[SSE Worker] Error: {e}")
+                loop.call_soon_threadsafe(q.put_nowait, {"type": "error", "msg": str(e)})
+                loop.call_soon_threadsafe(q.put_nowait, {"type": "done"})
+
+        # Start background processing
+        asyncio.create_task(asyncio.to_thread(_sync_worker))
+
+        # Initial handshake
+        yield f"data: {_json.dumps({'type': 'session', 'session_id': sid})}\n\n"
+
+        while True:
+            try:
+                # Wait for data with 15s timeout to send heartbeat
+                chunk = await asyncio.wait_for(q.get(), timeout=15.0)
+                
+                if chunk["type"] == "done":
+                    yield f"data: {_json.dumps(chunk)}\n\n"
+                    break
+                elif chunk["type"] == "__PENDING_KB__":
+                    background_tasks.add_task(KnowledgeBase.ingest_transactional, "SCAL Upload", chunk["data"])
+                    continue
+                
+                yield f"data: {_json.dumps(chunk)}\n\n"
+            except asyncio.TimeoutError:
+                # Keep-alive heartbeat (SSE comment)
+                yield ": ping\n\n"
+            except Exception as e:
+                _logger.error(f"[SSE Producer] Error: {e}")
+                yield f"data: {_json.dumps({'type': 'error', 'msg': 'Internal Stream Error'})}\n\n"
+                break
 
     return StreamingResponse(
         _producer(), 
@@ -2108,21 +2221,21 @@ async def handle(
     _tls.current_session_id = sid
     for file in files:
         b = await file.read()
-        f_parts.append((b, file.content_type))
+        f_parts.append((b, file.content_type, file.filename))
 
     kb_ctx = await KnowledgeBase.search_async(message)
-    db("INSERT INTO m (sid,role,text,ts,user_email) VALUES (?,?,?,?,?)",
+    await async_db("INSERT INTO m (sid,role,text,ts,user_email) VALUES (?,?,?,?,?)",
        (sid, "user", message, time.time(), email))
 
     # Upsert into sessions table
     if _PG_AVAILABLE:
-        db("INSERT INTO sessions (sid, title, user_email, updated_at) VALUES (?, 'New Study', ?, ?) "
+        await async_db("INSERT INTO sessions (sid, title, user_email, updated_at) VALUES (?, 'New Study', ?, ?) "
            "ON CONFLICT (sid) DO UPDATE SET updated_at = EXCLUDED.updated_at",
            (sid, email, time.time()))
     else:
-        db("INSERT OR IGNORE INTO sessions (sid, title, user_email, created_at, updated_at) VALUES (?, 'New Study', ?, ?, ?)",
+        await async_db("INSERT OR IGNORE INTO sessions (sid, title, user_email, created_at, updated_at) VALUES (?, 'New Study', ?, ?, ?)",
            (sid, email, time.time(), time.time()))
-        db("UPDATE sessions SET updated_at=? WHERE sid=?", (time.time(), sid))
+        await async_db("UPDATE sessions SET updated_at=? WHERE sid=?", (time.time(), sid))
 
     # ── Security Guard: Verify session ownership before any data access ───────
     _verify_session_owner(sid, email)
@@ -2152,7 +2265,7 @@ async def handle(
                 f"Your professional export has been compiled from the current session analysis. "
                 f"Click **Download** to retrieve the file."
             )
-            db("INSERT INTO m (sid,role,text,url,ts,user_email,fname) VALUES (?,?,?,?,?,?,?)",
+            await async_db("INSERT INTO m (sid,role,text,url,ts,user_email,fname) VALUES (?,?,?,?,?,?,?)",
                (sid, "model", reply, dl_url, time.time(), email, basename))
 
             return {
@@ -2169,7 +2282,7 @@ async def handle(
                 f" Document generation failed: {str(e)[:300]}. "
                 f"Please retry or contact PRC support."
             )
-            db("INSERT INTO m (sid,role,text,ts,user_email) VALUES (?,?,?,?,?)",
+            await async_db("INSERT INTO m (sid,role,text,ts,user_email) VALUES (?,?,?,?,?)",
                (sid, "model", reply, time.time(), email))
             return {"status": "error", "session_id": sid, "reply": reply}
 
@@ -2182,7 +2295,7 @@ async def handle(
         None, lambda: assistant.chat(history, message, kb_ctx, f_parts, sid=sid, email=email)
     )
     
-    db("INSERT INTO m (sid,role,text,ts,user_email) VALUES (?,?,?,?,?)",
+    await async_db("INSERT INTO m (sid,role,text,ts,user_email) VALUES (?,?,?,?,?)",
        (sid, "model", resp, time.time(), email))
     
     if assistant._pending_kb:

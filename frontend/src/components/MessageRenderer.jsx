@@ -210,10 +210,32 @@ export function renderMessageContent(text) {
     if (last < p.content.length) afterDash.push({ type: 'text', content: p.content.slice(last) });
   });
 
+  // ── PASS 3.5: __SIMULATION_START__ ──────────────────────────────────────────
+  const afterSim = [];
+  afterDash.forEach(p => {
+    if (p.type !== 'text') { afterSim.push(p); return; }
+    const simRegex = /__SIMULATION_START__([\s\S]*?)__SIMULATION_END__/g;
+    let last = 0, m;
+    while ((m = simRegex.exec(p.content)) !== null) {
+      if (m.index > last) afterSim.push({ type: 'text', content: p.content.slice(last, m.index) });
+      
+      const jsonStr = m[1].trim();
+      const parsed = _tryParseChartJson(jsonStr);
+      if (!parsed) {
+        afterSim.push({ type: 'plot_error', raw: jsonStr.slice(0, 400) });
+      } else {
+        afterSim.push({ type: 'simulation', content: parsed });
+      }
+      
+      last = m.index + m[0].length;
+    }
+    if (last < p.content.length) afterSim.push({ type: 'text', content: p.content.slice(last) });
+  });
+
   // ── PASS 4: Line splitting → card and image detection ────────────────────────
   const imgRegex = /!\[([^\]]*)\]\((data:[^)]+|https?:[^)]+)\)/g;
   const finalParts = [];
-  afterDash.forEach(p => {
+  afterSim.forEach(p => {
     if (p.type !== 'text') { finalParts.push(p); return; }
 
     const lines = p.content.split('\n');
@@ -255,6 +277,7 @@ export function renderMessageContent(text) {
     if (part.type === 'img') return <img key={i} src={part.src} alt={part.alt} className="w-full rounded-none border border-white/10 my-8 shadow-2xl animate-fade-in" />;
     if (part.type === 'mermaid') return <Mermaid key={i} content={part.content} />;
     if (part.type === 'plot') return <KrCurvePlot key={i} plotData={part.content} />;
+    if (part.type === 'simulation') return <SimulationHeatmap key={i} content={JSON.stringify(part.content)} />;
     if (part.type === 'plot_error') return (
       <div key={i} className="my-6 px-5 py-4 bg-red-950/20 border border-red-800/40 rounded-none font-mono text-[11px] text-red-400">
         <span className="font-black uppercase tracking-widest mr-2">[PRC Plot — Invalid JSON]</span>

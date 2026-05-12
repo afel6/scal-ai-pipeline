@@ -3,36 +3,49 @@ import React, { useState, useEffect } from 'react';
 import { Play, Pause, FastForward, Activity } from 'lucide-react';
 
 const SimulationHeatmap = ({ content }) => {
-  const [prevContent, setPrevContent] = useState(content);
   const [parsedData, setParsedData] = useState(null);
   const [parseError, setParseError] = useState(null);
   const [currentStep, setCurrentStep] = useState(0);
   const [isPlaying, setIsPlaying] = useState(false);
 
-  // Synchronous state update during render for incoming content
-  if (content !== prevContent) {
-    setPrevContent(content);
+  // Parse incoming content and fetch file if needed
+  useEffect(() => {
     setCurrentStep(0);
     setIsPlaying(false);
-    if (!content) {
-      setParsedData(null);
-      setParseError(null);
-    } else {
-      try {
-        const parsed = JSON.parse(content);
-        if (parsed.status === 'success' && (parsed.mode === '2d' || parsed.history)) {
+    setParsedData(null);
+    setParseError(null);
+    
+    if (!content) return;
+    
+    try {
+      const parsed = JSON.parse(content);
+      if (parsed.status === 'success') {
+        if (parsed.file_path) {
+          // It's a reference to a temporary file
+          const API_URL = import.meta.env.VITE_API_URL || '';
+          fetch(`${API_URL}${parsed.file_path}`)
+            .then(res => {
+              if (!res.ok) throw new Error("Network response was not ok");
+              return res.json();
+            })
+            .then(data => {
+              setParsedData(data);
+            })
+            .catch(err => {
+              setParseError("Failed to fetch simulation data file.");
+            });
+        } else if (parsed.mode === '2d' || parsed.history) {
           setParsedData(parsed);
-          setParseError(null);
         } else {
-          setParsedData(null);
           setParseError("Invalid simulation data format.");
         }
-      } catch (_err) {
-        setParsedData(null);
-        setParseError("Failed to parse simulation output.");
+      } else {
+        setParseError("Simulation status was not successful.");
       }
+    } catch (_err) {
+      setParseError("Failed to parse simulation output.");
     }
-  }
+  }, [content]);
 
   const data = parsedData;
   const error = parseError;

@@ -81,6 +81,7 @@ export default function App() {
   const [adminPinError,  setAdminPinError]  = useState(false);
   const [adminPinLoading,setAdminPinLoading]= useState(false);
   const [reportLoading,  setReportLoading]  = useState(false);
+  const [simProgress,    setSimProgress]    = useState(null); // { val, text }
 
   const messagesEndRef    = useRef(null);
   const inputRef          = useRef(null);
@@ -292,6 +293,7 @@ export default function App() {
           es.close();
           setLoading(false);
           setUploadStatus('');
+          setSimProgress(null);
           refreshSessions();
           return;
         }
@@ -300,6 +302,15 @@ export default function App() {
           if (data.type === 'session') {
             setSessionId(data.session_id);
             localStorage.setItem('prc_session_id', data.session_id);
+          } else if (data.type === 'progress') {
+            const match = data.text.match(/PROGRESS:\s*(\d+)\/(\d+)/);
+            if (match) {
+              const current = parseInt(match[1]);
+              const total = parseInt(match[2]);
+              setSimProgress({ val: (current / total) * 100, text: data.text });
+            } else {
+              setSimProgress({ val: null, text: data.text });
+            }
           } else if (data.type === 'token') {
             streamedText += data.text.replace(/\\n/g, '\n');
             setMessages(prev => {
@@ -317,6 +328,7 @@ export default function App() {
             es.close();
             setLoading(false);
             setUploadStatus('');
+            setSimProgress(null);
             refreshSessions();
           } else if (data.type === 'error') {
             es.close();
@@ -326,29 +338,41 @@ export default function App() {
             }]);
             setLoading(false);
             setUploadStatus('');
+            setSimProgress(null);
             setServerStatus('offline');
           }
         } catch { /* non-JSON frame — ignore */ }
       };
 
       es.onerror = (err) => {
-        if (streamedText) {
+        // If we've already received text or progress, treat the drop as a likely end-of-stream.
+        // SSE can terminate slightly abruptly after the last packet, which we should ignore.
+        if (streamedText || (simProgress && simProgress.val > 0)) {
           es.close();
           setLoading(false);
           setUploadStatus('');
+          setSimProgress(null);
           refreshSessions();
-        } else {
-          es.close();
-          const detail = (err && err.message) ? `: ${err.message}` : '';
-          setMessages(prev => [...prev, {
-            role: 'model',
-            text: `[!] Connection error. Unable to reach the PRC Hub${detail}. Please check your internet or try refreshing.`,
-            isError: true,
-          }]);
-          setLoading(false);
-          setUploadStatus('');
-          setServerStatus('offline');
+          return;
         }
+
+        // If the browser is automatically trying to reconnect, don't show an error yet.
+        if (es.readyState === EventSource.CONNECTING) {
+          setServerStatus('offline'); // Show status indicator but don't inject message
+          return;
+        }
+
+        // Terminal error or persistent failure
+        es.close();
+        setMessages(prev => [...prev, {
+          role: 'model',
+          text: `[!] PRC Hub connection failed. This may be due to a server timeout or network issue. Please check your connection and retry.`,
+          isError: true,
+        }]);
+        setLoading(false);
+        setUploadStatus('');
+        setSimProgress(null);
+        setServerStatus('offline');
       };
 
       return;
@@ -677,18 +701,38 @@ export default function App() {
                   <div className="w-8 h-8 rounded-none flex items-center justify-center shrink-0 bg-yellow-950 border border-yellow-800/50">
                     <Bot className="w-3.5 h-3.5 text-yellow-400" />
                   </div>
-                  <div className="bg-[#111116] px-4 py-3 rounded-none rounded-none-none border border-yellow-900/30 flex items-center gap-2">
-                    {uploadStatus === 'uploading' ? (
+                  <div className="bg-[#111116] px-4 py-3 rounded-none border border-yellow-900/30 flex flex-col gap-2 min-w-[200px]">
+                    {simProgress ? (
                       <>
+                        <div className="flex justify-between items-center gap-4">
+                          <span className="text-[10px] text-yellow-500 font-black uppercase tracking-widest animate-pulse">
+                            Simulation in Progress
+                          </span>
+                          <span className="text-[10px] text-slate-500 font-mono">
+                            {simProgress.val !== null ? `${Math.round(simProgress.val)}%` : '...'}
+                          </span>
+                        </div>
+                        <div className="w-full h-1 bg-slate-800 rounded-none overflow-hidden">
+                          <div 
+                            className="h-full bg-yellow-500 transition-all duration-300 ease-out"
+                            style={{ width: `${simProgress.val ?? 0}%` }}
+                          />
+                        </div>
+                        <span className="text-[9px] text-slate-400 font-mono truncate">
+                          {simProgress.text}
+                        </span>
+                      </>
+                    ) : uploadStatus === 'uploading' ? (
+                      <div className="flex items-center gap-2">
                         <Loader className="w-4 h-4 text-yellow-400 animate-spin shrink-0" />
                         <span className="text-sm text-yellow-300/80 font-mono tracking-wide">Uploading file</span>
-                      </>
+                      </div>
                     ) : (
-                      <>
+                      <div className="flex items-center gap-2">
                         <span className="w-2 h-2 bg-yellow-500 rounded-none animate-bounce" />
                         <span className="w-2 h-2 bg-yellow-500 rounded-none animate-bounce [animation-delay:0.15s]" />
                         <span className="w-2 h-2 bg-yellow-500 rounded-none animate-bounce [animation-delay:0.3s]" />
-                      </>
+                      </div>
                     )}
                   </div>
                 </div>
