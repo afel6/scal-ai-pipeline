@@ -387,9 +387,10 @@ export default function App() {
       }
       await refreshSessions();
     } catch (err) {
+      const detail = err.response ? `HTTP ${err.response.status}` : err.message;
       const msg = err.code === 'ECONNABORTED'
         ? ' Generation timed out. Deep analysis can take up to 4 minutes. Please try again or submit a smaller dataset.'
-        : ' Connection error. Unable to reach the PRC Hub at this moment.';
+        : ` Connection error during upload: ${detail}. Unable to reach the PRC Hub at this moment.`;
       setMessages(prev => [...prev, { role: 'model', text: msg, isError: true }]);
       setServerStatus('offline');
     } finally {
