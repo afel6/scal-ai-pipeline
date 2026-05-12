@@ -24,7 +24,7 @@ class SkillsEngine:
             yield script_path
             return
 
-        python_exe = os.environ.get("PYTHON_EXE", r"C:\Users\Asus\AppData\Local\Programs\Python\Python313\python.exe")
+        python_exe = os.environ.get("PYTHON_EXE", sys.executable)
         cmd = [python_exe, script_path]
         if args: cmd.extend(args)
 
@@ -65,7 +65,7 @@ class SkillsEngine:
         script_path = SkillsEngine._get_script_path(category, skill_name, script_name)
         if isinstance(script_path, dict): return script_path
 
-        python_exe = os.environ.get("PYTHON_EXE", r"C:\Users\Asus\AppData\Local\Programs\Python\Python313\python.exe")
+        python_exe = os.environ.get("PYTHON_EXE", sys.executable)
         cmd = [python_exe, script_path]
         if args: cmd.extend(args)
 
