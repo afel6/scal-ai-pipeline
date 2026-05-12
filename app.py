@@ -110,11 +110,26 @@ def _translate_placeholders(query: str) -> str:
 def _get_conn():
     """Yield (connection, placeholder). Pools PG; locks SQLite."""
     if _PG_AVAILABLE:
-        conn = _PG_POOL.getconn()
+        conn = None
+        for _ in range(3):
+            conn = _PG_POOL.getconn()
+            try:
+                with conn.cursor() as cur:
+                    cur.execute("SELECT 1")
+                break
+            except Exception:
+                _PG_POOL.putconn(conn, close=True)
+                conn = None
+        if not conn:
+            raise Exception("DB Pool exhausted or all connections dead.")
+        
         try:
             yield conn, "%s"
         finally:
-            _PG_POOL.putconn(conn)
+            try:
+                _PG_POOL.putconn(conn)
+            except Exception:
+                pass
     else:
         with _SQLITE_LOCK:
             conn = sqlite3.connect(DB_PATH, timeout=10)
