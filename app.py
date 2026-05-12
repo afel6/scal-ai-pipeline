@@ -837,7 +837,7 @@ _tls = threading.local()
 # ── GEMINI HA CLIENT ──────────────────────────────────────────────────────────
 class PRCChatAssistant:
     def __init__(self, keys: list[str]):
-        self.model_name   = "gemini-1.5-pro-latest"
+        self.model_name   = "gemini-1.5-pro"
         self._keys        = keys
         self._current_idx = 0
         self._idx_lock    = threading.Lock()
@@ -855,7 +855,7 @@ class PRCChatAssistant:
                 continue
             try:
                 # Explicitly use 'v1' to avoid 'not found for v1beta' errors
-                client = genai_new.Client(api_key=key, http_options={'api_version': 'v1beta'})
+                client = genai_new.Client(api_key=key)
                 with self._client_lock:
                     self._client      = client
                     self._current_idx = idx

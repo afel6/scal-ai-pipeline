@@ -186,7 +186,7 @@ export default function App() {
   // ── delete session ─────────────────────────────────────────────────────────
   const handleDeleteSession = useCallback(async (e, sid) => {
     e.stopPropagation();
-    await axios.delete(`${API_URL}/api/session/${sid}`);
+    await axios.delete(`${API_URL}/api/session/${sid}?email=${encodeURIComponent(user?.email || '')}`);
     await refreshSessions();
     if (sid === sessionId) {
       setSessionId('');
