@@ -5,7 +5,7 @@
 #          run_in_executor RAG · transactional KB ingest · admin backend auth ·
 #          env-var secrets · slowapi rate limiting · dead code purged
 
-import os, io, uuid, time, re, hmac, secrets as _secrets
+import os, io, uuid, time, re, hmac, hashlib, secrets as _secrets
 import json as _json, logging, threading, asyncio
 from contextlib import asynccontextmanager, contextmanager
 from typing import Optional
