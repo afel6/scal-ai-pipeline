@@ -837,7 +837,7 @@ _tls = threading.local()
 # ── GEMINI HA CLIENT ──────────────────────────────────────────────────────────
 class PRCChatAssistant:
     def __init__(self, keys: list[str]):
-        self.model_name   = "gemini-3.1-pro"
+        self.model_name   = "gemini-1.5-pro"
         self._keys        = keys
         self._current_idx = 0
         self._idx_lock    = threading.Lock()
