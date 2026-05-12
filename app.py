@@ -855,7 +855,7 @@ class PRCChatAssistant:
                 continue
             try:
                 # Explicitly use 'v1' to avoid 'not found for v1beta' errors
-                client = genai_new.Client(api_key=key, http_options={'api_version': 'v1'})
+                client = genai_new.Client(api_key=key, http_options={'api_version': 'v1beta'})
                 with self._client_lock:
                     self._client      = client
                     self._current_idx = idx
