@@ -605,7 +605,7 @@ export default function App() {
               {messages.map((msg, idx) => (
                 <div
                   key={idx}
-                  className={`flex gap-3 ${msg.role === 'user' ? 'flex-row-reverse' : ''} max-w-2xl ${msg.role === 'user' ? 'ml-auto' : 'mr-auto'} w-full msg-bubble`}
+                  className={`flex gap-3 ${msg.role === 'user' ? 'flex-row-reverse' : ''} max-w-5xl ${msg.role === 'user' ? 'ml-auto' : 'mr-auto'} w-full msg-bubble`}
                   style={{ animationDelay: `${Math.min(idx, 5) * 0.1}s` }}
                 >
                   {/* Avatar */}
@@ -697,7 +697,7 @@ export default function App() {
 
               {/* Typing indicator */}
               {loading && (
-                <div className="flex gap-3 max-w-2xl w-full">
+                <div className="flex gap-3 max-w-5xl w-full">
                   <div className="w-8 h-8 rounded-none flex items-center justify-center shrink-0 bg-yellow-950 border border-yellow-800/50">
                     <Bot className="w-3.5 h-3.5 text-yellow-400" />
                   </div>
