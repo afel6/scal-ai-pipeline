@@ -149,7 +149,7 @@ class PhysicsGuard:
         shg_s = shg_a[idx]
 
         # 1 — All Pc positive
-        n_neg = int(np.sum(pc_s < 0))
+        n_neg = int(np.sum(pc_s <= 0))
         self._check(
             n_neg == 0,
             "MICP_NEGATIVE_PC",
