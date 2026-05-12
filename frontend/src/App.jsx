@@ -193,7 +193,7 @@ export default function App() {
       localStorage.removeItem('prc_session_id');
       setMessages([WELCOME_MSG]);
     }
-  }, [sessionId, refreshSessions]);
+  }, [sessionId, refreshSessions, user]);
 
   // ── rename session ────────────────────────────────────────────────────────
   const handleRenameSession = useCallback(async (sid, newTitle) => {

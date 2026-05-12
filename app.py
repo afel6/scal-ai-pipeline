@@ -2040,7 +2040,7 @@ def delete_session(sid: str, email: str = None):
     _verify_session_owner(sid, email)
     db("DELETE FROM m WHERE sid=? AND user_email=?", (sid, email))
     db("DELETE FROM sessions WHERE sid=? AND user_email=?", (sid, email))
-    db("DELETE FROM physics_audits WHERE session_id=? AND user_email=?", (sid, email))
+    db("DELETE FROM physics_audits WHERE session_id=?", (sid,))
     return {"status": "ok"}
 
 @app.get("/api/chat/stream")
