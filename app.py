@@ -1645,11 +1645,17 @@ class PRCChatAssistant:
                     err     = str(e).lower()
                     is_auth = any(x in err for x in ["401","403","unauthorized","permission"])
                     is_rate = any(x in err for x in ["429","resource_exhausted"])
-                    if (is_auth or is_rate) and attempt < len(self._keys) - 1:
+                    is_overload = any(x in err for x in ["503","unavailable","overloaded","capacity"])
+                    if (is_auth or is_rate or is_overload) and attempt < len(self._keys) - 1:
                         self.rotate_key(is_hard_fail=is_auth)
                         if stream:
                             yield f"\n[PRC Node Rotating — retrying...]\n"
                         continue
+                    if is_overload:
+                        # All keys exhausted on 503 — yield a user-facing message instead of crashing
+                        _logger.warning(f"[Hviel] All keys returned 503 (overload): {e}")
+                        yield "⚠️ Gemini is currently under high demand (503). Please retry in a few seconds."
+                        return
                     _logger.error(f"[Hviel] Generation failed (attempt {attempt+1}): {e}")
                     raise
 
@@ -1900,7 +1906,13 @@ except Exception as _he:
 # ── ROUTES ────────────────────────────────────────────────────────────────────
 # ── AUTH & SESSION VERIFICATION ──────────────────────────────────────────────
 def _verify_session_owner(sid: str, email: str):
-    pass # Disabled strict RLS for local testing so unauthenticated users can delete sessions
+    """Row-Level Security: every session endpoint must verify the caller owns the session."""
+    if not email:
+        raise HTTPException(status_code=401, detail="Authentication required")
+    row = db("SELECT user_email FROM sessions WHERE sid=?", (sid,))
+    if row and row[0][0] and row[0][0].lower().strip() != email.lower().strip():
+        _logger.warning(f"[SECURITY] Unauthorized access attempt: {email} → session {sid}")
+        raise HTTPException(status_code=403, detail="Unauthorized: You do not own this session.")
 
 @app.get("/health")
 def health(): return {"status": "ok", "db": "postgres" if _PG_AVAILABLE else "sqlite"}
