@@ -9,13 +9,13 @@ const API_URL = import.meta.env.VITE_API_URL || '';
 function StatCard({ icon: Icon, label, value, color, delay = 0 }) {
   return (
     <div
-      className="relative overflow-hidden rounded-2xl border border-white/[0.06] bg-white/[0.025] backdrop-blur-xl p-5 transition-all duration-300 hover:border-white/[0.12] hover:bg-white/[0.04] group"
+      className="relative overflow-hidden rounded-none border border-white/[0.06] bg-white/[0.025] backdrop-blur-xl p-5 transition-all duration-300 hover:border-white/[0.12] hover:bg-white/[0.04] group"
       style={{ animationDelay: `${delay}ms` }}
     >
       {/* Glow accent */}
-      <div className={`absolute -top-8 -right-8 w-24 h-24 rounded-full opacity-[0.07] blur-2xl group-hover:opacity-[0.14] transition-opacity duration-500`} style={{ background: color }} />
+      <div className={`absolute -top-8 -right-8 w-24 h-24 rounded-none opacity-[0.07] blur-2xl group-hover:opacity-[0.14] transition-opacity duration-500`} style={{ background: color }} />
       <div className="flex items-center gap-3 mb-3">
-        <div className="p-2 rounded-xl" style={{ background: `${color}15`, border: `1px solid ${color}25` }}>
+        <div className="p-2 rounded-none" style={{ background: `${color}15`, border: `1px solid ${color}25` }}>
           <Icon className="w-4 h-4" style={{ color }} />
         </div>
         <span className="text-[10px] font-bold tracking-[0.2em] text-slate-500 uppercase">{label}</span>
@@ -41,10 +41,10 @@ function TimelineEvent({ event, idx }) {
 
   return (
     <div className="flex items-start gap-3 py-3 border-b border-white/[0.04] last:border-0 animate-fade-in" style={{ animationDelay: `${idx * 50}ms` }}>
-      <div className="mt-1 w-2 h-2 rounded-full flex-shrink-0" style={{ background: color, boxShadow: `0 0 8px ${color}60` }} />
+      <div className="mt-1 w-2 h-2 rounded-none flex-shrink-0" style={{ background: color, boxShadow: `0 0 8px ${color}60` }} />
       <div className="flex-1 min-w-0">
         <div className="flex items-center gap-2">
-          <span className="text-[10px] font-black tracking-[0.15em] uppercase px-2 py-0.5 rounded-md" style={{ color, background: `${color}12`, border: `1px solid ${color}20` }}>
+          <span className="text-[10px] font-black tracking-[0.15em] uppercase px-2 py-0.5 rounded-none" style={{ color, background: `${color}12`, border: `1px solid ${color}20` }}>
             {event.type}
           </span>
           <span className="text-[10px] text-slate-600 font-mono truncate">{event.email || 'anonymous'}</span>
@@ -62,7 +62,7 @@ function TimelineEvent({ event, idx }) {
 function FeedbackCard({ item, idx }) {
   const ts = item.ts ? new Date(item.ts * 1000).toLocaleString() : '—';
   return (
-    <div className="p-4 rounded-xl border border-red-900/20 bg-red-950/10 animate-fade-in" style={{ animationDelay: `${idx * 80}ms` }}>
+    <div className="p-4 rounded-none border border-red-900/20 bg-red-950/10 animate-fade-in" style={{ animationDelay: `${idx * 80}ms` }}>
       <div className="flex items-center justify-between mb-2">
         <div className="flex items-center gap-2">
           <Mail className="w-3 h-3 text-red-400" />
@@ -135,7 +135,7 @@ export default function AdminDashboard({ adminToken, onBack, onLogout }) {
       <header className="flex-shrink-0 border-b border-white/[0.06] bg-white/[0.015] backdrop-blur-xl">
         <div className="max-w-7xl mx-auto px-6 py-4 flex items-center justify-between">
           <div className="flex items-center gap-4">
-            <button onClick={onBack} className="p-2 rounded-xl border border-white/[0.06] bg-white/[0.03] hover:bg-white/[0.06] transition-colors">
+            <button onClick={onBack} className="p-2 rounded-none border border-white/[0.06] bg-white/[0.03] hover:bg-white/[0.06] transition-colors">
               <ArrowLeft className="w-4 h-4 text-slate-400" />
             </button>
             <div>
@@ -150,7 +150,7 @@ export default function AdminDashboard({ adminToken, onBack, onLogout }) {
           </div>
           <div className="flex items-center gap-4">
             {summary?.storage_type && (
-              <div className={`px-3 py-1 rounded-full text-[10px] font-bold tracking-tighter uppercase border ${
+              <div className={`px-3 py-1 rounded-none text-[10px] font-bold tracking-tighter uppercase border ${
                 summary.storage_type.includes('PostgreSQL') 
                   ? 'bg-emerald-500/10 text-emerald-400 border-emerald-500/20' 
                   : 'bg-amber-500/10 text-amber-400 border-amber-500/20'
@@ -161,7 +161,7 @@ export default function AdminDashboard({ adminToken, onBack, onLogout }) {
           <button
             onClick={fetchAll}
             disabled={loading}
-            className="flex items-center gap-2 px-4 py-2 rounded-xl border border-amber-900/30 bg-amber-950/20 text-amber-400 text-xs font-bold tracking-wider uppercase hover:bg-amber-950/40 transition-colors disabled:opacity-50"
+            className="flex items-center gap-2 px-4 py-2 rounded-none border border-amber-900/30 bg-amber-950/20 text-amber-400 text-xs font-bold tracking-wider uppercase hover:bg-amber-950/40 transition-colors disabled:opacity-50"
           >
             <RefreshCw className={`w-3.5 h-3.5 ${loading ? 'animate-spin' : ''}`} />
             Refresh
@@ -171,7 +171,7 @@ export default function AdminDashboard({ adminToken, onBack, onLogout }) {
 
           <button
             onClick={onLogout}
-            className="flex items-center gap-2 px-4 py-2 rounded-xl border border-red-900/30 bg-red-950/20 text-red-400 text-xs font-bold tracking-wider uppercase hover:bg-red-950/40 transition-colors"
+            className="flex items-center gap-2 px-4 py-2 rounded-none border border-red-900/30 bg-red-950/20 text-red-400 text-xs font-bold tracking-wider uppercase hover:bg-red-950/40 transition-colors"
           >
             <LogOut className="w-3.5 h-3.5" />
             Logout
@@ -185,7 +185,7 @@ export default function AdminDashboard({ adminToken, onBack, onLogout }) {
             <button
               key={tab.id}
               onClick={() => setActiveTab(tab.id)}
-              className={`flex items-center gap-2 px-4 py-2.5 text-xs font-bold tracking-wider uppercase rounded-t-xl transition-all duration-200 ${
+              className={`flex items-center gap-2 px-4 py-2.5 text-xs font-bold tracking-wider uppercase rounded-none transition-all duration-200 ${
                 activeTab === tab.id
                   ? 'bg-white/[0.05] text-amber-400 border-b-2 border-amber-400'
                   : 'text-slate-600 hover:text-slate-400 hover:bg-white/[0.02]'
@@ -216,7 +216,7 @@ export default function AdminDashboard({ adminToken, onBack, onLogout }) {
 
               {/* Recent Activity Preview */}
               <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
-                <div className="rounded-2xl border border-white/[0.06] bg-white/[0.02] overflow-hidden">
+                <div className="rounded-none border border-white/[0.06] bg-white/[0.02] overflow-hidden">
                   <div className="px-5 py-3 border-b border-white/[0.06] flex items-center justify-between">
                     <span className="text-[10px] font-black tracking-[0.2em] text-slate-500 uppercase">Recent Activity</span>
                     <button onClick={() => setActiveTab('activity')} className="text-[10px] text-amber-500 hover:text-amber-400 font-bold uppercase tracking-wider">View All →</button>
@@ -227,7 +227,7 @@ export default function AdminDashboard({ adminToken, onBack, onLogout }) {
                   </div>
                 </div>
 
-                <div className="rounded-2xl border border-white/[0.06] bg-white/[0.02] overflow-hidden">
+                <div className="rounded-none border border-white/[0.06] bg-white/[0.02] overflow-hidden">
                   <div className="px-5 py-3 border-b border-white/[0.06] flex items-center justify-between">
                     <span className="text-[10px] font-black tracking-[0.2em] text-slate-500 uppercase">Recent Feedback</span>
                     <button onClick={() => setActiveTab('feedback')} className="text-[10px] text-amber-500 hover:text-amber-400 font-bold uppercase tracking-wider">View All →</button>
@@ -243,7 +243,7 @@ export default function AdminDashboard({ adminToken, onBack, onLogout }) {
 
           {/* ── ACTIVITY TAB ──────────────────────────────────────────── */}
           {activeTab === 'activity' && (
-            <div className="rounded-2xl border border-white/[0.06] bg-white/[0.02] overflow-hidden animate-fade-in">
+            <div className="rounded-none border border-white/[0.06] bg-white/[0.02] overflow-hidden animate-fade-in">
               <div className="px-5 py-3 border-b border-white/[0.06]">
                 <span className="text-[10px] font-black tracking-[0.2em] text-slate-500 uppercase">All Activity Events ({events.length})</span>
               </div>
@@ -263,7 +263,7 @@ export default function AdminDashboard({ adminToken, onBack, onLogout }) {
               <div className="max-h-[calc(100vh-220px)] overflow-y-auto space-y-3">
                 {feedback.map((f, i) => <FeedbackCard key={i} item={f} idx={i} />)}
                 {feedback.length === 0 && (
-                  <div className="rounded-2xl border border-white/[0.06] bg-white/[0.02] p-12 text-center">
+                  <div className="rounded-none border border-white/[0.06] bg-white/[0.02] p-12 text-center">
                     <Bug className="w-8 h-8 text-slate-800 mx-auto mb-3" />
                     <p className="text-sm text-slate-700 italic">No feedback reports submitted yet</p>
                   </div>
@@ -274,7 +274,7 @@ export default function AdminDashboard({ adminToken, onBack, onLogout }) {
 
           {/* ── USERS TAB ─────────────────────────────────────────────── */}
           {activeTab === 'users' && (
-            <div className="rounded-2xl border border-white/[0.06] bg-white/[0.02] overflow-hidden animate-fade-in">
+            <div className="rounded-none border border-white/[0.06] bg-white/[0.02] overflow-hidden animate-fade-in">
               <div className="px-5 py-3 border-b border-white/[0.06]">
                 <span className="text-[10px] font-black tracking-[0.2em] text-slate-500 uppercase">Registered Users ({users.length})</span>
               </div>

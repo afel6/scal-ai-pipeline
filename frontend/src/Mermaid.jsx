@@ -42,13 +42,13 @@ const Mermaid = ({ content }) => {
         });
       } catch (err) {
         console.error('Mermaid rendering failed:', err);
-        chartRef.current.innerHTML = '<div class="p-4 text-rose-500 text-xs font-mono bg-rose-500/10 rounded-lg">Diagram rendering error</div>';
+        chartRef.current.innerHTML = '<div class="p-4 text-rose-500 text-xs font-mono bg-rose-500/10 rounded-none">Diagram rendering error</div>';
       }
     }
   }, [content]);
 
   return (
-    <div className="my-6 w-full flex justify-center bg-[#070707] rounded-2xl border border-white/5 p-6 shadow-2xl overflow-hidden animate-fade-in group relative">
+    <div className="my-6 w-full flex justify-center bg-[#070707] rounded-none border border-white/5 p-6 shadow-2xl overflow-hidden animate-fade-in group relative">
        <div className="absolute top-3 right-4 opacity-0 group-hover:opacity-60 transition-opacity text-[10px] font-bold text-prc-gold uppercase tracking-widest">
         Engineering Workflow
       </div>

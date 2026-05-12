@@ -40,14 +40,14 @@ export default function Login({ onLogin, setShowPrivacy, setShowTerms }) {
     <div className="min-h-screen bg-[#050505] flex items-center justify-center p-4 relative overflow-hidden">
       {/* Background glow */}
       <div className="absolute inset-0 pointer-events-none overflow-hidden opacity-20">
-        <div className="absolute -top-40 -left-60 w-[600px] h-[600px] bg-yellow-900/30 rounded-full blur-[140px]" />
-        <div className="absolute -bottom-40 -right-60 w-[500px] h-[500px] bg-amber-900/20 rounded-full blur-[120px]" />
+        <div className="absolute -top-40 -left-60 w-[600px] h-[600px] bg-yellow-900/30 rounded-none blur-[140px]" />
+        <div className="absolute -bottom-40 -right-60 w-[500px] h-[500px] bg-amber-900/20 rounded-none blur-[120px]" />
       </div>
 
       <div className="w-full max-w-sm space-y-6 animate-fade-in relative z-10">
         {/* Logo */}
         <div className="flex flex-col items-center">
-          <div className="bg-white/95 p-5 rounded-3xl shadow-2xl shadow-yellow-900/10 mb-6 border border-white/10 hover:scale-[1.02] transition-transform duration-500">
+          <div className="bg-white/95 p-5 rounded-none shadow-2xl shadow-yellow-900/10 mb-6 border border-white/10 hover:scale-[1.02] transition-transform duration-500">
             <img src="/prc_logo.jpg" alt="PRC Logo" className="w-40 h-auto object-contain" />
           </div>
           <h1 className="text-xl font-black tracking-widest text-white uppercase italic text-center">Hviel | PRC AI Hub</h1>
@@ -55,7 +55,7 @@ export default function Login({ onLogin, setShowPrivacy, setShowTerms }) {
         </div>
 
         {/* Form */}
-        <div className="p-6 bg-gloss rounded-3xl border border-white/5 space-y-5 shadow-2xl backdrop-blur-3xl shadow-black/80">
+        <div className="p-6 bg-gloss rounded-none border border-white/5 space-y-5 shadow-2xl backdrop-blur-3xl shadow-black/80">
           <div className="space-y-4">
             <div className="space-y-2">
               <label className="text-[10px] font-bold text-slate-400 uppercase tracking-widest ml-2">Full Name & Profession</label>

@@ -55,7 +55,7 @@ const SimulationHeatmap = ({ content }) => {
 
   if (error) {
     return (
-      <div className="p-4 bg-red-950/30 border border-red-900/50 rounded-xl text-red-400 text-sm font-mono">
+      <div className="p-4 bg-red-950/30 border border-red-900/50 rounded-none text-red-400 text-sm font-mono">
         {error}
       </div>
     );
@@ -83,7 +83,7 @@ const SimulationHeatmap = ({ content }) => {
   };
 
   return (
-    <div className="my-6 bg-[#0c0c10] border border-yellow-900/30 rounded-2xl overflow-hidden shadow-2xl">
+    <div className="my-6 bg-[#0c0c10] border border-yellow-900/30 rounded-none overflow-hidden shadow-2xl">
       {/* Header */}
       <div className="bg-gradient-to-r from-yellow-950/40 to-slate-900/40 px-4 py-3 flex items-center justify-between border-b border-yellow-900/30">
         <div className="flex items-center gap-2">
@@ -100,7 +100,7 @@ const SimulationHeatmap = ({ content }) => {
       {/* Main Heatmap Area */}
       <div className="p-6 flex flex-col items-center bg-[#050505]">
         <div 
-          className="grid gap-[1px] bg-slate-800 p-[1px] border border-slate-700/50 rounded shadow-lg"
+          className="grid gap-[1px] bg-slate-800 p-[1px] border border-slate-700/50 rounded-none shadow-lg"
           style={{ 
             gridTemplateColumns: `repeat(${ny}, minmax(0, 1fr))`,
             width: '100%',
@@ -129,7 +129,7 @@ const SimulationHeatmap = ({ content }) => {
               if (currentStep >= history.length - 1) setCurrentStep(0);
               setIsPlaying(!isPlaying);
             }}
-            className="w-10 h-10 rounded-full bg-yellow-600 hover:bg-yellow-500 text-black flex items-center justify-center transition-transform active:scale-95 shadow-lg shrink-0"
+            className="w-10 h-10 rounded-none bg-yellow-600 hover:bg-yellow-500 text-black flex items-center justify-center transition-transform active:scale-95 shadow-lg shrink-0"
           >
             {isPlaying ? <Pause className="w-4 h-4" /> : <Play className="w-4 h-4 ml-0.5" />}
           </button>
@@ -149,13 +149,13 @@ const SimulationHeatmap = ({ content }) => {
                 setCurrentStep(parseInt(e.target.value));
                 setIsPlaying(false);
               }}
-              className="w-full h-1.5 bg-slate-800 rounded-lg appearance-none cursor-pointer accent-yellow-500"
+              className="w-full h-1.5 bg-slate-800 rounded-none appearance-none cursor-pointer accent-yellow-500"
             />
           </div>
           
           <button 
             onClick={() => setCurrentStep(history.length - 1)}
-            className="w-8 h-8 rounded-full bg-slate-800 hover:bg-slate-700 text-slate-400 flex items-center justify-center transition-colors shrink-0"
+            className="w-8 h-8 rounded-none bg-slate-800 hover:bg-slate-700 text-slate-400 flex items-center justify-center transition-colors shrink-0"
             title="Skip to end"
           >
             <FastForward className="w-3.5 h-3.5" />
@@ -165,13 +165,13 @@ const SimulationHeatmap = ({ content }) => {
         {/* Legend */}
         <div className="flex items-center justify-between text-[10px] font-mono uppercase text-slate-500 px-2 mt-4 border-t border-slate-800/40 pt-3">
           <div className="flex items-center gap-2">
-            <div className="w-3 h-3 rounded-sm border border-slate-700" style={{ backgroundColor: getColor(params.swr || 0.2) }} />
+            <div className="w-3 h-3 rounded-none border border-slate-700" style={{ backgroundColor: getColor(params.swr || 0.2) }} />
             <span>Residual Water</span>
           </div>
-          <div className="flex-1 h-1.5 mx-4 rounded-full" style={{ background: `linear-gradient(to right, ${getColor(0.2)}, ${getColor(0.8)})` }} />
+          <div className="flex-1 h-1.5 mx-4 rounded-none" style={{ background: `linear-gradient(to right, ${getColor(0.2)}, ${getColor(0.8)})` }} />
           <div className="flex items-center gap-2">
             <span>Water Front</span>
-            <div className="w-3 h-3 rounded-sm border border-slate-700" style={{ backgroundColor: getColor(1 - (params.snr || 0.2)) }} />
+            <div className="w-3 h-3 rounded-none border border-slate-700" style={{ backgroundColor: getColor(1 - (params.snr || 0.2)) }} />
           </div>
         </div>
       </div>

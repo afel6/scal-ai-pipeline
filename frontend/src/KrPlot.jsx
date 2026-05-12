@@ -20,7 +20,7 @@ const COLORS = [
 const CustomTooltip = ({ active, payload, label }) => {
   if (!active || !payload?.length) return null;
   return (
-    <div className="bg-[#0c0c14]/95 backdrop-blur-xl border border-white/10 rounded-2xl px-5 py-4 shadow-2xl text-[11px] font-mono min-w-[180px]">
+    <div className="bg-[#0c0c14]/95 backdrop-blur-xl border border-white/10 rounded-none px-5 py-4 shadow-2xl text-[11px] font-mono min-w-[180px]">
       <div className="text-slate-500 mb-2 border-b border-white/5 pb-1 flex justify-between">
         <span>X:</span>
         <span className="text-white font-black">
@@ -80,7 +80,7 @@ export default function KrPlot({ content }) {
 
   if (!data?.curves) {
     return (
-      <div className="p-8 bg-red-950/10 border border-red-900/30 rounded-[2rem] text-red-400 text-xs font-mono flex flex-col items-center gap-4">
+      <div className="p-8 bg-red-950/10 border border-red-900/30 rounded-none-[2rem] text-red-400 text-xs font-mono flex flex-col items-center gap-4">
         <Activity className="w-8 h-8 opacity-50" />
         <span className="tracking-[0.2em] font-black uppercase text-center">
           CRITICAL: PRC Plotting Engine Parse Failure
@@ -98,13 +98,13 @@ export default function KrPlot({ content }) {
   const y2Scale= data.yAxis2?.type  === 'log' ? 'log' : 'number';
 
   return (
-    <div className={`chart-container ${visible ? 'entered' : 'entering'} my-12 rounded-[2.5rem] border border-[var(--prc-border-gold)] bg-[#050508] shadow-[0_32px_64px_-16px_rgba(0,0,0,0.9)] overflow-hidden group hover:border-[var(--prc-border-focus)] transition-all duration-700`}>
+    <div className={`chart-container ${visible ? 'entered' : 'entering'} my-12 rounded-none-[2.5rem] border border-[var(--prc-border-gold)] bg-[#050508] shadow-[0_32px_64px_-16px_rgba(0,0,0,0.9)] overflow-hidden group hover:border-[var(--prc-border-focus)] transition-all duration-700`}>
 
       {/* Header */}
       <div className="px-10 py-8 border-b border-white/5 bg-gradient-to-b from-white/[0.03] to-transparent flex flex-col sm:flex-row items-start sm:items-end justify-between gap-6">
         <div className="max-w-2xl">
           <div className="flex items-center gap-4 mb-3">
-            <div className="p-2.5 rounded-xl bg-blue-500/10 text-blue-400 border border-blue-500/20 shadow-[0_0_20px_rgba(59,130,246,0.2)]">
+            <div className="p-2.5 rounded-none bg-blue-500/10 text-blue-400 border border-blue-500/20 shadow-[0_0_20px_rgba(59,130,246,0.2)]">
               <AreaChart className="w-5 h-5" />
             </div>
             <span className="text-[10px] font-black tracking-[0.5em] text-blue-500/80 uppercase">
@@ -130,8 +130,8 @@ export default function KrPlot({ content }) {
         </div>
 
         <div className="flex flex-col items-end gap-2 shrink-0">
-          <div className="flex items-center gap-2.5 px-4 py-1.5 rounded-full bg-emerald-500/10 border border-emerald-500/20 shadow-[0_0_15px_rgba(16,185,129,0.1)]">
-            <div className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse" />
+          <div className="flex items-center gap-2.5 px-4 py-1.5 rounded-none bg-emerald-500/10 border border-emerald-500/20 shadow-[0_0_15px_rgba(16,185,129,0.1)]">
+            <div className="w-2 h-2 rounded-none bg-emerald-500 animate-pulse" />
             <span className="text-[9px] text-emerald-400 font-black uppercase tracking-[0.2em]">
               Validated
             </span>
@@ -277,11 +277,11 @@ export default function KrPlot({ content }) {
               <div key={idx} className="flex items-center gap-3">
                 {curve.showLine !== false ? (
                   // Line swatch
-                  <div className="w-6 h-0.5 rounded-full" style={{ backgroundColor: color }} />
+                  <div className="w-6 h-0.5 rounded-none" style={{ backgroundColor: color }} />
                 ) : (
                   // Scatter dot swatch
                   <div
-                    className="w-3 h-3 rounded-full border border-[#0c0c14]"
+                    className="w-3 h-3 rounded-none border border-[#0c0c14]"
                     style={{ backgroundColor: color, boxShadow: `0 0 8px ${color}80` }}
                   />
                 )}

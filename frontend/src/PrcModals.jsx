@@ -18,7 +18,7 @@ export function FeedbackModal({ userEmail, onClose }) {
   };
   return (
     <div className="fixed inset-0 bg-black/70 z-50 flex items-center justify-center p-4" onClick={onClose}>
-      <div className="bg-[#111116] border border-yellow-900/40 rounded-2xl p-6 max-w-md w-full shadow-2xl" onClick={e => e.stopPropagation()}>
+      <div className="bg-[#111116] border border-yellow-900/40 rounded-none p-6 max-w-md w-full shadow-2xl" onClick={e => e.stopPropagation()}>
         <div className="flex justify-between items-center mb-4">
           <div className="flex items-center gap-2"><Bug className="w-5 h-5 text-yellow-400" /><h3 className="text-yellow-50 font-bold tracking-widest uppercase text-sm">Report Bug / Feedback</h3></div>
           <button onClick={onClose}><X className="w-4 h-4 text-slate-500 hover:text-white" /></button>
@@ -27,8 +27,8 @@ export function FeedbackModal({ userEmail, onClose }) {
           <p className="text-green-400 text-sm text-center py-8 font-mono">Thank you! Your feedback has been submitted.</p>
         ) : (
           <>
-            <textarea value={report} onChange={e => setReport(e.target.value)} rows={5} placeholder="Describe the issue or suggestion..." className="w-full bg-black/50 border border-slate-700 rounded-xl p-3 text-sm text-slate-200 placeholder-slate-600 outline-none focus:border-yellow-600 resize-none" />
-            <button onClick={submit} disabled={!report.trim()} className="mt-3 w-full bg-yellow-600 hover:bg-yellow-500 text-black font-bold py-2.5 rounded-xl text-xs uppercase tracking-widest disabled:opacity-30 transition-all">Submit Feedback</button>
+            <textarea value={report} onChange={e => setReport(e.target.value)} rows={5} placeholder="Describe the issue or suggestion..." className="w-full bg-black/50 border border-slate-700 rounded-none p-3 text-sm text-slate-200 placeholder-slate-600 outline-none focus:border-yellow-600 resize-none" />
+            <button onClick={submit} disabled={!report.trim()} className="mt-3 w-full bg-yellow-600 hover:bg-yellow-500 text-black font-bold py-2.5 rounded-none text-xs uppercase tracking-widest disabled:opacity-30 transition-all">Submit Feedback</button>
           </>
         )}
       </div>
@@ -40,7 +40,7 @@ export function FeedbackModal({ userEmail, onClose }) {
 export function PrivacyModal({ onClose }) {
   return (
     <div className="fixed inset-0 bg-black/70 z-50 flex items-center justify-center p-4" onClick={onClose}>
-      <div className="bg-[#111116] border border-yellow-900/40 rounded-2xl p-6 max-w-lg w-full shadow-2xl max-h-[80vh] overflow-y-auto" onClick={e => e.stopPropagation()}>
+      <div className="bg-[#111116] border border-yellow-900/40 rounded-none p-6 max-w-lg w-full shadow-2xl max-h-[80vh] overflow-y-auto" onClick={e => e.stopPropagation()}>
         <div className="flex justify-between items-center mb-4">
           <div className="flex items-center gap-2"><Shield className="w-5 h-5 text-yellow-400" /><h3 className="text-yellow-50 font-bold tracking-widest uppercase text-sm">Privacy Policy</h3></div>
           <button onClick={onClose}><X className="w-4 h-4 text-slate-500 hover:text-white" /></button>
@@ -65,7 +65,7 @@ export function PrivacyModal({ onClose }) {
 export function TermsModal({ onClose }) {
   return (
     <div className="fixed inset-0 bg-black/70 z-50 flex items-center justify-center p-4" onClick={onClose}>
-      <div className="bg-[#111116] border border-yellow-900/40 rounded-2xl p-6 max-w-lg w-full shadow-2xl max-h-[80vh] overflow-y-auto" onClick={e => e.stopPropagation()}>
+      <div className="bg-[#111116] border border-yellow-900/40 rounded-none p-6 max-w-lg w-full shadow-2xl max-h-[80vh] overflow-y-auto" onClick={e => e.stopPropagation()}>
         <div className="flex justify-between items-center mb-4">
           <div className="flex items-center gap-2"><FileText className="w-5 h-5 text-yellow-400" /><h3 className="text-yellow-50 font-bold tracking-widest uppercase text-sm">Terms of Service</h3></div>
           <button onClick={onClose}><X className="w-4 h-4 text-slate-500 hover:text-white" /></button>
@@ -94,8 +94,8 @@ export function CookieConsent() {
     <div className="fixed bottom-0 left-0 right-0 bg-[#111116] border-t border-yellow-900/40 p-4 z-50 flex flex-col sm:flex-row items-center justify-between gap-3">
       <p className="text-xs text-slate-400 font-sans">This application uses cookies and local storage to maintain your session and preferences. By continuing, you consent to our use of cookies.</p>
       <div className="flex gap-2 shrink-0">
-        <button onClick={() => { localStorage.setItem('prc_cookie_consent', 'true'); setShow(false); }} className="bg-yellow-600 hover:bg-yellow-500 text-black font-bold px-4 py-2 rounded-lg text-xs uppercase tracking-widest transition-all">Accept</button>
-        <button onClick={() => setShow(false)} className="border border-slate-700 text-slate-400 hover:text-white px-4 py-2 rounded-lg text-xs uppercase tracking-widest transition-all">Dismiss</button>
+        <button onClick={() => { localStorage.setItem('prc_cookie_consent', 'true'); setShow(false); }} className="bg-yellow-600 hover:bg-yellow-500 text-black font-bold px-4 py-2 rounded-none text-xs uppercase tracking-widest transition-all">Accept</button>
+        <button onClick={() => setShow(false)} className="border border-slate-700 text-slate-400 hover:text-white px-4 py-2 rounded-none text-xs uppercase tracking-widest transition-all">Dismiss</button>
       </div>
     </div>
   );
@@ -122,9 +122,9 @@ export function AdminLoginModal({ isOpen, onLogin, onClose }) {
 
   return (
     <div className="fixed inset-0 bg-black/80 backdrop-blur-sm z-[100] flex items-center justify-center p-4">
-      <div className="bg-[#0a0a0c] border border-amber-900/40 rounded-3xl p-8 max-w-sm w-full shadow-[0_0_50px_-12px_rgba(245,158,11,0.2)]">
+      <div className="bg-[#0a0a0c] border border-amber-900/40 rounded-none p-8 max-w-sm w-full shadow-[0_0_50px_-12px_rgba(245,158,11,0.2)]">
         <div className="flex flex-col items-center mb-8">
-          <div className="w-16 h-16 bg-amber-500/10 rounded-2xl flex items-center justify-center border border-amber-500/20 mb-4">
+          <div className="w-16 h-16 bg-amber-500/10 rounded-none flex items-center justify-center border border-amber-500/20 mb-4">
             <Shield className="w-8 h-8 text-amber-500" />
           </div>
           <h2 className="text-xl font-black text-white tracking-tight">Admin Vault</h2>
@@ -140,7 +140,7 @@ export function AdminLoginModal({ isOpen, onLogin, onClose }) {
               onKeyDown={e => e.key === 'Enter' && pin && handleSubmit()}
               placeholder="Enter Admin PIN"
               autoFocus
-              className={`w-full bg-black/40 border ${error ? 'border-red-500/50' : 'border-white/[0.06]'} rounded-xl px-4 py-3.5 text-center text-lg font-mono tracking-[0.5em] text-white outline-none focus:border-amber-500/50 transition-all`}
+              className={`w-full bg-black/40 border ${error ? 'border-red-500/50' : 'border-white/[0.06]'} rounded-none px-4 py-3.5 text-center text-lg font-mono tracking-[0.5em] text-white outline-none focus:border-amber-500/50 transition-all`}
             />
             {error && <p className="text-[10px] text-red-400 font-bold uppercase tracking-widest text-center">Invalid Credentials</p>}
           </div>
@@ -148,14 +148,14 @@ export function AdminLoginModal({ isOpen, onLogin, onClose }) {
           <div className="flex gap-3">
             <button
               onClick={onClose}
-              className="flex-1 bg-white/[0.03] hover:bg-white/[0.08] text-slate-400 font-bold py-3.5 rounded-xl text-[10px] uppercase tracking-[0.2em] transition-all"
+              className="flex-1 bg-white/[0.03] hover:bg-white/[0.08] text-slate-400 font-bold py-3.5 rounded-none text-[10px] uppercase tracking-[0.2em] transition-all"
             >
               Cancel
             </button>
             <button
               onClick={handleSubmit}
               disabled={!pin || loading}
-              className="flex-[2] bg-amber-500 hover:bg-amber-400 text-black font-black py-3.5 rounded-xl text-[10px] uppercase tracking-[0.2em] transition-all disabled:opacity-30 disabled:grayscale"
+              className="flex-[2] bg-amber-500 hover:bg-amber-400 text-black font-black py-3.5 rounded-none text-[10px] uppercase tracking-[0.2em] transition-all disabled:opacity-30 disabled:grayscale"
             >
               {loading ? 'Verifying...' : 'Unlock Vault'}
             </button>

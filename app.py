@@ -837,7 +837,7 @@ _tls = threading.local()
 # ── GEMINI HA CLIENT ──────────────────────────────────────────────────────────
 class PRCChatAssistant:
     def __init__(self, keys: list[str]):
-        self.model_name   = "gemini-1.5-flash"
+        self.model_name   = "gemini-3.1-pro"
         self._keys        = keys
         self._current_idx = 0
         self._idx_lock    = threading.Lock()
@@ -1455,7 +1455,7 @@ class PRCChatAssistant:
         # We don't have the sid here, so we do it in the caller
         return contents, uploaded_uris
 
-    def chat(self, history: list, msg: str, kb_context: str = "", f_parts: list = [], stream: bool = False):
+    def chat(self, history: list, msg: str, kb_context: str = "", f_parts: list = [], stream: bool = False, sid: str = None, email: str = None):
         self._pending_kb = [] # Reset for this turn
         # Structure the KB context clearly so Gemini's Section 2 protocol fires correctly
         extracted_context = ""
@@ -1503,6 +1503,20 @@ class PRCChatAssistant:
         else:
             enriched = msg
 
+        # Semantic Cache Lookup
+        query_text = msg.strip().lower()
+        query_hash = hashlib.sha256(query_text.encode()).hexdigest()
+        cached = db("SELECT response FROM response_cache WHERE query_hash=?", (query_hash,))
+        
+        if cached:
+            _logger.info(f"[CACHE] Hit for query hash: {query_hash[:8]}")
+            def _gen_cached():
+                yield cached[0][0]
+                # Log the cached message to history
+                db("INSERT INTO m (sid, user_email, role, text, ts) VALUES (?, ?, ?, ?, ?)",
+                   (sid, email, "model", cached[0][0], time.time()))
+            return _gen_cached()
+
         contents, uploaded_uris = self._build_contents(history, enriched, f_parts)
         _tls.last_file_uris = ",".join(uploaded_uris) if uploaded_uris else None
 
@@ -1520,6 +1534,7 @@ class PRCChatAssistant:
                     # ── STREAMING PATH (multi-turn tool use) ──────────────────────────
                     if stream:
                         current_contents = list(contents)
+                        full_response = ""
                         for _turn in range(4):
                             tool_calls_in_turn: list = []  # (fc_obj, raw_result, formatted_str)
                             model_parts_in_turn: list = []
@@ -1540,13 +1555,20 @@ class PRCChatAssistant:
                                         )
                                         tool_calls_in_turn.append((part.function_call, raw, fmt))
                                     elif part.text:
+                                        full_response += part.text
                                         yield part.text
 
                             # Emit formatted tool results (plots/mermaid) after text for this turn
                             for _, _, fmt in tool_calls_in_turn:
+                                full_response += fmt
                                 yield fmt
 
                             if not tool_calls_in_turn:
+                                # Save to cache
+                                try:
+                                    db("INSERT INTO response_cache (query_hash, response, created_at) VALUES (?, ?, ?)",
+                                       (query_hash, full_response, time.time()))
+                                except Exception: pass
                                 break  # Pure text turn — conversation complete
 
                             # Append model turn + function responses, then loop for Gemini's interpretation
@@ -1594,6 +1616,11 @@ class PRCChatAssistant:
                         for _, _, fmt in tool_calls_in_turn:
                             final += fmt
                         if not tool_calls_in_turn:
+                            # Save to cache
+                            try:
+                                db("INSERT INTO response_cache (query_hash, response, created_at) VALUES (?, ?, ?)",
+                                   (query_hash, final, time.time()))
+                            except Exception: pass
                             break
                         if model_parts_in_turn:
                             current_contents.append(
@@ -1823,8 +1850,10 @@ def init_db() -> None:
         "CREATE TABLE IF NOT EXISTS feedback (id INTEGER PRIMARY KEY AUTOINCREMENT, user_email TEXT, bug_report TEXT, ts REAL)",
         "CREATE TABLE IF NOT EXISTS analytics_events (id INTEGER PRIMARY KEY AUTOINCREMENT, user_email TEXT, event_type TEXT, event_data TEXT, ts REAL)",
         # THE AUDITOR'S LEDGER — append-only physics integrity log
-        "CREATE TABLE IF NOT EXISTS physics_audits (id INTEGER PRIMARY KEY AUTOINCREMENT, session_id TEXT, timestamp REAL, data_type TEXT, health_score INTEGER, violations TEXT, file_name TEXT)",
+        "CREATE TABLE IF NOT EXISTS physics_audits (id INTEGER PRIMARY KEY AUTOINCREMENT, session_id TEXT, user_email TEXT, timestamp REAL, data_type TEXT, health_score INTEGER, violations TEXT, file_name TEXT)",
+        "CREATE TABLE IF NOT EXISTS response_cache (id INTEGER PRIMARY KEY AUTOINCREMENT, query_hash TEXT UNIQUE, response TEXT, created_at REAL)",
     ]
+    db("CREATE INDEX IF NOT EXISTS idx_query_hash ON response_cache(query_hash)")
     if _PG_AVAILABLE:
         base_stmts = [s.replace("INTEGER PRIMARY KEY AUTOINCREMENT", "SERIAL PRIMARY KEY").replace("BLOB", "BYTEA") for s in base_stmts]
     for s in base_stmts:
@@ -1869,6 +1898,19 @@ except Exception as _he:
 
 # ── ROUTES ────────────────────────────────────────────────────────────────────
 @app.get("/health")
+# ── AUTH & SESSION VERIFICATION ──────────────────────────────────────────────
+def _verify_session_owner(sid: str, email: str):
+    """
+    STRICT ROW-LEVEL SECURITY: Ensure the session belongs to the requesting user.
+    Prevents 'Vibe-coding' data leakage.
+    """
+    if not email:
+        raise HTTPException(status_code=401, detail="Authentication required")
+    row = db("SELECT user_email FROM sessions WHERE sid=?", (sid,))
+    if row and row[0][0] and row[0][0].lower().strip() != email.lower().strip():
+        _logger.warning(f"[SECURITY] Unauthorized access attempt: {email} tried to access {sid}")
+        raise HTTPException(status_code=403, detail="Unauthorized: You do not own this session.")
+
 def health(): return {"status": "ok", "db": "postgres" if _PG_AVAILABLE else "sqlite"}
 
 @app.get("/api/diag")
@@ -1958,28 +2000,21 @@ async def track_event(user_email: str = Form(""), event_type: str = Form(...), e
 
 @app.get("/api/sessions")
 async def get_sessions(email: str = None):
-    const_email = email.lower().strip() if email else None
-    if const_email:
-        # Optimized: query the sessions table directly (O(1) per session) 
-        # instead of grouping the messages table (O(N) per message).
-        rows = db(
-            "SELECT sid, title, updated_at FROM sessions "
-            "WHERE user_email=? ORDER BY updated_at DESC",
-            (const_email,),
-        )
-    else:
-        rows = db(
-            "SELECT sid, title, updated_at FROM sessions "
-            "ORDER BY updated_at DESC",
-            (),
-        )
+    if not email:
+        return []
+    const_email = email.lower().strip()
+    rows = db(
+        "SELECT sid, title, updated_at FROM sessions "
+        "WHERE user_email=? ORDER BY updated_at DESC",
+        (const_email,),
+    )
     return [{"id": r[0], "title": r[1], "ts": r[2]} for r in rows]
 
 @app.get("/api/session/{sid}")
-def get_session(sid: str):
-    rows = db("SELECT role, text, url, ts, fname FROM m WHERE sid=? ORDER BY id", (sid,))
-    # Also fetch title
-    title_row = db("SELECT title FROM sessions WHERE sid=?", (sid,))
+def get_session(sid: str, email: str = None):
+    _verify_session_owner(sid, email)
+    rows = db("SELECT role, text, url, ts, fname FROM m WHERE sid=? AND user_email=? ORDER BY id", (sid, email))
+    title_row = db("SELECT title FROM sessions WHERE sid=? AND user_email=?", (sid, email))
     title = title_row[0][0] if title_row else "New Study"
     return {
         "status":"ok",
@@ -1988,20 +2023,23 @@ def get_session(sid: str):
     }
 
 @app.post("/api/session/{sid}/title")
-async def update_session_title(sid: str, title: str = Form(...)):
+async def update_session_title(sid: str, email: str = Form(...), title: str = Form(...)):
+    _verify_session_owner(sid, email)
     if _PG_AVAILABLE:
-        db("INSERT INTO sessions (sid, title, updated_at) VALUES (?, ?, ?) "
+        db("INSERT INTO sessions (sid, title, user_email, updated_at) VALUES (?, ?, ?, ?) "
            "ON CONFLICT (sid) DO UPDATE SET title = EXCLUDED.title, updated_at = EXCLUDED.updated_at",
-           (sid, title, time.time()))
+           (sid, title, email, time.time()))
     else:
-        db("INSERT OR REPLACE INTO sessions (sid, title, updated_at) VALUES (?, ?, ?)",
-           (sid, title, time.time()))
+        db("INSERT OR REPLACE INTO sessions (sid, title, user_email, created_at, updated_at) VALUES (?, ?, ?, ?, ?)",
+           (sid, title, email, time.time(), time.time()))
     return {"status": "ok"}
 
 @app.delete("/api/session/{sid}")
-def delete_session(sid: str):
-    db("DELETE FROM m WHERE sid=?", (sid,))
-    db("DELETE FROM sessions WHERE sid=?", (sid,))
+def delete_session(sid: str, email: str = None):
+    _verify_session_owner(sid, email)
+    db("DELETE FROM m WHERE sid=? AND user_email=?", (sid, email))
+    db("DELETE FROM sessions WHERE sid=? AND user_email=?", (sid, email))
+    db("DELETE FROM physics_audits WHERE session_id=? AND user_email=?", (sid, email))
     return {"status": "ok"}
 
 @app.get("/api/chat/stream")
@@ -2038,7 +2076,7 @@ async def chat_stream(
 
             _tls.current_session_id = sid   # available to generate_executive_report tool
             full_reply = ""
-            for chunk in assistant.chat(history, message, kb_context=kb_ctx, stream=True):
+            for chunk in assistant.chat(history, message, kb_context=kb_ctx, stream=True, sid=sid, email=email):
                 if chunk:
                     full_reply += chunk
                     yield f"data: {_json.dumps({'type': 'token', 'text': chunk})}\n\n"
@@ -2095,11 +2133,14 @@ async def handle(
            (sid, email, time.time(), time.time()))
         db("UPDATE sessions SET updated_at=? WHERE sid=?", (time.time(), sid))
 
+    # ── Security Guard: Verify session ownership before any data access ───────
+    _verify_session_owner(sid, email)
+
     # ── Document generation path (Gemini JSON → HvielDocEngine file) ──────────
     file_type = hviel_engine._detect_type(message) if hviel_engine else None
     if file_type:
         try:
-            hist_rows = db("SELECT role, text FROM m WHERE sid=? ORDER BY id DESC LIMIT 10", (sid,))
+            hist_rows = db("SELECT role, text FROM m WHERE sid=? AND user_email=? ORDER BY id DESC LIMIT 10", (sid, email))
             history   = list(reversed([{"role": r, "text": t} for r, t in hist_rows]))
 
             # Run blocking Gemini call + file I/O in a thread so we don't block the event loop
@@ -2142,12 +2183,12 @@ async def handle(
             return {"status": "error", "session_id": sid, "reply": reply}
 
     # ── Standard chat path (Gemini with file analysis) ────────────────────────
-    hist_rows = db("SELECT role, text FROM m WHERE sid=? ORDER BY id DESC LIMIT 10", (sid,))
+    hist_rows = db("SELECT role, text FROM m WHERE sid=? AND user_email=? ORDER BY id DESC LIMIT 10", (sid, email))
     history   = list(reversed([{"role": r, "text": t} for r, t in hist_rows]))
 
     # Run blocking Gemini call in a thread so we don't block the FastAPI event loop
     resp = await asyncio.get_event_loop().run_in_executor(
-        None, lambda: assistant.chat(history, message, kb_ctx, f_parts)
+        None, lambda: assistant.chat(history, message, kb_ctx, f_parts, sid=sid, email=email)
     )
     
     db("INSERT INTO m (sid,role,text,ts,user_email) VALUES (?,?,?,?,?)",

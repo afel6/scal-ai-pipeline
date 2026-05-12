@@ -10,7 +10,7 @@ export default function PetrophysicalTable({ content }) {
     if (rows.length === 0 && !data.headers) throw new Error("No data found");
 
     return (
-      <div className="my-6 overflow-hidden rounded-2xl border border-yellow-900/40 bg-[#0c0c10] shadow-2xl">
+      <div className="my-6 overflow-hidden rounded-none border border-yellow-900/40 bg-[#0c0c10] shadow-2xl">
         <div className="bg-gradient-to-r from-yellow-950/40 to-black px-4 py-3 border-b border-yellow-900/30 flex items-center justify-between">
           <div className="flex items-center gap-2">
             <Database className="w-4 h-4 text-yellow-500" />

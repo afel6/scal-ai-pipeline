@@ -113,7 +113,7 @@ export default function SidebarTabs({ sessionId, sessions, handleLoadSession, ha
           )}
           {sessions.map(s => (
             <div key={s.id} onClick={() => handleLoadSession(s.id)}
-              className={`session-item group flex items-start gap-3 px-3 py-3 rounded-xl cursor-pointer
+              className={`session-item group flex items-start gap-3 px-3 py-3 rounded-none cursor-pointer
                 ${s.id === sessionId
                   ? 'active text-yellow-100'
                   : 'text-slate-400 hover:text-slate-200'
@@ -123,7 +123,7 @@ export default function SidebarTabs({ sessionId, sessions, handleLoadSession, ha
                 {editingId === s.id ? (
                   <input
                     autoFocus
-                    className="w-full bg-black/50 border border-yellow-500/50 rounded px-1.5 py-0.5 text-sm text-yellow-100 outline-none"
+                    className="w-full bg-black/50 border border-yellow-500/50 rounded-none px-1.5 py-0.5 text-sm text-yellow-100 outline-none"
                     value={editingTitle}
                     onChange={(e) => setEditingTitle(e.target.value)}
                     onBlur={() => {
@@ -164,7 +164,7 @@ export default function SidebarTabs({ sessionId, sessions, handleLoadSession, ha
       {/* Library tab */}
       {tab === 'library' && (
         <div className="flex-1 overflow-y-auto p-3 space-y-4 custom-scrollbar">
-          <div className="bg-gradient-to-br from-yellow-500/5 to-transparent border border-yellow-500/10 rounded-2xl p-4 space-y-3">
+          <div className="bg-gradient-to-br from-yellow-500/5 to-transparent border border-yellow-500/10 rounded-none p-4 space-y-3">
             <p className="text-[10px] text-yellow-500 font-black uppercase tracking-[0.2em] flex items-center gap-2">
               <BookOpen className="w-3 h-3" /> Core Ingestion
             </p>
@@ -176,9 +176,9 @@ export default function SidebarTabs({ sessionId, sessions, handleLoadSession, ha
                 placeholder="Admin PIN"
                 value={bookPassword}
                 onChange={(e) => setBookPassword(e.target.value)}
-                className="w-full bg-black border border-slate-800 rounded-xl px-3 py-2.5 text-xs text-slate-200 outline-none focus:border-yellow-500/50 placeholder:text-slate-700 transition-all"
+                className="w-full bg-black border border-slate-800 rounded-none px-3 py-2.5 text-xs text-slate-200 outline-none focus:border-yellow-500/50 placeholder:text-slate-700 transition-all"
               />
-              <label className={`upload-zone flex flex-col items-center justify-center gap-3 w-full rounded-2xl py-6 cursor-pointer
+              <label className={`upload-zone flex flex-col items-center justify-center gap-3 w-full rounded-none py-6 cursor-pointer
                 ${uploading ? 'border-yellow-500 bg-yellow-500/5 !border-solid !border-2' : ''}`}>
                 <input type="file" className="hidden" onChange={handleBookUpload} disabled={uploading}
                   accept=".html,.htm,.txt,.pdf,.docx" />
@@ -192,7 +192,7 @@ export default function SidebarTabs({ sessionId, sessions, handleLoadSession, ha
                   </>
                 ) : (
                   <>
-                    <div className="w-10 h-10 rounded-xl bg-slate-900 border border-slate-800 flex items-center justify-center text-slate-500 group-hover:text-yellow-500 transition-colors">
+                    <div className="w-10 h-10 rounded-none bg-slate-900 border border-slate-800 flex items-center justify-center text-slate-500 group-hover:text-yellow-500 transition-colors">
                       <Upload className="w-5 h-5" />
                     </div>
                     <div className="text-center">
@@ -205,7 +205,7 @@ export default function SidebarTabs({ sessionId, sessions, handleLoadSession, ha
             </div>
 
             {uploadMsg && (
-              <div className={`text-[10px] font-bold p-3 rounded-xl border leading-relaxed animate-in fade-in slide-in-from-top-2
+              <div className={`text-[10px] font-bold p-3 rounded-none border leading-relaxed animate-in fade-in slide-in-from-top-2
                 ${uploadMsg.includes('✅') ? 'bg-green-500/5 border-green-500/20 text-green-400' : 'bg-red-500/5 border-red-500/20 text-red-400'}`}>
                 {uploadMsg}
               </div>
@@ -218,17 +218,17 @@ export default function SidebarTabs({ sessionId, sessions, handleLoadSession, ha
                 <Zap className="w-3 h-3 fill-yellow-500" /> Agent Capabilities
               </p>
               <div className="flex gap-1">
-                <div className="w-1 h-1 bg-yellow-500 rounded-full animate-pulse" />
-                <div className="w-1 h-1 bg-yellow-500 rounded-full animate-pulse [animation-delay:0.2s]" />
+                <div className="w-1 h-1 bg-yellow-500 rounded-none animate-pulse" />
+                <div className="w-1 h-1 bg-yellow-500 rounded-none animate-pulse [animation-delay:0.2s]" />
               </div>
             </div>
 
             <div className="space-y-2.5">
               {skills.map((s, i) => (
-                <div key={i} className="group relative overflow-hidden rounded-2xl bg-[#0c0c10] border border-slate-800 hover:border-yellow-900/40 transition-all p-4 shadow-xl">
+                <div key={i} className="group relative overflow-hidden rounded-none bg-[#0c0c10] border border-slate-800 hover:border-yellow-900/40 transition-all p-4 shadow-xl">
                   <div className="absolute top-0 right-0 w-24 h-24 bg-yellow-500/5 blur-3xl opacity-0 group-hover:opacity-100 transition-opacity" />
                   <div className="relative flex items-center gap-2 mb-2">
-                    <span className="text-[8px] font-black text-yellow-600 bg-yellow-950/30 px-1.5 py-0.5 rounded uppercase tracking-[0.15em] border border-yellow-900/20">{s.category}</span>
+                    <span className="text-[8px] font-black text-yellow-600 bg-yellow-950/30 px-1.5 py-0.5 rounded-none uppercase tracking-[0.15em] border border-yellow-900/20">{s.category}</span>
                     <span className="text-xs font-black text-slate-200 uppercase tracking-wider">{s.name}</span>
                   </div>
                   <p className="relative text-[10px] text-slate-500 leading-relaxed font-medium group-hover:text-slate-400 transition-colors">{s.desc}</p>
@@ -242,8 +242,8 @@ export default function SidebarTabs({ sessionId, sessions, handleLoadSession, ha
               <p className="text-[10px] text-slate-500 font-black uppercase tracking-[0.2em] px-1 italic">Knowledge Base Status</p>
               <div className="space-y-2">
                 {books.map((b, i) => (
-                  <div key={i} className="kb-item flex items-center gap-3 bg-black/40 rounded-xl px-3 py-3 group">
-                    <div className="w-2 h-2 rounded-full bg-green-500 shadow-[0_0_8px_rgba(34,197,94,0.4)]" />
+                  <div key={i} className="kb-item flex items-center gap-3 bg-black/40 rounded-none px-3 py-3 group">
+                    <div className="w-2 h-2 rounded-none bg-green-500 shadow-[0_0_8px_rgba(34,197,94,0.4)]" />
                     <div className="flex-1 min-w-0">
                       <p className="text-[11px] text-slate-300 font-bold truncate group-hover:text-white transition-colors">{b.name}</p>
                       <p className="text-[9px] text-slate-600 font-mono mt-0.5 uppercase tracking-tighter">{b.chunks} Data Shards Active</p>
@@ -258,7 +258,7 @@ export default function SidebarTabs({ sessionId, sessions, handleLoadSession, ha
       {/* Auditor tab */}
       {tab === 'audit' && (
         <div className="flex-1 overflow-y-auto p-4 space-y-6 animate-fade-in custom-scrollbar">
-          <div className="bg-gradient-to-br from-red-500/5 to-transparent border border-red-500/10 rounded-2xl p-4 space-y-3">
+          <div className="bg-gradient-to-br from-red-500/5 to-transparent border border-red-500/10 rounded-none p-4 space-y-3">
             <p className="text-[10px] text-red-400 font-black uppercase tracking-[0.2em] flex items-center gap-2">
               <Camera className="w-3 h-3" /> Physics Watchtower
             </p>
@@ -266,11 +266,11 @@ export default function SidebarTabs({ sessionId, sessions, handleLoadSession, ha
               Real-time violation detection for laboratory data integrity.
             </p>
             <div className="grid grid-cols-2 gap-2">
-              <div className="bg-black/40 border border-slate-800 rounded-xl p-3 text-center">
+              <div className="bg-black/40 border border-slate-800 rounded-none p-3 text-center">
                 <p className="text-[9px] text-slate-600 uppercase font-bold mb-1">Health Index</p>
                 <p className="text-xl font-black text-emerald-400">100%</p>
               </div>
-              <div className="bg-black/40 border border-slate-800 rounded-xl p-3 text-center">
+              <div className="bg-black/40 border border-slate-800 rounded-none p-3 text-center">
                 <p className="text-[9px] text-slate-600 uppercase font-bold mb-1">Violations</p>
                 <p className="text-xl font-black text-slate-400">0</p>
               </div>
@@ -280,10 +280,10 @@ export default function SidebarTabs({ sessionId, sessions, handleLoadSession, ha
           <div className="space-y-4">
              <div className="flex items-center justify-between px-1">
               <p className="text-[10px] text-slate-500 font-black uppercase tracking-[0.2em] italic">Audit Ledger</p>
-              <div className="px-1.5 py-0.5 rounded bg-emerald-500/10 border border-emerald-500/20 text-[8px] text-emerald-500 font-bold">SECURE</div>
+              <div className="px-1.5 py-0.5 rounded-none bg-emerald-500/10 border border-emerald-500/20 text-[8px] text-emerald-500 font-bold">SECURE</div>
             </div>
             
-            <div className="p-8 rounded-2xl border border-slate-800 bg-white/[0.01] flex flex-col items-center justify-center gap-4 text-center">
+            <div className="p-8 rounded-none border border-slate-800 bg-white/[0.01] flex flex-col items-center justify-center gap-4 text-center">
               <Activity className="w-8 h-8 text-slate-700 opacity-30" />
               <p className="text-[10px] text-slate-600 font-mono uppercase">Upload a file to begin<br/>physics monitoring</p>
             </div>
