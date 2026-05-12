@@ -242,6 +242,7 @@ inspection sequence before taking any other action:
   2. Extract and display: column headers, units (if present), and first 10 rows of data.
   3. Identify the data type from the CONTENT — not from the filename.
   4. Never assume. Never default. Never guess. Always inspect first.
+  5. If the user asks to summarize, analyze, or explain the upload, you MUST summarize the [EXTRACTED DATA FROM UPLOADED FILE]. Do NOT summarize the [CONTEXT FROM PRC TECHNICAL LIBRARY] instead. The library context is strictly for reference, not the primary subject.
 
 RULE 0-B — DATA TYPE ROUTING (CRITICAL — FOLLOW EXACTLY):
 
@@ -1465,6 +1466,12 @@ class PRCChatAssistant:
             safe_mime = mime or "application/octet-stream"
             if safe_mime not in SUPPORTED:
                 continue
+
+            # Skip native Gemini upload for spreadsheets to eliminate 30s+ TTFT latency.
+            # SCALFileHandler already extracts this data and provides it in the prompt.
+            if "spreadsheet" in safe_mime or "excel" in safe_mime or "csv" in safe_mime or "sheet" in safe_mime:
+                continue
+
             with tempfile.NamedTemporaryFile(delete=False) as tf:
                 tf.write(data_bytes)
                 tmp = tf.name
@@ -1540,8 +1547,10 @@ class PRCChatAssistant:
             enriched = msg
 
         # Semantic Cache Lookup
-        query_text = msg.strip().lower()
-        query_hash = hashlib.sha256(query_text.encode()).hexdigest()
+        # We must hash the ENRICHED text (which includes file data) plus a bit of history 
+        # so "summarize this" doesn't hit a generic cache from a different file.
+        cache_base = enriched.strip() + str(history[-1:] if history else "")
+        query_hash = hashlib.sha256(cache_base.encode()).hexdigest()
         cached = db("SELECT response FROM response_cache WHERE query_hash=?", (query_hash,))
         
         if cached:
