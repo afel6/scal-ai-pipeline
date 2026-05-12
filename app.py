@@ -1898,7 +1898,6 @@ except Exception as _he:
     hviel_engine = None
 
 # ── ROUTES ────────────────────────────────────────────────────────────────────
-@app.get("/health")
 # ── AUTH & SESSION VERIFICATION ──────────────────────────────────────────────
 def _verify_session_owner(sid: str, email: str):
     """
@@ -1912,6 +1911,7 @@ def _verify_session_owner(sid: str, email: str):
         _logger.warning(f"[SECURITY] Unauthorized access attempt: {email} tried to access {sid}")
         raise HTTPException(status_code=403, detail="Unauthorized: You do not own this session.")
 
+@app.get("/health")
 def health(): return {"status": "ok", "db": "postgres" if _PG_AVAILABLE else "sqlite"}
 
 @app.get("/api/diag")
