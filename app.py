@@ -2050,7 +2050,10 @@ async def chat_stream(
     session_id:    Optional[str]   = None,
     user_email:    Optional[str]   = None,
 ):
-    sid   = session_id or str(uuid.uuid4())
+    if session_id in ("null", "undefined", "", None):
+        sid = str(uuid.uuid4())
+    else:
+        sid = session_id
     email = user_email.lower().strip() if user_email else None
     
     async def _producer():

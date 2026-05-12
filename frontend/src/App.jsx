@@ -61,7 +61,10 @@ export default function App() {
   const [files,          setFiles]          = useState([]);
   const [loading,        setLoading]        = useState(false);
   const [uploadStatus,   setUploadStatus]   = useState('');
-  const [sessionId,      setSessionId]      = useState(() => localStorage.getItem('prc_session_id') || null);
+  const [sessionId, setSessionId] = useState(() => {
+    const val = localStorage.getItem('prc_session_id');
+    return (val && val !== 'null' && val !== 'undefined') ? val : null;
+  });
   const [lastMessage,    setLastMessage]    = useState(null);
   const [retryCooldown,  setRetryCooldown]  = useState(0);
   const [sessions,       setSessions]       = useState([]);
