@@ -1853,12 +1853,13 @@ def init_db() -> None:
         "CREATE TABLE IF NOT EXISTS physics_audits (id INTEGER PRIMARY KEY AUTOINCREMENT, session_id TEXT, user_email TEXT, timestamp REAL, data_type TEXT, health_score INTEGER, violations TEXT, file_name TEXT)",
         "CREATE TABLE IF NOT EXISTS response_cache (id INTEGER PRIMARY KEY AUTOINCREMENT, query_hash TEXT UNIQUE, response TEXT, created_at REAL)",
     ]
-    db("CREATE INDEX IF NOT EXISTS idx_query_hash ON response_cache(query_hash)")
     if _PG_AVAILABLE:
         base_stmts = [s.replace("INTEGER PRIMARY KEY AUTOINCREMENT", "SERIAL PRIMARY KEY").replace("BLOB", "BYTEA") for s in base_stmts]
     for s in base_stmts:
         try: db(s)
         except Exception: pass
+    try: db("CREATE INDEX IF NOT EXISTS idx_query_hash ON response_cache(query_hash)")
+    except Exception: pass
     # Backfill existing m rows → sessions table (migration for pre-existing installs)
     try:
         if _PG_AVAILABLE:
