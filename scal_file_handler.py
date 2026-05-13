@@ -10,6 +10,8 @@ Usage:
     # result contains: data_type, dataframes, summary, raw_text
 """
 
+import re
+from pathlib import Path
 import pandas as pd
 import numpy as np
 import json
@@ -551,8 +553,6 @@ Instructions:
     return prompt
 
 
-import re
-from pathlib import Path
 
 def _detect_data_block(df_raw):
     n_rows, n_cols = df_raw.shape
