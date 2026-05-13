@@ -183,7 +183,7 @@ class SCALFileHandler:
                     press_col = next((j for j, h in enumerate(headers) if any(kw in str(h).lower() for kw in ['press', 'psia', 'mpa', 'pc'])), None)
                     sat_col = next((j for j, h in enumerate(headers) if any(kw in str(h).lower() for kw in ['sat', 'hg', 'pv', 'intrusion', 'sw'])), None)
                     
-                    if press_col is not None and sat_col is not None:
+                    if press_col is not None and sat_col is not None and press_col != sat_col:
                         cycle_col = next((j for j, h in enumerate(headers) if 'cycle' in str(h).lower()), None)
                         
                         drainage = {'pressure': [], 'sat_pv': []}
@@ -208,7 +208,7 @@ class SCALFileHandler:
                                 'drainage': drainage,
                                 'imbibition': imbibition
                             }
-                    break
+                            break
 
         self.extracted = {'type': 'MICP', 'samples': results}
 
@@ -289,7 +289,7 @@ class SCALFileHandler:
                     data.columns = range(len(data.columns))
                     phi_col = next((j for j, h in enumerate(headers) if 'poros' in str(h).lower()), None)
                     f_col   = next((j for j, h in enumerate(headers) if 'factor' in str(h).lower() or str(h).strip().upper() == 'F' or 'rt' in str(h).lower() or 'ro' in str(h).lower()), None)
-                    if phi_col is not None and f_col is not None:
+                    if phi_col is not None and f_col is not None and phi_col != f_col:
                         phi_vals, f_vals = [], []
                         for idx, r in data.iterrows():
                             p = pd.to_numeric(r[phi_col], errors='coerce')
@@ -301,7 +301,7 @@ class SCALFileHandler:
                                 f_vals.append(f)
                         if phi_vals:
                             results[sheet] = {'porosity': phi_vals, 'F': f_vals}
-                    break
+                            break
         self.extracted = {'type': 'FRF', 'samples': results}
 
     # ---- RESISTIVITY INDEX ---- #
@@ -319,7 +319,7 @@ class SCALFileHandler:
                     data.columns = range(len(data.columns))
                     sw_col = next((j for j, h in enumerate(headers) if 'sw' in str(h).lower()), None)
                     ri_col = next((j for j, h in enumerate(headers) if 'ri' in str(h).lower() or 'index' in str(h).lower() or 'rt' in str(h).lower() or 'ro' in str(h).lower()), None)
-                    if sw_col is not None and ri_col is not None:
+                    if sw_col is not None and ri_col is not None and sw_col != ri_col:
                         sw_vals, ri_vals = [], []
                         for idx, r in data.iterrows():
                             s = pd.to_numeric(r[sw_col], errors='coerce')
@@ -329,7 +329,7 @@ class SCALFileHandler:
                                 ri_vals.append(ri)
                         if sw_vals:
                             results[sheet] = {'Sw': sw_vals, 'RI': ri_vals}
-                    break
+                            break
         self.extracted = {'type': 'RI', 'samples': results}
 
     # ---- NMR ---- #
@@ -347,7 +347,7 @@ class SCALFileHandler:
                     data.columns = range(len(data.columns))
                     t2_col  = next((j for j, h in enumerate(headers) if 't2' in str(h).lower()), None)
                     amp_col = next((j for j, h in enumerate(headers) if any(k in str(h).lower() for k in ['amp', 'incr', 'pore', 'volume'])), None)
-                    if t2_col is not None and amp_col is not None:
+                    if t2_col is not None and amp_col is not None and t2_col != amp_col:
                         t2_vals, amp_vals = [], []
                         for idx, r in data.iterrows():
                             t = pd.to_numeric(r[t2_col], errors='coerce')
@@ -357,7 +357,7 @@ class SCALFileHandler:
                                 amp_vals.append(a)
                         if t2_vals:
                             results[sheet] = {'T2': t2_vals, 'amplitude': amp_vals}
-                    break
+                            break
         self.extracted = {'type': 'NMR', 'samples': results}
 
     # ---- PVT ---- #
@@ -384,7 +384,7 @@ class SCALFileHandler:
                                     sheet_data[str(h)] = vals
                     if sheet_data:
                         results[sheet] = sheet_data
-                    break
+                        break
         self.extracted = {'type': 'PVT', 'samples': results}
 
     # ---- RCAL ---- #
@@ -425,7 +425,7 @@ class SCALFileHandler:
                         if depth_col is not None:
                             sheet_data['depth'] = depth_vals
                         results[sheet] = sheet_data
-                    break
+                        break
         self.extracted = {'type': 'RCAL', 'samples': results}
 
     # ---- WETTABILITY ---- #
@@ -454,8 +454,8 @@ class SCALFileHandler:
             for i in range(min(30, len(df))):
                 row = [str(v).lower() for v in df.iloc[i] if pd.notna(v)]
                 
-                is_standard_pc = any(kw in c for c in row for kw in ['sw', 'sat', 'saturation']) and any(kw in c for c in row for kw in ['pc', 'capillary', 'psia', 'mpa'])
-                is_centrifuge = any(kw in c for c in row for kw in ['rpm', 'speed', 'g-force']) and any(kw in c for c in row for kw in ['volume', 'produced', 'cc'])
+                is_standard_pc = any(kw in c for c in row for kw in ['sw', 'sat', 'saturation']) and any(kw in c for c in row for kw in ['pc', 'capillary', 'psia', 'mpa', 'press', 'pressure'])
+                is_centrifuge = any(kw in c for c in row for kw in ['rpm', 'speed', 'g-force', 'step']) and any(kw in c for c in row for kw in ['volume', 'produced', 'cc', 'ml', 'production', 'recovery', 'fluid'])
                 
                 if is_standard_pc or is_centrifuge:
                     headers = list(df.iloc[i])
@@ -464,14 +464,14 @@ class SCALFileHandler:
                     
                     if is_standard_pc:
                         x_col = next((j for j, h in enumerate(headers) if any(kw in str(h).lower() for kw in ['sw', 'sat', 'saturation'])), None)
-                        y_col = next((j for j, h in enumerate(headers) if any(kw in str(h).lower() for kw in ['pc', 'capillary', 'psia', 'mpa'])), None)
+                        y_col = next((j for j, h in enumerate(headers) if any(kw in str(h).lower() for kw in ['pc', 'capillary', 'psia', 'mpa', 'press', 'pressure'])), None)
                         x_name, y_name = 'Sw', 'Pc'
                     else:
-                        x_col = next((j for j, h in enumerate(headers) if any(kw in str(h).lower() for kw in ['rpm', 'speed', 'g-force'])), None)
-                        y_col = next((j for j, h in enumerate(headers) if any(kw in str(h).lower() for kw in ['volume', 'produced', 'cc'])), None)
+                        x_col = next((j for j, h in enumerate(headers) if any(kw in str(h).lower() for kw in ['rpm', 'speed', 'g-force', 'step'])), None)
+                        y_col = next((j for j, h in enumerate(headers) if any(kw in str(h).lower() for kw in ['volume', 'produced', 'cc', 'ml', 'production', 'recovery', 'fluid'])), None)
                         x_name, y_name = 'RPM', 'Produced Volume'
                         
-                    if x_col is not None and y_col is not None:
+                    if x_col is not None and y_col is not None and x_col != y_col:
                         x_vals = []
                         y_vals = []
                         for idx, r in data.iterrows():
@@ -482,7 +482,7 @@ class SCALFileHandler:
                                 y_vals.append(y)
                         if x_vals:
                             results[sheet] = {x_name: x_vals, y_name: y_vals}
-                    break
+                            break
         self.extracted = {'type': 'PC', 'samples': results}
 
     # ------------------------------------------------------------------ #
