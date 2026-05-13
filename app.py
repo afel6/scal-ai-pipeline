@@ -127,7 +127,12 @@ def _get_conn():
             yield conn, "%s"
         finally:
             try:
-                _PG_POOL.putconn(conn)
+                # If an error occurred during yield, the connection might be broken.
+                # psycopg2 connections have a 'closed' attribute or we can check status.
+                if hasattr(conn, "closed") and conn.closed:
+                    _PG_POOL.putconn(conn, close=True)
+                else:
+                    _PG_POOL.putconn(conn)
             except Exception:
                 pass
     else:
@@ -143,20 +148,26 @@ def _get_conn():
 
 def db(query: str, params: tuple = ()) -> list:
     """Execute a query with ? placeholders, falling back to SQLite if PostgreSQL fails."""
-    try:
-        with _get_conn() as (conn, ph):
-            q = query if ph == "?" else _translate_placeholders(query)
-            cur = conn.cursor()
-            cur.execute(q, params)
-            try:
-                result = cur.fetchall()
-            except Exception:
-                result = []
-            conn.commit()
-            return result
-    except Exception as e:
-        _logger.error(f"[DB ERROR] Query: {query} | Error: {e}")
-        raise
+    last_err = None
+    for attempt in range(2):
+        try:
+            with _get_conn() as (conn, ph):
+                q = query if ph == "?" else _translate_placeholders(query)
+                cur = conn.cursor()
+                cur.execute(q, params)
+                try:
+                    result = cur.fetchall()
+                except Exception:
+                    result = []
+                conn.commit()
+                return result
+        except Exception as e:
+            last_err = e
+            _logger.warning(f"[DB RETRY] Attempt {attempt+1} failed for query '{query[:50]}...': {e}")
+            time.sleep(0.1 * (attempt + 1))
+    
+    _logger.error(f"[DB FINAL ERROR] Query: {query} | Error: {last_err}")
+    raise last_err
 
 
 async def async_db(query: str, params: tuple = ()) -> list:
@@ -214,10 +225,11 @@ Every response must be a production-grade engineering deliverable. You have ZERO
 ## 2. STRICT NON-HALLUCINATORY PROTOCOL (STRICT RULES)
 ════════════════════════════════════════════════════
 1. NO FABRICATION: Only analyze files attached to this turn or listed in the registry. Never invent metrics or data.
-2. ATTENTION & ACKNOWLEDGMENT: When a file is uploaded, you MUST explicitly confirm the [File Name], [Data Type], and [Row Count] (from EXTRACTED DATA) in your very first response. This proves you have read the file.
+2. ATTENTION & ACKNOWLEDGMENT: When a file is uploaded, you MUST explicitly confirm the [File Name], [Data Type], and [Row Count] (found in the [NEW UPLOAD INVENTORY] or [EXTRACTED DATA] blocks) in your very first response.
 3. TRACEABILITY: Every number reported MUST be cited. Format: [Sheet: <name>, Cell: <e.g., F4>] or [Computed from: <details>].
-3. DATA MISSING: If a requested value is missing, explicitly state "DATA NOT FOUND IN UPLOADED FILES".
-4. NO PERSISTENCE ASSUMPTION: Do not assume data from previous sessions exists unless it is explicitly provided in the current turn's RAG context or Registry.
+4. DATA MISSING: If a requested value is missing, explicitly state "DATA NOT FOUND IN UPLOADED FILES".
+5. NO PERSISTENCE ASSUMPTION: Do not assume data from previous sessions exists unless it is explicitly provided in the current turn's RAG context or Registry.
+6. DATA SOURCE: Spreadsheet data is provided as text in the [EXTRACTED DATA] block. Treat this as the primary source of truth.
 
 ════════════════════════════════════════════════════
 ## 3. TECHNICAL SPECIFICATIONS
@@ -1071,7 +1083,7 @@ class PRCChatAssistant:
                 try:
                     handler = SCALFileHandler(tmp_path)
                     result = handler.process()
-                    inventory = f"FILE: {fname}\nSHEETS: {', '.join(result['sheet_names'])}\nIDENTIFIED TYPE: {result['data_type']}\n"
+                    inventory = f"FILE: {fname}\nSHEETS: {', '.join(result['sheet_names'])}\nIDENTIFIED TYPE: {result['data_type']}\nTOTAL ROWS: {result['row_count']}\n"
                     extracted_context += f"\n\n[NEW UPLOAD INVENTORY]:\n{inventory}"
                     
                     if result.get('data_type') != 'UNKNOWN':
@@ -1103,10 +1115,9 @@ class PRCChatAssistant:
                 enriched += f"{extracted_context}\n\n"
             if kb_context:
                 enriched += f"[PRC TECHNICAL LIBRARY & RAG CONTEXT]:\n{kb_context}\n\n"
-            enriched += f"[SESSION DATA REGISTRY]: {registry}\n"
-            enriched += f"[EXTRACTED DATA]: {session_data}\n"
+            
             enriched += f"[USER REQUEST]: {msg}\n"
-            enriched += "\n[MANDATORY SYSTEM OVERRIDE: YOU MUST USE THE DATA ABOVE. DO NOT ASK FOR RE-UPLOADS IF THE FILE IS LISTED IN THE REGISTRY. IF DATA IS MISSING, STATE EXACTLY WHICH FILE/CELL IS MISSING. EVERY NUMBER MUST HAVE A CITATION [Sheet: ..., Cell: ...].]"
+            enriched += "\n[MANDATORY SYSTEM OVERRIDE: YOU MUST USE THE DATA PROVIDED ABOVE. DO NOT ASK FOR RE-UPLOADS IF DATA IS PRESENT. EVERY NUMBER MUST HAVE A CITATION [Sheet: ..., Cell: ...].]"
         else:
             enriched = msg
 

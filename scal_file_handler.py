@@ -48,7 +48,7 @@ class SCALFileHandler:
             for sheet in self.sheet_names:
                 s_lower = sheet.lower()
                 # Direct match or likely candidate
-                if any(kw in s_lower for kw in ['scal', 'core', 'data', 'test', 'result', 'analysis', 'summary']):
+                if any(kw in s_lower for kw in ['scal', 'core', 'data', 'test', 'result', 'analysis', 'summary', 'centrifuge', 'micp', 'permeability', 'porosity']):
                     target_sheets.append(sheet)
                 elif any(kw in s_lower for kw in all_keywords):
                     target_sheets.append(sheet)
@@ -449,7 +449,18 @@ class SCALFileHandler:
             'data_type':   self.data_type,
             'sheet_names': self.sheet_names,
             'extracted':   self.extracted,
+            'row_count':   self._count_rows(self.extracted)
         }
+
+    def _count_rows(self, data: dict) -> int:
+        """Helper to count total data points for AI acknowledgment."""
+        count = 0
+        if isinstance(data, dict):
+            for v in data.values():
+                count += self._count_rows(v)
+        elif isinstance(data, list):
+            count += len(data)
+        return count
 
 
 # ------------------------------------------------------------------ #
