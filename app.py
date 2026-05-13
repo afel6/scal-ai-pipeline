@@ -24,7 +24,7 @@ from hviel_doc_engine import HvielDocEngine
 from skills_engine import SkillsEngine
 from petrophysical_curves import Endpoints, KrCurveFitter
 from physics_validator import PhysicsGuard
-from scal_file_handler import SCALFileHandler
+from scal_file_handler import SCALFileHandler, extract_file_data
 from report_generator import PRCReportEngine
 
 logging.basicConfig(
@@ -1164,8 +1164,7 @@ class PRCChatAssistant:
                     tf.write(data_bytes)
                     tmp_path = tf.name
                 try:
-                    handler = SCALFileHandler(tmp_path)
-                    result = handler.process()
+                    result = extract_file_data(tmp_path)
                     inventory = f"FILE: {fname}\nSHEETS: {', '.join(result['sheet_names'])}\nIDENTIFIED TYPE: {result['data_type']}\nTOTAL ROWS: {result['row_count']}\n"
                     extracted_context += f"\n\n[NEW UPLOAD INVENTORY]:\n{inventory}"
                     
