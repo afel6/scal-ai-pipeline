@@ -134,7 +134,8 @@ class SCALFileHandler:
             for data_type, keywords in self.KEYWORDS.items():
                 for kw in keywords:
                     if kw in text:
-                        scores[data_type] += 1
+                        weight = 10 if kw in ['rpm', 'centrifuge', 'speed', 'produced volume'] else 1
+                        scores[data_type] += weight
 
         best = max(scores, key=scores.get)
         if scores[best] == 0:
@@ -192,9 +193,6 @@ class SCALFileHandler:
                             p = pd.to_numeric(r[press_col], errors='coerce')
                             s = pd.to_numeric(r[sat_col], errors='coerce')
                             if pd.isna(p) or pd.isna(s):
-                                continue
-                                
-                            if s in (0.0, 1.0, 100.0, 30.0):
                                 continue
                                 
                             c = str(r[cycle_col]).strip().upper() if cycle_col is not None else 'D'
@@ -327,8 +325,6 @@ class SCALFileHandler:
                             s = pd.to_numeric(r[sw_col], errors='coerce')
                             ri = pd.to_numeric(r[ri_col], errors='coerce')
                             if not pd.isna(s) and not pd.isna(ri):
-                                if s in (0.0, 1.0, 100.0, 30.0):
-                                    continue
                                 sw_vals.append(s)
                                 ri_vals.append(ri)
                         if sw_vals:
