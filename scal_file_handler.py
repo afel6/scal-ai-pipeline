@@ -83,24 +83,24 @@ class SCALFileHandler:
         'MICP': [
             'mercury', 'hg', 'intrusion', 'psia', 'mpa', 'threshold pressure',
             'drainage', 'imbibition', 'cumulative intrusion',
-            'capillary pressure', 'pore throat', 'washburn'
+            'capillary pressure', 'pore throat', 'washburn', 'saturation'
         ],
         'KR': [
             'kro', 'krw', 'krg', 'relative permeability',
-            'end point', 'sor', 'swi', 'sgr', 'water flood', 'kr'
+            'end point', 'sor', 'swi', 'sgr', 'water flood', 'kr', 'permeability'
         ],
         'PC': [
-            'porous plate', 'centrifuge', 'brine saturation',
-            'oil-brine', 'air-brine', 'reservoir conditions',
-            'rpm', 'speed', 'produced volume', 'cc', 'g-force'
+            'porous plate', 'centrifuge', 'brine saturation', 'oil-brine', 'air-brine',
+            'reservoir conditions', 'rpm', 'speed', 'produced volume', 'cc', 'g-force',
+            'capillary pressure', 'drainage', 'imbibition', 'drainge', 'saturation'
         ],
         'FRF': [
             'formation factor', 'formation resistivity factor',
-            'cementation', 'tortuosity', '100% brine', 'archie', 'rt', 'ro'
+            'cementation', 'tortuosity', '100% brine', 'archie', 'rt', 'ro', 'phi', 'porosity'
         ],
         'RI': [
             'resistivity index', 'saturation exponent',
-            'partial saturation', 'rt', 'ro', ' ri '
+            'partial saturation', 'rt', 'ro', ' ri ', 'sw', 'saturation'
         ],
         'WETTABILITY': [
             'amott', 'usbm', 'wettability index', 'iw', 'io',
@@ -176,12 +176,12 @@ class SCALFileHandler:
                 
             for i in range(min(30, len(df))):
                 row = [str(v).lower() for v in df.iloc[i] if pd.notna(v)]
-                if any(kw in c for c in row for kw in ['press', 'psia', 'mpa']) and any(kw in c for c in row for kw in ['sat', 'hg', 'pv', 'intrusion']):
+                if any(kw in c for c in row for kw in ['press', 'psia', 'mpa', 'pc']) and any(kw in c for c in row for kw in ['sat', 'hg', 'pv', 'intrusion', 'sw']):
                     headers = list(df.iloc[i])
                     data = df.iloc[i+1:].reset_index(drop=True)
                     data.columns = range(len(data.columns))
-                    press_col = next((j for j, h in enumerate(headers) if any(kw in str(h).lower() for kw in ['press', 'psia', 'mpa'])), None)
-                    sat_col = next((j for j, h in enumerate(headers) if any(kw in str(h).lower() for kw in ['sat', 'hg', 'pv', 'intrusion'])), None)
+                    press_col = next((j for j, h in enumerate(headers) if any(kw in str(h).lower() for kw in ['press', 'psia', 'mpa', 'pc'])), None)
+                    sat_col = next((j for j, h in enumerate(headers) if any(kw in str(h).lower() for kw in ['sat', 'hg', 'pv', 'intrusion', 'sw'])), None)
                     
                     if press_col is not None and sat_col is not None:
                         cycle_col = next((j for j, h in enumerate(headers) if 'cycle' in str(h).lower()), None)
@@ -454,7 +454,7 @@ class SCALFileHandler:
             for i in range(min(30, len(df))):
                 row = [str(v).lower() for v in df.iloc[i] if pd.notna(v)]
                 
-                is_standard_pc = any('sw' in c for c in row) and any('pc' in c or 'capillary' in c for c in row)
+                is_standard_pc = any(kw in c for c in row for kw in ['sw', 'sat', 'saturation']) and any(kw in c for c in row for kw in ['pc', 'capillary', 'psia', 'mpa'])
                 is_centrifuge = any(kw in c for c in row for kw in ['rpm', 'speed', 'g-force']) and any(kw in c for c in row for kw in ['volume', 'produced', 'cc'])
                 
                 if is_standard_pc or is_centrifuge:
@@ -463,8 +463,8 @@ class SCALFileHandler:
                     data.columns = range(len(data.columns))
                     
                     if is_standard_pc:
-                        x_col = next((j for j, h in enumerate(headers) if 'sw' in str(h).lower()), None)
-                        y_col = next((j for j, h in enumerate(headers) if 'pc' in str(h).lower() or 'capillary' in str(h).lower()), None)
+                        x_col = next((j for j, h in enumerate(headers) if any(kw in str(h).lower() for kw in ['sw', 'sat', 'saturation'])), None)
+                        y_col = next((j for j, h in enumerate(headers) if any(kw in str(h).lower() for kw in ['pc', 'capillary', 'psia', 'mpa'])), None)
                         x_name, y_name = 'Sw', 'Pc'
                     else:
                         x_col = next((j for j, h in enumerate(headers) if any(kw in str(h).lower() for kw in ['rpm', 'speed', 'g-force'])), None)
