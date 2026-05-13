@@ -31,37 +31,44 @@ class SCALFileHandler:
     # ------------------------------------------------------------------ #
 
     def read(self):
-        """Read the file without assuming any structure."""
+        """Read the file efficiently by scanning sheet names first."""
 
-        if self.extension in ('.xlsx', '.xlsm'):
-            xl = pd.ExcelFile(self.file_path, engine='openpyxl')
+        if self.extension in ('.xlsx', '.xlsm', '.xls', '.ods'):
+            engine = 'openpyxl' if self.extension in ('.xlsx', '.xlsm') else ('xlrd' if self.extension == '.xls' else 'odf')
+            xl = pd.ExcelFile(self.file_path, engine=engine)
             self.sheet_names = xl.sheet_names
+            
+            # Optimization: Only read sheets that likely contain SCAL data
+            # This prevents "taking too long" on huge multi-sheet workbooks.
+            target_sheets = []
+            all_keywords = []
+            for klist in self.KEYWORDS.values():
+                all_keywords.extend(klist)
+            
             for sheet in self.sheet_names:
+                s_lower = sheet.lower()
+                # Direct match or likely candidate
+                if any(kw in s_lower for kw in ['scal', 'core', 'data', 'test', 'result', 'analysis', 'summary']):
+                    target_sheets.append(sheet)
+                elif any(kw in s_lower for kw in all_keywords):
+                    target_sheets.append(sheet)
+            
+            # If no sheets match, we must read the first few just in case
+            if not target_sheets and self.sheet_names:
+                target_sheets = self.sheet_names[:3] 
+
+            for sheet in target_sheets:
                 self.raw_data[sheet] = pd.read_excel(
                     xl, sheet_name=sheet, header=None
                 )
-
-        elif self.extension == '.xls':
-            # Legacy format — must use xlrd engine
-            xl = pd.ExcelFile(self.file_path, engine='xlrd')
-            self.sheet_names = xl.sheet_names
-            for sheet in self.sheet_names:
-                self.raw_data[sheet] = pd.read_excel(
-                    xl, sheet_name=sheet, header=None
-                )
+            
+            # Update sheet_names to only reflect what we actually read
+            self.sheet_names = list(self.raw_data.keys())
 
         elif self.extension == '.csv':
             df = pd.read_csv(self.file_path, header=None)
             self.sheet_names = ['Sheet1']
             self.raw_data['Sheet1'] = df
-
-        elif self.extension == '.ods':
-            xl = pd.ExcelFile(self.file_path, engine='odf')
-            self.sheet_names = xl.sheet_names
-            for sheet in self.sheet_names:
-                self.raw_data[sheet] = pd.read_excel(
-                    xl, sheet_name=sheet, header=None
-                )
 
         else:
             raise ValueError(f"Unsupported file type: {self.extension}")

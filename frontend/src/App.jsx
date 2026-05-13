@@ -460,7 +460,7 @@ export default function App() {
 
   // ── render ─────────────────────────────────────────────────────────────────
   return (
-    <div className="flex h-screen w-screen bg-[#09090b] text-slate-100 overflow-hidden relative font-sans">
+    <div className="flex h-screen w-screen bg-mesh text-slate-100 overflow-hidden relative font-sans">
 
       <AdminLoginModal
         isOpen={showAdminGate}
@@ -531,7 +531,7 @@ export default function App() {
       <div className="flex-1 flex flex-col min-w-0 h-full">
 
         {/* Header */}
-        <header className="bg-[#050505] border-b border-slate-800/60 px-3 md:px-4 py-3 flex items-center justify-between shrink-0 gap-2">
+        <header className="bg-black/40 backdrop-blur-md border-b border-white/5 px-3 md:px-4 py-3 flex items-center justify-between shrink-0 gap-2 z-10">
           <div className="flex items-center gap-2 min-w-0">
             <button
               onClick={() => setSidebarOpen(p => !p)}

@@ -11,8 +11,21 @@
   --prc-blue:       #1e1b4b;
   --prc-bg:         #030303;
   --prc-surface:    #0a0a0c;
-  --prc-glass:      rgba(255, 255, 255, 0.018);
-  --prc-border:     rgba(255, 255, 255, 0.055);
+  --prc-glass:      rgba(255, 255, 255, 0.015);
+  --prc-border:     rgba(255, 255, 255, 0.045);
+  --prc-accent:     #fbbf24;
+  --prc-mesh-1:     rgba(217, 119, 6, 0.15);
+  --prc-mesh-2:     rgba(30, 27, 75, 0.25);
+}
+
+.bg-mesh {
+  background-color: var(--prc-bg);
+  background-image: 
+    radial-gradient(at 0% 0%, var(--prc-mesh-1) 0px, transparent 50%),
+    radial-gradient(at 100% 0%, var(--prc-mesh-2) 0px, transparent 50%),
+    radial-gradient(at 100% 100%, var(--prc-mesh-1) 0px, transparent 50%),
+    radial-gradient(at 0% 100%, var(--prc-mesh-2) 0px, transparent 50%);
+  background-attachment: fixed;
 }
 
 
@@ -162,10 +175,10 @@ body {
   --prc-gold-glow-strong:rgba(255, 215, 0,  0.28);
   --prc-border-gold:     rgba(255, 215, 0,  0.18);
   --prc-border-focus:    rgba(255, 215, 0,  0.45);
-  --prc-shadow-depth:    0 24px 64px rgba(0, 0, 0, 0.72), 0 4px 16px rgba(0, 0, 0, 0.48);
-  --prc-transition-fast: 0.18s cubic-bezier(0.16, 1, 0.3, 1);
-  --prc-transition-med:  0.32s cubic-bezier(0.16, 1, 0.3, 1);
-  --prc-transition-slow: 0.52s cubic-bezier(0.16, 1, 0.3, 1);
+  --prc-shadow-depth:    0 24px 64px rgba(0, 0, 0, 0.8), 0 4px 16px rgba(0, 0, 0, 0.5);
+  --prc-transition-fast: 0.15s cubic-bezier(0.16, 1, 0.3, 1);
+  --prc-transition-med:  0.25s cubic-bezier(0.16, 1, 0.3, 1);
+  --prc-transition-slow: 0.45s cubic-bezier(0.16, 1, 0.3, 1);
 }
 
 /* ── Sidebar Glassmorphism ───────────────────────────────────────────────── */
