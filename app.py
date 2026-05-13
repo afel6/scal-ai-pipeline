@@ -1899,17 +1899,20 @@ async def handle(
     email    = user_email.lower().strip() if user_email else None
     engineer = (engineer_name or "PRC Engineering Staff").strip()
 
+    valid_files = [f for f in files if getattr(f, "filename", "")]
+    
     f_parts = []
-    _tls.last_file_name = files[0].filename if files else None
+    _tls.last_file_name = valid_files[0].filename if valid_files else None
     _tls.current_session_id = sid
-    for file in files:
+    for file in valid_files:
         b = await file.read()
-        f_parts.append((b, file.content_type, file.filename))
+        if b:
+            f_parts.append((b, file.content_type, file.filename))
 
     kb_ctx = await KnowledgeBase.search_async(message, sid=sid, email=email)
     
     # Save user message WITH filename if applicable
-    fname = files[0].filename if files else None
+    fname = valid_files[0].filename if valid_files else None
     await async_db("INSERT INTO m (sid,role,text,ts,user_email,fname) VALUES (?,?,?,?,?,?)",
        (sid, "user", message, time.time(), email, fname))
 

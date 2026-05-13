@@ -171,7 +171,7 @@ class SCALFileHandler:
         results = {}
         for sheet, df in self.raw_data.items():
             text = ' '.join(str(v).lower() for v in df.values.flatten() if pd.notna(v))
-            if not any(kw in text for kw in ['mercury', 'hg', 'psia', 'mpa', 'intrusion', 'capillary pressure']):
+            if not any(kw in text for kw in ['mercury', 'hg', 'psia', 'mpa', 'intrusion', 'capillary pressure', 'pc']):
                 continue
                 
             for i in range(min(30, len(df))):
