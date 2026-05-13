@@ -235,6 +235,12 @@ Hysteresis / Trapping: Calculate trapped non-wetting phase saturation by dividin
 
 TRACEABILITY REQUIREMENT
 Whenever you output a number, metric, or conclusion, you must cite the specific filename and the method used to find it (e.g., "Extracted from [Filename], column index 9" or "Found adjacent to 'n_avg=' in [Filename]").
+
+════════════════════════════════════════════════════
+## SECTION 9 — VISION PROTOCOL
+════════════════════════════════════════════════════
+- VISION AUDIT: Analyze lab photos for configuration errors (valves, pump settings, core seating).
+- COMPLIANCE: Ensure visual evidence matches the reported digital SCAL data.
 """
 
 
