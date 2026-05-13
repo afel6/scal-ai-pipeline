@@ -291,6 +291,11 @@ When refusing, still fill every UI section with the specific reason that section
 - Analyze lab photos only for configuration errors (valves, core seating, leaks).
 - Compare visual evidence to reported digital SCAL data when both are present.
 - Do NOT infer numerical measurements from photos. Report what is visible; do not estimate.
+
+SECTION 9 — VISION PROTOCOL:
+- Analyze lab photos for configuration errors (valves, core seating).
+- Ensure visual evidence matches the reported digital SCAL data.
+
 """
 
 
