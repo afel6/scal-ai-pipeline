@@ -260,6 +260,19 @@ _HVIEL_TOOLS = [
     {
         "function_declarations": [
             {
+                "name": "calculate_petrophysics_properties",
+                "description": "Calculation Engine for SCAL Tracks A, B, D, E. Does NOT generate charts, only returns calculated JSON data.",
+                "parameters": {
+                    "type": "OBJECT",
+                    "properties": {
+                        "script": {"type": "STRING", "description": "One of: petrophysics.py, micp_skill.py, centrifuge_skill.py"},
+                        "model":  {"type": "STRING", "description": "For petrophysics.py: regress_archie_m_a, regress_archie_n, rqi_fzi. For centrifuge: pc_only, full, hassler_brunner"},
+                        "params": {"type": "OBJECT", "description": "Parameters required for the selected script and model."}
+                    },
+                    "required": ["script", "params"]
+                }
+            },
+            {
                 "name": "execute_python_simulation",
                 "description": "Universal petrophysical simulation (Brooks-Corey, 1D Kr curves, 2D IMPES reservoir waterflood). Returns JSON for PRC plotting.",
                 "parameters": {
@@ -446,6 +459,22 @@ class PRCChatAssistant:
                 yield (True, f"__SIMULATION_START__\n{out}\n__SIMULATION_END__")
             else:
                 yield (True, out or "")
+            return
+        elif name == "calculate_petrophysics_properties":
+            script = args.get("script")
+            model = args.get("model")
+            p = dict(args.get("params") or {})
+            if script == "petrophysics.py":
+                subdir = "scalskills/scripts"
+                args_list = [model, _json.dumps(p)]
+            else:
+                subdir = ""
+                p["mode"] = model
+                args_list = [_json.dumps(p)]
+                
+            res = SkillsEngine.run_skill("petroleum", subdir, script, args_list)
+            result = res.get("stdout") or res.get("stderr") or res.get("error", "")
+            yield (True, result)
             return
         elif name == "generate_mermaid_diagram":
             result = f"__MERMAID_START__\n{args.get('content','')}\n__MERMAID_END__"

@@ -81,7 +81,7 @@ class SCALFileHandler:
 
     KEYWORDS = {
         'MICP': [
-            'mercury', 'hg', 'intrusion', 'psia', 'threshold pressure',
+            'mercury', 'hg', 'intrusion', 'psia', 'mpa', 'threshold pressure',
             'drainage', 'imbibition', 'cumulative intrusion',
             'capillary pressure', 'pore throat', 'washburn'
         ],
@@ -91,11 +91,12 @@ class SCALFileHandler:
         ],
         'PC': [
             'porous plate', 'centrifuge', 'brine saturation',
-            'oil-brine', 'air-brine', 'reservoir conditions'
+            'oil-brine', 'air-brine', 'reservoir conditions',
+            'rpm', 'speed', 'produced volume', 'cc', 'g-force'
         ],
         'FRF': [
             'formation factor', 'formation resistivity factor',
-            'cementation', 'tortuosity', '100% brine', 'archie'
+            'cementation', 'tortuosity', '100% brine', 'archie', 'rt', 'ro'
         ],
         'RI': [
             'resistivity index', 'saturation exponent',
@@ -166,64 +167,52 @@ class SCALFileHandler:
 
     # ---- MICP ---- #
     def _extract_micp(self):
-        """
-        Libyan PRC format:
-          - Sheets named 'Sample 1', 'Sample 2', etc.
-          - Data starts at row 21 (0-indexed)
-          - col 1 = Pressure (psia)
-          - col 2 = Cycle (D / I)
-          - col 7 = Cumulative Hg saturation (% pore volume)
-          - Row 10 col with first float > 1 = threshold pressure
-        """
-        sample_sheets = [
-            s for s in self.sheet_names
-            if 'sample' in s.lower() and s.lower() != 'all data'
-        ]
+        results = {}
+        for sheet, df in self.raw_data.items():
+            text = ' '.join(str(v).lower() for v in df.values.flatten() if pd.notna(v))
+            if not any(kw in text for kw in ['mercury', 'hg', 'psia', 'mpa', 'intrusion', 'capillary pressure']):
+                continue
+                
+            for i in range(min(30, len(df))):
+                row = [str(v).lower() for v in df.iloc[i] if pd.notna(v)]
+                if any(kw in c for c in row for kw in ['press', 'psia', 'mpa']) and any(kw in c for c in row for kw in ['sat', 'hg', 'pv', 'intrusion']):
+                    headers = list(df.iloc[i])
+                    data = df.iloc[i+1:].reset_index(drop=True)
+                    data.columns = range(len(data.columns))
+                    press_col = next((j for j, h in enumerate(headers) if any(kw in str(h).lower() for kw in ['press', 'psia', 'mpa'])), None)
+                    sat_col = next((j for j, h in enumerate(headers) if any(kw in str(h).lower() for kw in ['sat', 'hg', 'pv', 'intrusion'])), None)
+                    
+                    if press_col is not None and sat_col is not None:
+                        cycle_col = next((j for j, h in enumerate(headers) if 'cycle' in str(h).lower()), None)
+                        
+                        drainage = {'pressure': [], 'sat_pv': []}
+                        imbibition = {'pressure': [], 'sat_pv': []}
+                        
+                        for idx, r in data.iterrows():
+                            p = pd.to_numeric(r[press_col], errors='coerce')
+                            s = pd.to_numeric(r[sat_col], errors='coerce')
+                            if pd.isna(p) or pd.isna(s):
+                                continue
+                                
+                            if s in (0.0, 1.0, 100.0, 30.0):
+                                continue
+                                
+                            c = str(r[cycle_col]).strip().upper() if cycle_col is not None else 'D'
+                            if c.startswith('I'):
+                                imbibition['pressure'].append(round(float(p), 3))
+                                imbibition['sat_pv'].append(round(float(s), 4))
+                            else:
+                                drainage['pressure'].append(round(float(p), 3))
+                                drainage['sat_pv'].append(round(float(s), 4))
+                                
+                        if drainage['pressure'] or imbibition['pressure']:
+                            results[sheet] = {
+                                'drainage': drainage,
+                                'imbibition': imbibition
+                            }
+                    break
 
-        samples = {}
-        for sheet in sample_sheets:
-            df = self.raw_data[sheet]
-
-            # Threshold pressure
-            thresh = None
-            try:
-                row10 = df.iloc[10].tolist()
-                for v in row10:
-                    if isinstance(v, (int, float)) and not pd.isna(v) and v > 1:
-                        thresh = round(float(v), 2)
-                        break
-            except Exception:
-                pass
-
-            drainage = {'pressure': [], 'sat_pv': []}
-            imbibition = {'pressure': [], 'sat_pv': []}
-
-            for i in range(21, len(df)):
-                try:
-                    row = df.iloc[i].tolist()
-                    pressure = row[1]
-                    cycle    = row[2]
-                    sat_pv   = row[7]
-
-                    if not isinstance(pressure, (int, float)) or pd.isna(pressure):
-                        continue
-                    if cycle not in ('D', 'I'):
-                        continue
-                    sat_pv = float(sat_pv) if isinstance(sat_pv, (int, float)) and not pd.isna(sat_pv) else 0.0
-
-                    target = drainage if cycle == 'D' else imbibition
-                    target['pressure'].append(round(float(pressure), 3))
-                    target['sat_pv'].append(round(sat_pv, 4))
-                except Exception:
-                    continue
-
-            samples[sheet] = {
-                'threshold_pressure': thresh,
-                'drainage':           drainage,
-                'imbibition':         imbibition,
-            }
-
-        self.extracted = {'type': 'MICP', 'samples': samples}
+        self.extracted = {'type': 'MICP', 'samples': results}
 
     # ---- RELATIVE PERMEABILITY ---- #
     def _extract_kr(self):
@@ -235,7 +224,6 @@ class SCALFileHandler:
         kr_keywords = {'sw', 'sg', 'kro', 'krw', 'krg', 'kr'}
 
         for sheet, df in self.raw_data.items():
-            # Find header row (first row where ≥2 kr keywords appear)
             header_row = None
             for i in range(min(30, len(df))):
                 row_text = [str(v).lower().strip() for v in df.iloc[i] if pd.notna(v)]
@@ -249,27 +237,42 @@ class SCALFileHandler:
 
             headers = [str(v).lower().strip() for v in df.iloc[header_row]]
             data_df = df.iloc[header_row + 1:].reset_index(drop=True)
-            data_df.columns = headers
+            data_df.columns = range(len(headers))
 
-            # Map columns
             col_map = {}
-            for col in data_df.columns:
-                if 'sw' in col:   col_map['Sw']  = col
-                if 'sg' in col:   col_map['Sg']  = col
-                if 'kro' in col:  col_map['K Kro'] = col
-                if 'kro' in col:  col_map['Kro'] = col
-                if 'krw' in col:  col_map['Krw'] = col
-                if 'krg' in col:  col_map['Krg'] = col
+            for j, col in enumerate(headers):
+                if 'sw' in col:   col_map['Sw']  = j
+                elif 'sg' in col:   col_map['Sg']  = j
+                elif 'kro' in col:  col_map['Kro'] = j
+                elif 'krw' in col:  col_map['Krw'] = j
+                elif 'krg' in col:  col_map['Krg'] = j
 
-            # Extract numeric rows
-            extracted_cols = {}
-            for name, col in col_map.items():
-                vals = pd.to_numeric(data_df[col], errors='coerce').dropna().tolist()
-                if vals:
-                    extracted_cols[name] = vals
+            indep_var = 'Sw' if 'Sw' in col_map else ('Sg' if 'Sg' in col_map else None)
+            extracted_cols = {k: [] for k in col_map.keys()}
+            
+            for idx, r in data_df.iterrows():
+                if indep_var:
+                    x = pd.to_numeric(r[col_map[indep_var]], errors='coerce')
+                    if pd.isna(x):
+                        continue
+                
+                has_dep = False
+                for k, j in col_map.items():
+                    if k != indep_var:
+                        v = pd.to_numeric(r[j], errors='coerce')
+                        if not pd.isna(v):
+                            has_dep = True
+                            
+                if not has_dep and len(col_map) > 1:
+                    continue
+                    
+                for k, j in col_map.items():
+                    v = pd.to_numeric(r[j], errors='coerce')
+                    extracted_cols[k].append(v if not pd.isna(v) else None)
 
-            if extracted_cols:
-                results[sheet] = extracted_cols
+            clean_extracted = {k: v for k, v in extracted_cols.items() if any(val is not None for val in v)}
+            if clean_extracted:
+                results[sheet] = clean_extracted
 
         self.extracted = {'type': 'KR', 'samples': results}
 
@@ -278,21 +281,28 @@ class SCALFileHandler:
         results = {}
         for sheet, df in self.raw_data.items():
             text = ' '.join(str(v).lower() for v in df.values.flatten() if pd.notna(v))
-            if 'formation factor' not in text and 'frf' not in text:
+            if 'formation factor' not in text and 'frf' not in text and 'rt' not in text and 'ro' not in text and 'archie' not in text:
                 continue
-            # Find porosity and F columns
             for i in range(min(30, len(df))):
                 row = [str(v).lower() for v in df.iloc[i] if pd.notna(v)]
-                if any('poros' in c for c in row) and any('factor' in c or ' f' == c for c in row):
+                if any('poros' in c for c in row) and any('factor' in c or ' f' == c or 'rt' in c or 'ro' in c for c in row):
                     headers = list(df.iloc[i])
                     data = df.iloc[i+1:].reset_index(drop=True)
                     data.columns = range(len(data.columns))
                     phi_col = next((j for j, h in enumerate(headers) if 'poros' in str(h).lower()), None)
-                    f_col   = next((j for j, h in enumerate(headers) if 'factor' in str(h).lower() or str(h).strip().upper() == 'F'), None)
+                    f_col   = next((j for j, h in enumerate(headers) if 'factor' in str(h).lower() or str(h).strip().upper() == 'F' or 'rt' in str(h).lower() or 'ro' in str(h).lower()), None)
                     if phi_col is not None and f_col is not None:
-                        phi = pd.to_numeric(data.iloc[:, phi_col], errors='coerce').dropna().tolist()
-                        f   = pd.to_numeric(data.iloc[:, f_col],   errors='coerce').dropna().tolist()
-                        results[sheet] = {'porosity': phi, 'F': f}
+                        phi_vals, f_vals = [], []
+                        for idx, r in data.iterrows():
+                            p = pd.to_numeric(r[phi_col], errors='coerce')
+                            f = pd.to_numeric(r[f_col], errors='coerce')
+                            if not pd.isna(p) and not pd.isna(f):
+                                if p > 30 or p < 2:
+                                    continue
+                                phi_vals.append(p)
+                                f_vals.append(f)
+                        if phi_vals:
+                            results[sheet] = {'porosity': phi_vals, 'F': f_vals}
                     break
         self.extracted = {'type': 'FRF', 'samples': results}
 
@@ -301,20 +311,28 @@ class SCALFileHandler:
         results = {}
         for sheet, df in self.raw_data.items():
             text = ' '.join(str(v).lower() for v in df.values.flatten() if pd.notna(v))
-            if 'resistivity index' not in text and ' ri ' not in text:
+            if 'resistivity index' not in text and ' ri ' not in text and 'rt' not in text and 'ro' not in text:
                 continue
             for i in range(min(30, len(df))):
                 row = [str(v).lower() for v in df.iloc[i] if pd.notna(v)]
-                if any('sw' in c for c in row) and any('ri' in c or 'index' in c for c in row):
+                if any('sw' in c for c in row) and any('ri' in c or 'index' in c or 'rt' in c or 'ro' in c for c in row):
                     headers = list(df.iloc[i])
                     data = df.iloc[i+1:].reset_index(drop=True)
                     data.columns = range(len(data.columns))
                     sw_col = next((j for j, h in enumerate(headers) if 'sw' in str(h).lower()), None)
-                    ri_col = next((j for j, h in enumerate(headers) if 'ri' in str(h).lower() or 'index' in str(h).lower()), None)
+                    ri_col = next((j for j, h in enumerate(headers) if 'ri' in str(h).lower() or 'index' in str(h).lower() or 'rt' in str(h).lower() or 'ro' in str(h).lower()), None)
                     if sw_col is not None and ri_col is not None:
-                        sw = pd.to_numeric(data.iloc[:, sw_col], errors='coerce').dropna().tolist()
-                        ri = pd.to_numeric(data.iloc[:, ri_col], errors='coerce').dropna().tolist()
-                        results[sheet] = {'Sw': sw, 'RI': ri}
+                        sw_vals, ri_vals = [], []
+                        for idx, r in data.iterrows():
+                            s = pd.to_numeric(r[sw_col], errors='coerce')
+                            ri = pd.to_numeric(r[ri_col], errors='coerce')
+                            if not pd.isna(s) and not pd.isna(ri):
+                                if s in (0.0, 1.0, 100.0, 30.0):
+                                    continue
+                                sw_vals.append(s)
+                                ri_vals.append(ri)
+                        if sw_vals:
+                            results[sheet] = {'Sw': sw_vals, 'RI': ri_vals}
                     break
         self.extracted = {'type': 'RI', 'samples': results}
 
@@ -334,9 +352,15 @@ class SCALFileHandler:
                     t2_col  = next((j for j, h in enumerate(headers) if 't2' in str(h).lower()), None)
                     amp_col = next((j for j, h in enumerate(headers) if any(k in str(h).lower() for k in ['amp', 'incr', 'pore', 'volume'])), None)
                     if t2_col is not None and amp_col is not None:
-                        t2  = pd.to_numeric(data.iloc[:, t2_col],  errors='coerce').dropna().tolist()
-                        amp = pd.to_numeric(data.iloc[:, amp_col], errors='coerce').dropna().tolist()
-                        results[sheet] = {'T2': t2, 'amplitude': amp}
+                        t2_vals, amp_vals = [], []
+                        for idx, r in data.iterrows():
+                            t = pd.to_numeric(r[t2_col], errors='coerce')
+                            a = pd.to_numeric(r[amp_col], errors='coerce')
+                            if not pd.isna(t) and not pd.isna(a):
+                                t2_vals.append(t)
+                                amp_vals.append(a)
+                        if t2_vals:
+                            results[sheet] = {'T2': t2_vals, 'amplitude': amp_vals}
                     break
         self.extracted = {'type': 'NMR', 'samples': results}
 
@@ -383,14 +407,27 @@ class SCALFileHandler:
                     phi_col   = next((j for j, h in enumerate(headers) if 'poros' in str(h).lower()), None)
                     perm_col  = next((j for j, h in enumerate(headers) if 'perm'  in str(h).lower()), None)
                     depth_col = next((j for j, h in enumerate(headers) if 'depth' in str(h).lower()), None)
+                    
+                    phi_vals, perm_vals, depth_vals = [], [], []
+                    for idx, r in data.iterrows():
+                        phi = pd.to_numeric(r[phi_col], errors='coerce') if phi_col is not None else None
+                        perm = pd.to_numeric(r[perm_col], errors='coerce') if perm_col is not None else None
+                        depth = pd.to_numeric(r[depth_col], errors='coerce') if depth_col is not None else None
+                        
+                        if pd.isna(phi) or pd.isna(perm):
+                            continue
+                            
+                        phi_vals.append(phi)
+                        perm_vals.append(perm)
+                        if depth_col is not None:
+                            depth_vals.append(depth)
+                            
                     sheet_data = {}
-                    if phi_col  is not None:
-                        sheet_data['porosity']     = pd.to_numeric(data.iloc[:, phi_col],  errors='coerce').dropna().tolist()
-                    if perm_col is not None:
-                        sheet_data['permeability'] = pd.to_numeric(data.iloc[:, perm_col], errors='coerce').dropna().tolist()
-                    if depth_col is not None:
-                        sheet_data['depth']        = pd.to_numeric(data.iloc[:, depth_col],errors='coerce').dropna().tolist()
-                    if sheet_data:
+                    if phi_vals:
+                        sheet_data['porosity'] = phi_vals
+                        sheet_data['permeability'] = perm_vals
+                        if depth_col is not None:
+                            sheet_data['depth'] = depth_vals
                         results[sheet] = sheet_data
                     break
         self.extracted = {'type': 'RCAL', 'samples': results}
@@ -420,16 +457,35 @@ class SCALFileHandler:
         for sheet, df in self.raw_data.items():
             for i in range(min(30, len(df))):
                 row = [str(v).lower() for v in df.iloc[i] if pd.notna(v)]
-                if any('sw' in c for c in row) and any('pc' in c or 'capillary' in c for c in row):
+                
+                is_standard_pc = any('sw' in c for c in row) and any('pc' in c or 'capillary' in c for c in row)
+                is_centrifuge = any(kw in c for c in row for kw in ['rpm', 'speed', 'g-force']) and any(kw in c for c in row for kw in ['volume', 'produced', 'cc'])
+                
+                if is_standard_pc or is_centrifuge:
                     headers = list(df.iloc[i])
                     data = df.iloc[i+1:].reset_index(drop=True)
                     data.columns = range(len(data.columns))
-                    sw_col = next((j for j, h in enumerate(headers) if 'sw' in str(h).lower()), None)
-                    pc_col = next((j for j, h in enumerate(headers) if 'pc' in str(h).lower() or 'capillary' in str(h).lower()), None)
-                    if sw_col is not None and pc_col is not None:
-                        sw = pd.to_numeric(data.iloc[:, sw_col], errors='coerce').dropna().tolist()
-                        pc = pd.to_numeric(data.iloc[:, pc_col], errors='coerce').dropna().tolist()
-                        results[sheet] = {'Sw': sw, 'Pc': pc}
+                    
+                    if is_standard_pc:
+                        x_col = next((j for j, h in enumerate(headers) if 'sw' in str(h).lower()), None)
+                        y_col = next((j for j, h in enumerate(headers) if 'pc' in str(h).lower() or 'capillary' in str(h).lower()), None)
+                        x_name, y_name = 'Sw', 'Pc'
+                    else:
+                        x_col = next((j for j, h in enumerate(headers) if any(kw in str(h).lower() for kw in ['rpm', 'speed', 'g-force'])), None)
+                        y_col = next((j for j, h in enumerate(headers) if any(kw in str(h).lower() for kw in ['volume', 'produced', 'cc'])), None)
+                        x_name, y_name = 'RPM', 'Produced Volume'
+                        
+                    if x_col is not None and y_col is not None:
+                        x_vals = []
+                        y_vals = []
+                        for idx, r in data.iterrows():
+                            x = pd.to_numeric(r[x_col], errors='coerce')
+                            y = pd.to_numeric(r[y_col], errors='coerce')
+                            if not pd.isna(x) and not pd.isna(y):
+                                x_vals.append(x)
+                                y_vals.append(y)
+                        if x_vals:
+                            results[sheet] = {x_name: x_vals, y_name: y_vals}
                     break
         self.extracted = {'type': 'PC', 'samples': results}
 
