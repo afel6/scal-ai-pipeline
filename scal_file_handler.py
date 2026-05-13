@@ -418,9 +418,6 @@ class SCALFileHandler:
     def _extract_pc(self):
         results = {}
         for sheet, df in self.raw_data.items():
-            text = ' '.join(str(v).lower() for v in df.values.flatten() if pd.notna(v))
-            if 'porous plate' not in text and 'centrifuge' not in text:
-                continue
             for i in range(min(30, len(df))):
                 row = [str(v).lower() for v in df.iloc[i] if pd.notna(v)]
                 if any('sw' in c for c in row) and any('pc' in c or 'capillary' in c for c in row):

@@ -206,41 +206,29 @@ def _key_healthy(key: str) -> bool:
 
 # ── SYSTEM PROMPT ─────────────────────────────────────────────────────────────
 SYSTEM_PROMPT = """SYSTEM PROMPT: UNIVERSAL SCAL DATA EXTRACTION & ANALYSIS AGENT
-Role: You are an expert Petrophysics and Special Core Analysis (SCAL) AI Agent. Your primary function is to extract, analyze, and summarize raw laboratory data (RI, MICP, Centrifuge PC) from user-uploaded files (Excel, CSV).
+Role: You are a Senior Petrophysical Specialist at the Petroleum Research Center (PRC). Your primary job is to explain the engineering significance of SCAL data, provide executive summaries, and answer questions clearly and professionally. Drawing curves and plotting data is a *secondary* capability.
 
-CRITICAL MANDATE: THE ZERO HALLUCINATION POLICY
-You must NEVER use default, textbook, or standard industry values (e.g., Archie $n=2.0$, $m=2.0$).
-Every calculated metric, pressure value, and saturation percentage must be extracted directly from the user's files.
-If a requested metric is not found, you must explicitly state: "This metric is not available in the provided dataset." Do not approximate or invent values.
+THE "TWO-BRAIN" APPROACH:
+1. THE ANALYST (Default): When asked to summarize, explain, or interpret, read the [NEW UPLOAD INVENTORY] and [EXTRACTED DATA]. Write a narrative response. Deduce the primary objective from the Test Type (e.g., MICP implies Pore Throat/Capillary Pressure analysis; RI implies Archie's 'n'). Do not say "I cannot answer the objective."
+2. THE PLOTTER: Only generate JSON configuration for charts if the user explicitly asks to "plot", "draw", or "graph" the data.
 
-UNIVERSAL DATA INGESTION PROTOCOL (AVOIDING PANDAS CRASHES)
-Standard SCAL files contain human-readable formatting that crashes standard pandas.read_csv() calls (e.g., top-level metadata, multi-row headers, duplicate column names). When using Python to read these files, you MUST use the following workflow:
+CRITICAL MANDATE: DATA SOURCE ATTRIBUTION (THE "WHERE" RULE)
+1. CITE EVERY NUMBER: You MUST NOT state any numerical value (Porosity, Permeability, Archie 'n', Threshold Pressure) without a citation.
+   - Format: "[Filename: ..., Sheet: ..., Cell/Label: ...]"
+2. DATA SOURCE BLOCK: Every response MUST begin with a brief "Data Context" block confirming which file(s) you are currently using.
 
-Line-by-Line Scan: First, read the file as a raw text file line-by-line to extract top-level metadata (Sample Number, Porosity, Permeability, Pore Volume, Threshold Pressure).
-Dynamic Table Location: Identify the exact row number where the actual numerical data table begins by looking for unit strings (e.g., (psia), RPM).
-Safe Pandas Loading: Use pd.read_csv(skiprows=N) where N is the number of metadata/messy header rows.
-Bypass Duplicate Headers: If a file has duplicate column names (e.g., "pressure" listed three times), extract your data using integer column positions (df.iloc[:, index]) rather than column names.
+CRITICAL MANDATE: STRICT SESSION ISOLATION (ZERO CROSS-TALK)
+1. NEW UPLOAD = ONLY TRUTH: If you see [PRIMARY CONTEXT: NEW UPLOADED DATA], you MUST act as if no other files exist in the universe unless the user explicitly asks to "compare".
+2. DO NOT MENTION PAST FILES: Never say "I don't have data from the previous file." Just answer the question using the current file.
 
-MODULE 1: RESISTIVITY INDEX (RI) DATA EXTRACTION
-Target: Find the Archie saturation exponent ('n').
-Individual Samples: Dynamically search the file for variations of the exponent label (e.g., n_avg=, n=, Saturation Exponent, Archie n). Extract the numerical value immediately adjacent to this label.
-Composite Plots: Search the composite file for regression data. Locate the slope (e.g., SLOPE =, y = mx + c). The composite saturation exponent 'n' is the absolute value of this slope.
-Quality Check: Extract the statistical correlation coefficient (e.g., $R$ or $R^2$) to evaluate compliance with Archie's Law. Do not invent terms like "Physics Health Score."
+THE "ZERO HALLUCINATION" MANDATE
+- No Default Values: Never use textbook values (e.g., 26.5 for IFT unless it's actually in the file).
+- No Approximations: If a value isn't there, state "Data missing in current session."
 
-MODULE 2: CAPILLARY PRESSURE (MICP & CENTRIFUGE) EXTRACTION
-MICP Table Parsing: The data starts below the (psia) row. Use column indices to extract Pressure (usually index 1) and Mercury Saturation % of Pore Volume (usually index 9).
-Centrifuge Table Parsing: The data starts below the table curve input row. Extract RPM (index 0), Capillary Pressure (index 1 - the first pressure column), and Water/Oil Saturations (indices 3 and 4).
-Entry/Threshold Pressure ($P_e$): Read the explicit Threshold Pressure from the metadata. If missing, find the exact pressure point on the drainage curve where non-wetting saturation first significantly increases above 0%.
-Hysteresis / Trapping: Calculate trapped non-wetting phase saturation by dividing the final residual non-wetting saturation at the end of imbibition by the maximum saturation achieved at the end of drainage.
-
-TRACEABILITY REQUIREMENT
-Whenever you output a number, metric, or conclusion, you must cite the specific filename and the method used to find it (e.g., "Extracted from [Filename], column index 9" or "Found adjacent to 'n_avg=' in [Filename]").
-
-════════════════════════════════════════════════════
-## SECTION 9 — VISION PROTOCOL
-════════════════════════════════════════════════════
-- VISION AUDIT: Analyze lab photos for configuration errors (valves, pump settings, core seating).
-- COMPLIANCE: Ensure visual evidence matches the reported digital SCAL data.
+MODULE-SPECIFIC RULES:
+- MICP: Extract Pc (psia) and Hg Saturation (% PV). Identify Threshold Pressure (Pe).
+- KR: Identify endpoints (Swi, Sor) and max Kr values.
+- ARCHIE: Extract Resistivity Index (RI) or Formation Factor (FF) data.
 """
 
 
@@ -1046,11 +1034,13 @@ class PRCChatAssistant:
         if sid:
             try:
                 # Use a lightweight query to see what files were mentioned in this session
-                rows = db("SELECT DISTINCT fname FROM m WHERE sid=? AND fname IS NOT NULL", (sid,))
+                # We also want to know which one was the VERY LAST one mentioned before this turn
+                rows = db("SELECT DISTINCT fname FROM m WHERE sid=? AND fname IS NOT NULL ORDER BY ts DESC", (sid,))
                 if rows:
                     fnames = [r[0] for r in rows]
-                    session_files_ctx = f"[SESSION FILE REGISTRY]: This session contains: {', '.join(fnames)}.\n"
-                    session_files_ctx += "If the user asks about these files and data is missing below, use tools or RAG.\n\n"
+                    session_files_ctx = f"[SESSION FILE REGISTRY]: This session contains data for: {', '.join(fnames)}.\n"
+                    session_files_ctx += f"[LATEST SESSION FILE]: {fnames[0]}\n"
+                    session_files_ctx += "Reference the [LATEST SESSION FILE] if the user asks generic questions.\n\n"
             except: pass
 
         extracted_context = ""
@@ -1101,18 +1091,29 @@ class PRCChatAssistant:
                     try: os.unlink(tmp_path)
                     except: pass
 
+        # Strict Context Shielding
+        is_new_upload = len(f_parts) > 0
+        wants_comparison = any(word in msg.lower() for word in ["compare", "previous", "last", "difference", "both", "past"])
+        
+        if is_new_upload and not wants_comparison:
+            kb_context = "" # WIPE old memory to prevent mixing!
+            session_files_ctx = "" # Wipe registry to prevent mentioning old files
+
         enriched = ""
         if session_files_ctx:
             enriched += session_files_ctx
             
         if kb_context or extracted_context:
             if extracted_context:
-                enriched += f"{extracted_context}\n\n"
+                enriched += f"### [PRIMARY CONTEXT: NEW UPLOADED DATA] ###\n{extracted_context}\n"
+                enriched += "NOTE: The data above is the ONLY relevant data for the current request. Ignore past files.\n\n"
+            
             if kb_context:
-                enriched += f"[PRC TECHNICAL LIBRARY & RAG CONTEXT]:\n{kb_context}\n\n"
+                enriched += f"### [SECONDARY CONTEXT: PAST SESSION MEMORY (RAG)] ###\n{kb_context}\n"
+                enriched += "NOTE: Use this ONLY if the user explicitly requested a comparison.\n\n"
             
             enriched += f"[USER REQUEST]: {msg}\n"
-            enriched += "\n[MANDATORY SYSTEM OVERRIDE: YOU MUST USE THE DATA PROVIDED ABOVE. DO NOT ASK FOR RE-UPLOADS IF DATA IS PRESENT. EVERY NUMBER MUST HAVE A CITATION [Sheet: ..., Cell: ...].]"
+            enriched += "\n[MANDATORY SYSTEM OVERRIDE: YOU MUST USE THE DATA PROVIDED ABOVE. EVERY NUMBER MUST HAVE A CITATION [Filename, Sheet: ..., Cell: ...]. IF THE NEW UPLOAD CONFLICTS WITH PAST CONTEXT, THE NEW UPLOAD IS THE TRUTH.]"
         else:
             enriched = msg
 
@@ -1423,7 +1424,7 @@ class KnowledgeBase:
         return [(source, " ".join(words[i : i + KnowledgeBase.CHUNK_SIZE])) for i in range(0, len(words), KnowledgeBase.CHUNK_SIZE)]
 
     @staticmethod
-    def ingest_transactional(name: str, chunks: list[tuple[str, str]]) -> None:
+    def ingest_transactional(name: str, chunks: list[tuple[str, str]], sid: str = None, email: str = None) -> None:
         """Embed and store chunks. Expects already chunked data."""
         if not chunks: return
         chunk_data = []
@@ -1436,18 +1437,20 @@ class KnowledgeBase:
         with _get_conn() as (conn, ph):
             cur = conn.cursor()
             try:
-                cur.execute(f"SELECT id FROM kb WHERE source = {ph}", (name,))
+                # Cleanup existing chunks for this specific file in THIS session
+                cur.execute(f"SELECT id FROM kb WHERE source = {ph} AND (sid = {ph} OR sid IS NULL)", (name, sid))
                 old_ids = [r[0] for r in cur.fetchall()]
                 if old_ids:
                     in_ph = ",".join([ph] * len(old_ids))
                     cur.execute(f"DELETE FROM kb_vectors WHERE chunk_id IN ({in_ph})", tuple(old_ids))
-                cur.execute(f"DELETE FROM kb WHERE source = {ph}", (name,))
+                cur.execute(f"DELETE FROM kb WHERE source = {ph} AND (sid = {ph} OR sid IS NULL)", (name, sid))
+                
                 for source, chunk, vec in chunk_data:
                     if ph == "?":
-                        cur.execute("INSERT INTO kb (source, chunk) VALUES (?,?)", (source, chunk))
+                        cur.execute("INSERT INTO kb (sid, user_email, source, chunk) VALUES (?,?,?,?)", (sid, email, source, chunk))
                         chunk_id = cur.lastrowid
                     else:
-                        cur.execute("INSERT INTO kb (source, chunk) VALUES (%s,%s) RETURNING id", (source, chunk))
+                        cur.execute("INSERT INTO kb (sid, user_email, source, chunk) VALUES (%s,%s,%s,%s) RETURNING id", (sid, email, source, chunk))
                         chunk_id = cur.fetchone()[0]
                     if vec is not None:
                         cur.execute(f"INSERT INTO kb_vectors (chunk_id, embedding) VALUES ({ph},{ph})", (chunk_id, vec.tobytes()))
@@ -1457,7 +1460,7 @@ class KnowledgeBase:
                 conn.rollback()
 
     @staticmethod
-    def search(query: str, top_k: int = 15) -> str:
+    def search(query: str, top_k: int = 15, sid: str = None, email: str = None) -> str:
         try:
             if not query or len(query.strip()) < 8: return ""
             clean_q   = query[:1000].strip()
@@ -1466,12 +1469,17 @@ class KnowledgeBase:
             generic = {"hello", "hi", "thanks", "thank", "ok", "yes", "no", "bye", "who are you"}
             if clean_q.lower() in generic: return ""
 
-            vec_count = db("SELECT COUNT(*) FROM kb_vectors")[0][0]
-            if 0 < vec_count < 2000:
+            # Filter KB chunks by session ID (Strict Isolation)
+            with _get_conn() as (conn, ph):
+                cur = conn.cursor()
+                cur.execute(f"SELECT COUNT(*) FROM kb_vectors JOIN kb ON kb.id = kb_vectors.chunk_id WHERE kb.sid = {ph}", (sid,))
+                vec_count = cur.fetchone()[0]
+                
+            if 0 < vec_count < 5000:
                 q_vec = KnowledgeBase._embed(clean_q)
                 if q_vec is not None:
-                    # Optimized: Only pull vectors if we have a query vector
-                    rows = db("SELECT kb.source, kb.chunk, kb_vectors.embedding FROM kb_vectors JOIN kb ON kb.id = kb_vectors.chunk_id")
+                    # Optimized: Only pull vectors for THIS session
+                    rows = db(f"SELECT kb.source, kb.chunk, kb_vectors.embedding FROM kb_vectors JOIN kb ON kb.id = kb_vectors.chunk_id WHERE kb.sid = {ph}", (sid,))
                     if rows:
                         sources = [r[0] for r in rows]; texts = [r[1] for r in rows]; raw_vecs = [r[2] for r in rows]
                         vecs = np.stack([np.frombuffer(bytes(v) if isinstance(v, memoryview) else v, dtype=np.float32) for v in raw_vecs])
@@ -1482,20 +1490,40 @@ class KnowledgeBase:
                         parts = [f"[From: {sources[i]}]\n{texts[i]}" for i in top_idx if scores[i] > 0.40]
                         if parts: return "\n\n".join(parts)
 
-            # Fallback to keyword search if vector search found nothing or too few vectors
+            # Fallback to keyword search with session filtering
             words = [w.lower() for w in re.split(r"\W+", clean_q) if len(w) > 3][:5]
             if not words: return ""
-            conditions = " OR ".join(["LOWER(chunk) LIKE ?"] * len(words))
-            results = db(f"SELECT source, chunk FROM kb WHERE {conditions} LIMIT 10", tuple(f"%{w}%" for w in words))
-            return "\n\n".join(f"[From: {s}]\n{ch}" for s, ch in results)
+            
+            with _get_conn() as (conn, ph):
+                clause = " OR ".join([f"LOWER(chunk) LIKE {ph}" for _ in words])
+                params = tuple([f"%{w}%" for w in words] + [sid])
+                rows = db(f"SELECT source, chunk FROM kb WHERE sid = {ph} AND ({clause}) LIMIT {top_k}", params)
+                return "\n\n".join([f"[From: {r[0]}]\n{r[1]}" for r in rows])
         except Exception as e:
             _logger.error(f"[RAG] Search error: {e}")
             return ""
 
     @staticmethod
-    async def search_async(query: str, top_k: int = 15) -> str:
+    async def search_async(query: str, top_k: int = 15, sid: str = None, email: str = None) -> str:
         loop = asyncio.get_event_loop()
-        return await loop.run_in_executor(None, KnowledgeBase.search, query, top_k)
+        return await loop.run_in_executor(None, KnowledgeBase.search, query, top_k, sid, email)
+
+    @staticmethod
+    def delete_session_data(sid: str) -> None:
+        """Clear all KB chunks associated with a session."""
+        with _get_conn() as (conn, ph):
+            cur = conn.cursor()
+            try:
+                cur.execute(f"SELECT id FROM kb WHERE sid = {ph}", (sid,))
+                chunk_ids = [r[0] for r in cur.fetchall()]
+                if chunk_ids:
+                    in_ph = ",".join([ph] * len(chunk_ids))
+                    cur.execute(f"DELETE FROM kb_vectors WHERE chunk_id IN ({in_ph})", tuple(chunk_ids))
+                cur.execute(f"DELETE FROM kb WHERE sid = {ph}", (sid,))
+                conn.commit()
+            except Exception as e:
+                _logger.error(f"[RAG] Session cleanup failed: {e}")
+                conn.rollback()
 
 
 # ── APP SETUP ─────────────────────────────────────────────────────────────────
@@ -1503,7 +1531,7 @@ def init_db() -> None:
     base_stmts = [
         "CREATE TABLE IF NOT EXISTS m (id INTEGER PRIMARY KEY AUTOINCREMENT, sid TEXT, role TEXT, text TEXT, url TEXT, ts REAL, user_email TEXT, fname TEXT)",
         "CREATE TABLE IF NOT EXISTS sessions (sid TEXT PRIMARY KEY, title TEXT NOT NULL DEFAULT 'New Study', user_email TEXT, created_at REAL, updated_at REAL)",
-        "CREATE TABLE IF NOT EXISTS kb (id INTEGER PRIMARY KEY AUTOINCREMENT, source TEXT, chunk TEXT)",
+        "CREATE TABLE IF NOT EXISTS kb (id INTEGER PRIMARY KEY AUTOINCREMENT, sid TEXT, user_email TEXT, source TEXT, chunk TEXT)",
         "CREATE TABLE IF NOT EXISTS kb_vectors (id INTEGER PRIMARY KEY AUTOINCREMENT, chunk_id INTEGER UNIQUE, embedding BLOB)",
         "CREATE TABLE IF NOT EXISTS users (id INTEGER PRIMARY KEY AUTOINCREMENT, email TEXT UNIQUE, name TEXT, created_at REAL)",
         "CREATE TABLE IF NOT EXISTS feedback (id INTEGER PRIMARY KEY AUTOINCREMENT, user_email TEXT, bug_report TEXT, ts REAL)",
@@ -1519,6 +1547,11 @@ def init_db() -> None:
         except Exception: pass
     try: db("CREATE INDEX IF NOT EXISTS idx_query_hash ON response_cache(query_hash)")
     except Exception: pass
+    
+    # Migrations for KB isolation
+    for col in ["sid", "user_email"]:
+        try: db(f"ALTER TABLE kb ADD COLUMN {col} TEXT")
+        except Exception: pass
     # Backfill existing m rows → sessions table (migration for pre-existing installs)
     try:
         if _PG_AVAILABLE:
@@ -1697,6 +1730,7 @@ def delete_session(sid: str, email: str = None):
     db("DELETE FROM m WHERE sid=?", (sid,))
     db("DELETE FROM sessions WHERE sid=?", (sid,))
     db("DELETE FROM physics_audits WHERE session_id=?", (sid,))
+    KnowledgeBase.delete_session_data(sid)
     return {"status": "ok"}
 
 @app.get("/api/chat/stream")
@@ -1721,7 +1755,7 @@ async def chat_stream(
         def _sync_worker():
             try:
                 # 1. Search Knowledge Base
-                kb_ctx = KnowledgeBase.search(message)
+                kb_ctx = KnowledgeBase.search(message, sid=sid, email=email)
                 
                 # 2. Log User Message
                 db("INSERT INTO m (sid,role,text,ts,user_email) VALUES (?,?,?,?,?)", 
@@ -1783,7 +1817,7 @@ async def chat_stream(
                     yield f"data: {_json.dumps(chunk)}\n\n"
                     break
                 elif chunk["type"] == "__PENDING_KB__":
-                    background_tasks.add_task(KnowledgeBase.ingest_transactional, "SCAL Upload", chunk["data"])
+                    background_tasks.add_task(KnowledgeBase.ingest_transactional, "SCAL Upload", chunk["data"], sid=sid, email=email)
                     continue
                 
                 yield f"data: {_json.dumps(chunk)}\n\n"
@@ -1821,9 +1855,12 @@ async def handle(
         b = await file.read()
         f_parts.append((b, file.content_type, file.filename))
 
-    kb_ctx = await KnowledgeBase.search_async(message)
-    await async_db("INSERT INTO m (sid,role,text,ts,user_email) VALUES (?,?,?,?,?)",
-       (sid, "user", message, time.time(), email))
+    kb_ctx = await KnowledgeBase.search_async(message, sid=sid, email=email)
+    
+    # Save user message WITH filename if applicable
+    fname = files[0].filename if files else None
+    await async_db("INSERT INTO m (sid,role,text,ts,user_email,fname) VALUES (?,?,?,?,?,?)",
+       (sid, "user", message, time.time(), email, fname))
 
     # Upsert into sessions table
     if _PG_AVAILABLE:
@@ -1897,7 +1934,7 @@ async def handle(
        (sid, "model", resp, time.time(), email))
     
     if assistant._pending_kb:
-        background_tasks.add_task(KnowledgeBase.ingest_transactional, "SCAL Upload", list(assistant._pending_kb))
+        background_tasks.add_task(KnowledgeBase.ingest_transactional, "SCAL Upload", list(assistant._pending_kb), sid=sid, email=email)
 
     return {"status": "success", "session_id": sid, "reply": resp}
 
