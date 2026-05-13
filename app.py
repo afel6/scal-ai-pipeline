@@ -229,6 +229,10 @@ MODULE-SPECIFIC RULES:
 - MICP: Extract Pc (psia) and Hg Saturation (% PV). Identify Threshold Pressure (Pe).
 - KR: Identify endpoints (Swi, Sor) and max Kr values.
 - ARCHIE: Extract Resistivity Index (RI) or Formation Factor (FF) data.
+
+SECTION 9 — VISION PROTOCOL:
+- Analyze lab photos for configuration errors (valves, core seating).
+- Ensure visual evidence matches the reported digital SCAL data.
 """
 
 
