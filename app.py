@@ -1234,13 +1234,9 @@ class PRCChatAssistant:
 
                     return (
 
-                        f"\n\nMICP analysis complete. {summary}\n\n"
-
                         f"__PRC_PLOT__\n{_json.dumps(plot_pc, ensure_ascii=False)}\n\n"
 
                         f"__PRC_PLOT__\n{_json.dumps(plot_psd, ensure_ascii=False)}\n\n"
-
-                        f"{audit['footer']}\n\n"
 
                     )
 
@@ -1328,13 +1324,7 @@ class PRCChatAssistant:
 
                     return (
 
-                        f"\n\nResistivity Index analysis complete. "
-
-                        f"Archie saturation exponent n = {n_arch:.4f}\n\n"
-
                         f"__PRC_PLOT__\n{_json.dumps(plot_ri, ensure_ascii=False)}\n\n"
-
-                        f"{audit['footer']}\n\n"
 
                     )
 
@@ -1420,13 +1410,7 @@ class PRCChatAssistant:
 
                     return (
 
-                        f"\n\nFormation Factor analysis complete. "
-
-                        f"Archie cementation m = {m_arch:.4f}, tortuosity a = {a_arch:.4f}\n\n"
-
                         f"__PRC_PLOT__\n{_json.dumps(plot_ff, ensure_ascii=False)}\n\n"
-
-                        f"{audit['footer']}\n\n"
 
                     )
 
@@ -1483,10 +1467,6 @@ class PRCChatAssistant:
                     }
 
                     return (
-
-                        f"\n\nLeverett J-Function computed. "
-
-                        f"k = {k_md} mD, Ï† = {phi_val:.3f}, ÏƒcosÎ¸ = {ift_ct} mN/m\n\n"
 
                         f"__PRC_PLOT__\n{_json.dumps(plot_j, ensure_ascii=False)}\n\n"
 
@@ -1556,11 +1536,7 @@ class PRCChatAssistant:
 
                                f"Sw range: {float(sw_a.min()):.3f} â€“ {float(sw_a.max()):.3f}")
 
-                    return (f"\n\nCapillary Pressure analysis complete. {summary}\n\n"
-
-                            f"__PRC_PLOT__\n{_json.dumps(plot_pc, ensure_ascii=False)}\n\n"
-
-                            f"{audit['footer']}\n\n")
+                    return (f"__PRC_PLOT__\n{_json.dumps(plot_pc, ensure_ascii=False)}\n\n")
 
 
 
@@ -1632,9 +1608,7 @@ class PRCChatAssistant:
 
                     summary = (f"Pressure range: {float(pres_a.min()):.0f} â€“ {float(pres_a.max()):.0f} psia")
 
-                    return (f"\n\nOverburden compaction analysis complete. {summary}\n\n"
-
-                            f"__PRC_PLOT__\n{_json.dumps(plot_ob, ensure_ascii=False)}\n\n")
+                    return (f"__PRC_PLOT__\n{_json.dumps(plot_ob, ensure_ascii=False)}\n\n")
 
 
 
@@ -1700,11 +1674,7 @@ class PRCChatAssistant:
 
                 return (
 
-                    f"\n\nOptimization complete. Final MSE: {mse:.5f}\n"
-
                     f"__PRC_PLOT__\n{_json.dumps(plot_data)}\n\n"
-
-                    f"{audit['footer']}\n\n"
 
                 )
 
@@ -1712,7 +1682,7 @@ class PRCChatAssistant:
 
                 if isinstance(result, str) and "__SIMULATION_START__" in result:
 
-                    return f"\n\nSimulation complete.\n{result}\n\n"
+                    return f"{result}\n\n"
 
                 if tr and tr.get("mode") == "1d" and tr.get("status") == "success":
 
@@ -1768,11 +1738,7 @@ class PRCChatAssistant:
 
                     return (
 
-                        f"\n\nSimulation complete.\n"
-
                         f"__PRC_PLOT__\n{_json.dumps(plot_data)}\n\n"
-
-                        f"{audit['footer']}\n\n"
 
                     )
 
@@ -1780,7 +1746,7 @@ class PRCChatAssistant:
 
             pass
 
-        return f"\n\nTool `{name}` executed successfully.\n\n"
+        return ""
 
 
 
@@ -1792,7 +1758,7 @@ class PRCChatAssistant:
 
             if name == "generate_mermaid_diagram":
 
-                return {"status": "diagram_rendered", "note": "Mermaid diagram embedded in chat for the user."}
+                return {"status": "diagram_rendered", "note": "Mermaid diagram generated. Summarize briefly without mentioning tool execution."}
 
             
 
@@ -1838,7 +1804,7 @@ class PRCChatAssistant:
 
                             "parameters": {k: pm.get(k) for k in ("swr","snr","krw_max","kro_max","nw","no") if pm.get(k) is not None},
 
-                            "note": "Kr curves computed. PRC_PLOT rendered in chat. Proceed with physics interpretation.",
+                            "note": "Kr curves computed. Proceed with physics interpretation without mentioning tool execution.",
 
                         }
 
@@ -1850,7 +1816,7 @@ class PRCChatAssistant:
 
                             "model": "2D IMPES",
 
-                            "note": "2D IMPES simulation executed successfully. The output heatmap is rendered in chat. State that the simulation is complete and summarize the results.",
+                            "note": "2D IMPES simulation complete. Analyze the results directly without mentioning that a tool was executed.",
 
                         }
 
@@ -1866,7 +1832,7 @@ class PRCChatAssistant:
 
                         "final_mse": data.get("final_mse"),
 
-                        "note": "History matching complete. PRC_PLOT rendered. Proceed with Phase 3 certification.",
+                        "note": "History matching complete. Proceed with Phase 3 certification without mentioning tool execution.",
 
                     }
 
@@ -1874,17 +1840,17 @@ class PRCChatAssistant:
 
                 _MODEL_NOTES = {
 
-                    "micp":          "Pc curve and Pore Size Distribution rendered. Proceed with Entry Pressure, Threshold Pressure, and Pore Throat Sorting analysis.",
+                    "micp":          "Pc curve and Pore Size Distribution computed. Proceed with Entry Pressure, Threshold Pressure, and Pore Throat Sorting analysis without mentioning tool execution.",
 
-                    "ri":            "Resistivity Index log-log plot rendered. State Archie n, compare to PRC library range nâˆˆ[1.5,3.0], interpret wettability effect.",
+                    "ri":            "Resistivity Index log-log plot computed. State Archie n, compare to PRC library range nâˆˆ[1.5,3.0], interpret wettability effect without mentioning tool execution.",
 
-                    "ff":            "Formation Factor log-log plot rendered. State Archie m and a, interpret cementation and pore geometry.",
+                    "ff":            "Formation Factor log-log plot computed. State Archie m and a, interpret cementation and pore geometry without mentioning tool execution.",
 
-                    "jfunction":     "Leverett J-Function rendered. Assess J-curve shape for capillary continuity and capillary entry threshold.",
+                    "jfunction":     "Leverett J-Function computed. Assess J-curve shape for capillary continuity and capillary entry threshold without mentioning tool execution.",
 
-                    "pc_centrifuge": "Capillary Pressure curve rendered. Interpret drainage vs imbibition, entry pressure, and residual saturation.",
+                    "pc_centrifuge": "Capillary Pressure curve computed. Interpret drainage vs imbibition, entry pressure, and residual saturation without mentioning tool execution.",
 
-                    "overburden":    "Overburden compaction dual-axis plot rendered. Quantify porosity loss and permeability reduction per 1000 psia confining stress.",
+                    "overburden":    "Overburden compaction dual-axis plot computed. Quantify porosity loss and permeability reduction per 1000 psia confining stress without mentioning tool execution.",
 
                 }
 
@@ -1910,7 +1876,7 @@ class PRCChatAssistant:
 
                         "fit_params": data.get("params", {}),
 
-                        "note": "Curve fit complete. PRC_PLOT rendered. Proceed with wettability and endpoint interpretation.",
+                        "note": "Curve fit complete. Proceed with wettability and endpoint interpretation without mentioning tool execution.",
 
                     }
 
@@ -1920,7 +1886,7 @@ class PRCChatAssistant:
 
                     "status": "success",
 
-                    "note": "PRC Audit Ledger retrieved. Analyze the quality trend and alert the engineer of recurring violations."
+                    "note": "PRC Audit Ledger retrieved. Analyze the quality trend and alert the engineer of recurring violations without mentioning tool execution."
 
                 }
 
@@ -1932,7 +1898,7 @@ class PRCChatAssistant:
 
                     "well_name": args.get("well_name", "Unknown Well"),
 
-                    "note": "Executive report generated and link provided in chat."
+                    "note": "Executive report generated. Do not mention tool execution."
 
                 }
 
@@ -1942,7 +1908,7 @@ class PRCChatAssistant:
 
             pass
 
-        return {"status": "executed", "tool": name, "note": "Tool executed. Results and visualization rendered in chat."}
+        return {"status": "executed", "tool": name, "note": "Action complete. Provide the final engineering interpretation directly without stating that a tool was executed."}
 
 
 
