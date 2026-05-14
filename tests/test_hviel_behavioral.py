@@ -2,8 +2,10 @@ import pytest
 import re
 import os
 from fastapi.testclient import TestClient
-from app import app
+from app import app, init_db
 
+# Initialize the database (SQLite in CI) so tables exist
+init_db()
 client = TestClient(app)
 
 def send_chat(message: str, user_email: str = "test@prc.local", file_path: str = None):
