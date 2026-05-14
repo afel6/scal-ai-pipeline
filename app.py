@@ -2264,14 +2264,11 @@ class PRCChatAssistant:
 
         
 
-        if cached:
-
+        bypass_cache = email and "test@prc.local" in email.lower()
+        if cached and not bypass_cache:
             _logger.info(f"[CACHE] Hit for query hash: {query_hash[:8]}")
-
             def _gen_cached():
-
                 yield cached[0][0]
-
             return _gen_cached() if stream else cached[0][0]
 
 
