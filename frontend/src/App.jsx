@@ -491,7 +491,7 @@ export default function App() {
           <div className="flex items-center gap-2">
             <button
               onClick={handleNewChat}
-              className="flex items-center gap-1 text-xs text-yellow-400 hover:text-yellow-300 border border-yellow-800/50 hover:border-yellow-600 px-2 py-1.5 rounded-none transition-all"
+              className="flex items-center gap-1 text-xs text-yellow-400 hover:text-yellow-300 border border-yellow-800/50 hover:border-yellow-600 px-2 py-1.5 rounded-xl transition-all"
             >
               <PlusCircle className="w-3.5 h-3.5" /> New
             </button>
@@ -517,7 +517,7 @@ export default function App() {
         <div className="p-4 border-t border-slate-800/60 shrink-0">
           <button
             onClick={() => setShowFeedback(true)}
-            className="w-full mb-2 flex items-center justify-center gap-1.5 text-[10px] text-slate-500 hover:text-yellow-400 border border-slate-800 hover:border-yellow-800 py-1.5 rounded-none transition-all uppercase tracking-widest font-mono"
+            className="w-full mb-2 flex items-center justify-center gap-1.5 text-[10px] text-slate-500 hover:text-yellow-400 border border-slate-800 hover:border-yellow-800 py-1.5 rounded-xl transition-all uppercase tracking-widest font-mono"
           >
             <span>Report Bug</span>
           </button>
@@ -535,7 +535,7 @@ export default function App() {
           <div className="flex items-center gap-2 min-w-0">
             <button
               onClick={() => setSidebarOpen(p => !p)}
-              className="p-2 hover:bg-slate-800 rounded-none transition-colors text-slate-400 hover:text-white shrink-0"
+              className="p-2 hover:bg-slate-800 rounded-xl transition-colors text-slate-400 hover:text-white shrink-0"
             >
               <Menu className="w-5 h-5" />
             </button>
@@ -558,7 +558,7 @@ export default function App() {
               <button
                 onClick={handleDownloadReport}
                 disabled={reportLoading || !sessionId}
-                className="flex items-center gap-1.5 px-2.5 py-1.5 bg-yellow-950/20 hover:bg-yellow-900/40 border border-yellow-800/40 hover:border-yellow-600/60 text-yellow-500 hover:text-yellow-300 rounded-none transition-all text-[10px] font-black uppercase tracking-widest disabled:opacity-30 disabled:cursor-not-allowed"
+                className="flex items-center gap-1.5 px-2.5 py-1.5 bg-yellow-950/20 hover:bg-yellow-900/40 border border-yellow-800/40 hover:border-yellow-600/60 text-yellow-500 hover:text-yellow-300 rounded-xl transition-all text-[10px] font-black uppercase tracking-widest disabled:opacity-30 disabled:cursor-not-allowed"
                 title="Download Executive SCAL Report (.docx)"
               >
                 {reportLoading
@@ -576,7 +576,7 @@ export default function App() {
                     setAdminPinError(false);
                   }
                 }}
-                className="p-2 hover:bg-yellow-950/30 text-slate-500 hover:text-amber-400 rounded-none transition-colors"
+                className="p-2 hover:bg-yellow-950/30 text-slate-500 hover:text-amber-400 rounded-xl transition-colors"
                 title="Admin Dashboard"
               >
                 <BarChart3 className="w-4 h-4" />
@@ -587,7 +587,7 @@ export default function App() {
                   localStorage.removeItem('prc_session_id');
                   setUser(null);
                 }}
-                className="p-2 hover:bg-yellow-950/30 text-slate-500 hover:text-yellow-400 rounded-none transition-colors"
+                className="p-2 hover:bg-yellow-950/30 text-slate-500 hover:text-yellow-400 rounded-xl transition-colors"
               >
                 <LogOut className="w-4 h-4" />
               </button>
@@ -615,7 +615,7 @@ export default function App() {
                   style={{ animationDelay: `${Math.min(idx, 5) * 0.1}s` }}
                 >
                   {/* Avatar */}
-                  <div className={`w-8 h-8 rounded-none flex items-center justify-center shrink-0 border
+                  <div className={`w-8 h-8 rounded-xl flex items-center justify-center shrink-0 border
                     ${msg.role === 'user'
                       ? 'bg-slate-800 border-slate-700'
                       : 'bg-yellow-950 border-yellow-800/50'}`}
@@ -626,13 +626,13 @@ export default function App() {
                   </div>
 
                   {/* Bubble */}
-                  <div className={`px-4 py-3 rounded-none text-sm md:text-[15px] leading-relaxed shadow-lg max-w-[85%]
+                  <div className={`px-4 py-3 rounded-xl text-sm md:text-[15px] leading-relaxed shadow-lg max-w-[85%]
                     ${msg.role === 'user'
-                      ? 'bg-slate-800 text-slate-200 rounded-none-none border border-slate-700/50'
-                      : 'bg-[#111116] text-yellow-50/90 rounded-none-none border border-yellow-900/30'}`}
+                      ? 'bg-slate-800 text-slate-200 rounded-2xl rounded-tr-sm border border-slate-700/50'
+                      : 'bg-[#111116] text-yellow-50/90 rounded-2xl rounded-tr-sm border border-yellow-900/30'}`}
                   >
                     {msg.fileName && (
-                      <div className="flex items-center gap-2 mb-2 bg-black/40 p-2 rounded-none border border-slate-700/50 w-fit">
+                      <div className="flex items-center gap-2 mb-2 bg-black/40 p-2 rounded-xl border border-slate-700/50 w-fit">
                         <FileText className="w-3.5 h-3.5 text-yellow-400 shrink-0" />
                         <span className="text-xs font-mono text-yellow-300 truncate max-w-[160px]">
                           {msg.fileName}
@@ -647,7 +647,7 @@ export default function App() {
                       <button
                         onClick={() => handleSend({ text: 'generate document', files: [] })}
                         disabled={loading}
-                        className="mt-3 w-full bg-gradient-to-r from-yellow-900/40 to-amber-900/30 hover:from-yellow-800/50 hover:to-amber-800/40 border border-yellow-600/50 text-yellow-200 font-bold tracking-widest uppercase px-4 py-3 rounded-none flex items-center justify-center gap-2 text-xs transition-all active:scale-95 disabled:opacity-30 shadow-lg"
+                        className="mt-3 w-full bg-gradient-to-r from-yellow-900/40 to-amber-900/30 hover:from-yellow-800/50 hover:to-amber-800/40 border border-yellow-600/50 text-yellow-200 font-bold tracking-widest uppercase px-4 py-3 rounded-xl flex items-center justify-center gap-2 text-xs transition-all active:scale-95 disabled:opacity-30 shadow-lg"
                       >
                         {loading ? <Loader className="w-4 h-4 animate-spin" /> : <FileText className="w-4 h-4" />}
                         {loading ? 'GENERATING REPORT' : 'EXPORT AS PRC REPORT'}
@@ -658,7 +658,7 @@ export default function App() {
                     {msg.download_url && (
                       <button
                         onClick={() => window.open(`${API_URL}${msg.download_url}`, '_self')}
-                        className="mt-4 w-full bg-yellow-600/20 hover:bg-yellow-600/40 border border-yellow-500/50 text-yellow-300 font-bold tracking-widest uppercase px-4 py-3 rounded-none flex items-center justify-center gap-2 text-xs transition-all active:scale-95"
+                        className="mt-4 w-full bg-yellow-600/20 hover:bg-yellow-600/40 border border-yellow-500/50 text-yellow-300 font-bold tracking-widest uppercase px-4 py-3 rounded-xl flex items-center justify-center gap-2 text-xs transition-all active:scale-95"
                       >
                         <Download className="w-4 h-4" />
                         Download {
@@ -675,7 +675,7 @@ export default function App() {
                       <button
                         onClick={() => handleSend({ text: 'generate document', files: [] })}
                         disabled={loading}
-                        className="mt-3 w-full bg-yellow-600/20 hover:bg-yellow-600/35 border border-yellow-500/50 text-yellow-300 font-bold tracking-widest uppercase text-[10px] py-2.5 rounded-none flex items-center justify-center gap-2 transition-all active:scale-95 disabled:opacity-30"
+                        className="mt-3 w-full bg-yellow-600/20 hover:bg-yellow-600/35 border border-yellow-500/50 text-yellow-300 font-bold tracking-widest uppercase text-[10px] py-2.5 rounded-xl flex items-center justify-center gap-2 transition-all active:scale-95 disabled:opacity-30"
                       >
                         {loading ? <Loader className="w-3 h-3 animate-spin" /> : <Download className="w-3 h-3" />}
                         {loading ? 'GENERATING' : 'GENERATE CHART / DOCUMENT'}
@@ -687,7 +687,7 @@ export default function App() {
                       <button
                         onClick={() => handleSend(lastMessage)}
                         disabled={loading || retryCooldown > 0}
-                        className="mt-3 w-full bg-amber-950/20 hover:bg-amber-950/40 border border-amber-600/50 text-amber-300 font-bold tracking-widest uppercase text-[10px] py-2.5 rounded-none flex items-center justify-center gap-2 transition-all active:scale-95 disabled:opacity-30"
+                        className="mt-3 w-full bg-amber-950/20 hover:bg-amber-950/40 border border-amber-600/50 text-amber-300 font-bold tracking-widest uppercase text-[10px] py-2.5 rounded-xl flex items-center justify-center gap-2 transition-all active:scale-95 disabled:opacity-30"
                       >
                         {loading
                           ? <Loader className="w-3 h-3 animate-spin" />
@@ -704,10 +704,10 @@ export default function App() {
               {/* Typing indicator */}
               {loading && (
                 <div className="flex gap-3 max-w-5xl w-full">
-                  <div className="w-8 h-8 rounded-none flex items-center justify-center shrink-0 bg-yellow-950 border border-yellow-800/50">
+                  <div className="w-8 h-8 rounded-xl flex items-center justify-center shrink-0 bg-yellow-950 border border-yellow-800/50">
                     <Bot className="w-3.5 h-3.5 text-yellow-400" />
                   </div>
-                  <div className="bg-[#111116] px-4 py-3 rounded-none border border-yellow-900/30 flex flex-col gap-2 min-w-[200px]">
+                  <div className="bg-[#111116] px-4 py-3 rounded-xl border border-yellow-900/30 flex flex-col gap-2 min-w-[200px]">
                     {simProgress ? (
                       <>
                         <div className="flex justify-between items-center gap-4">
@@ -721,7 +721,7 @@ export default function App() {
                             {simProgress.val !== null ? `${Math.round(simProgress.val)}%` : '...'}
                           </span>
                         </div>
-                        <div className="w-full h-1 bg-slate-800 rounded-none overflow-hidden">
+                        <div className="w-full h-1 bg-slate-800 rounded-xl overflow-hidden">
                           <div 
                             className="h-full bg-yellow-500 transition-all duration-300 ease-out shadow-[0_0_8px_rgba(234,179,8,0.5)]"
                             style={{ width: `${simProgress.val ?? 0}%` }}
@@ -746,9 +746,9 @@ export default function App() {
                         )}
                         <div className="flex items-center gap-2">
                           <div className="flex items-center gap-1.5">
-                            <span className="w-1.5 h-1.5 bg-yellow-500 rounded-none animate-bounce" />
-                            <span className="w-1.5 h-1.5 bg-yellow-500 rounded-none animate-bounce [animation-delay:0.2s]" />
-                            <span className="w-1.5 h-1.5 bg-yellow-500 rounded-none animate-bounce [animation-delay:0.4s]" />
+                            <span className="w-1.5 h-1.5 bg-yellow-500 rounded-xl animate-bounce" />
+                            <span className="w-1.5 h-1.5 bg-yellow-500 rounded-xl animate-bounce [animation-delay:0.2s]" />
+                            <span className="w-1.5 h-1.5 bg-yellow-500 rounded-xl animate-bounce [animation-delay:0.4s]" />
                           </div>
                           {!cognitiveMode && <span className="text-[10px] text-slate-500 font-mono uppercase tracking-widest ml-2 italic">Thinking...</span>}
                         </div>
@@ -767,7 +767,7 @@ export default function App() {
               {files.length > 0 && (
                 <div className="mb-3 flex flex-wrap gap-2 animate-in fade-in slide-in-from-bottom-2">
                   {files.map((f, i) => (
-                    <div key={i} className="flex items-center gap-2 bg-yellow-950/20 border border-yellow-500/20 rounded-none px-3 py-2 shadow-inner">
+                    <div key={i} className="flex items-center gap-2 bg-yellow-950/20 border border-yellow-500/20 rounded-xl px-3 py-2 shadow-inner">
                       <FileText className="w-3.5 h-3.5 text-yellow-500 shrink-0" />
                       <span className="text-[10px] font-black text-yellow-200 uppercase tracking-wider truncate max-w-[140px]">
                         {f.name}
@@ -784,9 +784,9 @@ export default function App() {
               )}
 
               <div className="relative group">
-                <div className="absolute -inset-1 bg-gradient-to-r from-yellow-500/20 to-amber-500/20 rounded-none-[22px] blur opacity-0 group-focus-within:opacity-100 transition-opacity duration-500" />
-                <div className="relative flex items-center gap-3 bg-[#0a0a0c] border border-slate-800 rounded-none p-2 pl-4 group-focus-within:border-yellow-500/50 transition-all shadow-2xl">
-                  <label className="cursor-pointer shrink-0 p-2 hover:bg-yellow-500/10 rounded-none transition-all hover:scale-110 active:scale-95 group">
+                <div className="absolute -inset-1 bg-gradient-to-r from-yellow-500/20 to-amber-500/20 rounded-[22px] blur opacity-0 group-focus-within:opacity-100 transition-opacity duration-500" />
+                <div className="relative flex items-center gap-3 bg-[#0a0a0c] border border-slate-800 rounded-xl p-2 pl-4 group-focus-within:border-yellow-500/50 transition-all shadow-2xl">
+                  <label className="cursor-pointer shrink-0 p-2 hover:bg-yellow-500/10 rounded-xl transition-all hover:scale-110 active:scale-95 group">
                     <input
                       type="file"
                       multiple
@@ -827,7 +827,7 @@ export default function App() {
                   <button
                     onClick={() => handleSend()}
                     disabled={loading || serverStatus === 'waking' || (!input.trim() && files.length === 0)}
-                    className={`bg-gradient-to-br from-yellow-500 to-amber-600 hover:from-yellow-400 hover:to-amber-500 text-black p-3 rounded-none shrink-0 transition-all active:scale-90 disabled:opacity-30 disabled:cursor-not-allowed shadow-[0_0_20px_rgba(234,179,8,0.3)] hover:shadow-[0_0_25px_rgba(234,179,8,0.5)] ${loading ? 'btn-streaming' : ''}`}
+                    className={`bg-gradient-to-br from-yellow-500 to-amber-600 hover:from-yellow-400 hover:to-amber-500 text-black p-3 rounded-xl shrink-0 transition-all active:scale-90 disabled:opacity-30 disabled:cursor-not-allowed shadow-[0_0_20px_rgba(234,179,8,0.3)] hover:shadow-[0_0_25px_rgba(234,179,8,0.5)] ${loading ? 'btn-streaming' : ''}`}
                   >
                     {loading ? <Loader className="w-5 h-5 animate-spin" /> : <Send className="w-5 h-5" />}
                   </button>

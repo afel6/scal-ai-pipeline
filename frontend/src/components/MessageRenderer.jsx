@@ -15,7 +15,7 @@ const SectionHeader = ({ text }) => {
   
   return (
     <div className={`flex items-center gap-5 my-12 group animate-fade-in ${isPhase ? 'mt-16 mb-10' : 'my-10'}`}>
-      <div className={`flex-none w-14 h-14 rounded-none flex items-center justify-center transition-all duration-700 shadow-[0_0_30px_rgba(0,0,0,0.5)] border-2 ${
+      <div className={`flex-none w-14 h-14 rounded-xl flex items-center justify-center transition-all duration-700 shadow-[0_0_30px_rgba(0,0,0,0.5)] border-2 ${
         isComplete ? 'bg-green-500/20 text-green-400 border-green-500/50 shadow-green-500/10' : 
         isPhase ? 'bg-blue-600/20 text-blue-400 border-blue-500/50 shadow-blue-500/10' :
         'bg-yellow-500/20 text-yellow-400 border-yellow-500/50 shadow-yellow-500/10'
@@ -31,7 +31,7 @@ const SectionHeader = ({ text }) => {
           <div className={`h-[2px] w-full bg-gradient-to-r ${isPhase ? 'from-blue-500/50' : 'from-slate-200/20'} via-transparent to-transparent`} />
         </div>
         <p className="text-[12px] font-mono text-slate-400 uppercase tracking-[0.3em] mt-2 flex items-center gap-3">
-          <span className={`w-2.5 h-2.5 rounded-none animate-pulse ${isComplete ? 'bg-green-500' : isPhase ? 'bg-blue-500' : 'bg-yellow-500'}`} />
+          <span className={`w-2.5 h-2.5 rounded-xl animate-pulse ${isComplete ? 'bg-green-500' : isPhase ? 'bg-blue-500' : 'bg-yellow-500'}`} />
           {isComplete ? 'PRC SYSTEM CERTIFICATION ACTIVE' : isPhase ? 'STRUCTURAL PIPELINE MILESTONE' : 'ENGINEERING OBSERVATION'}
         </p>
       </div>
@@ -42,11 +42,11 @@ const SectionHeader = ({ text }) => {
 const KnowledgeCard = ({ title, content }) => {
   return (
     <div className="my-8 relative group animate-fade-in">
-      <div className="absolute -inset-0.5 bg-gradient-to-r from-blue-500/20 to-purple-500/20 rounded-none blur opacity-30 group-hover:opacity-100 transition duration-1000"></div>
-      <div className="relative bg-[#0d1117]/80 backdrop-blur-xl border border-white/10 rounded-none overflow-hidden shadow-2xl">
+      <div className="absolute -inset-0.5 bg-gradient-to-r from-blue-500/20 to-purple-500/20 rounded-xl blur opacity-30 group-hover:opacity-100 transition duration-1000"></div>
+      <div className="relative bg-[#0d1117]/80 backdrop-blur-xl border border-white/10 rounded-xl overflow-hidden shadow-2xl">
         <div className="bg-gradient-to-r from-blue-900/40 to-transparent p-4 border-b border-white/5">
           <h4 className="text-sm font-black text-blue-100 uppercase tracking-widest flex items-center gap-3">
-            <div className="w-1.5 h-6 bg-blue-500 rounded-none" />
+            <div className="w-1.5 h-6 bg-blue-500 rounded-xl" />
             {title.replace(/^\d+[\.\s]+/, '')}
           </h4>
         </div>
@@ -60,12 +60,12 @@ const KnowledgeCard = ({ title, content }) => {
 
 const CertificationSeal = () => {
   return (
-    <div className="my-12 p-8 bg-gradient-to-br from-green-500/10 to-emerald-900/10 border-2 border-green-500/30 rounded-none relative overflow-hidden group animate-bounce-in">
+    <div className="my-12 p-8 bg-gradient-to-br from-green-500/10 to-emerald-900/10 border-2 border-green-500/30 rounded-xl relative overflow-hidden group animate-bounce-in">
       <div className="absolute top-0 right-0 p-4 opacity-10 group-hover:opacity-20 transition-opacity">
         <CheckCircle2 className="w-32 h-32 text-green-500 -rotate-12" />
       </div>
       <div className="relative z-10 flex flex-col items-center text-center">
-        <div className="w-20 h-20 bg-green-500/20 rounded-none flex items-center justify-center border-4 border-green-500/40 mb-6 shadow-[0_0_40px_rgba(34,197,94,0.3)]">
+        <div className="w-20 h-20 bg-green-500/20 rounded-xl flex items-center justify-center border-4 border-green-500/40 mb-6 shadow-[0_0_40px_rgba(34,197,94,0.3)]">
           <CheckCircle2 className="w-10 h-10 text-green-400" />
         </div>
         <h2 className="text-2xl font-black text-white uppercase tracking-[0.5em] mb-3">DATA CERTIFIED</h2>
@@ -276,19 +276,19 @@ export function renderMessageContent(text) {
 
   // ── RENDER ───────────────────────────────────────────────────────────────────
   return finalParts.map((part, i) => {
-    if (part.type === 'img') return <img key={i} src={part.src} alt={part.alt} className="w-full rounded-none border border-white/10 my-8 shadow-2xl animate-fade-in" />;
+    if (part.type === 'img') return <img key={i} src={part.src} alt={part.alt} className="w-full rounded-xl border border-white/10 my-8 shadow-2xl animate-fade-in" />;
     if (part.type === 'mermaid') return <Mermaid key={i} content={part.content} />;
     if (part.type === 'plot') return <KrCurvePlot key={i} plotData={part.content} />;
     if (part.type === 'simulation') return <SimulationHeatmap key={i} content={JSON.stringify(part.content)} />;
     if (part.type === 'plot_error') return (
-      <div key={i} className="my-6 px-5 py-4 bg-red-950/20 border border-red-800/40 rounded-none font-mono text-[11px] text-red-400">
+      <div key={i} className="my-6 px-5 py-4 bg-red-950/20 border border-red-800/40 rounded-xl font-mono text-[11px] text-red-400">
         <span className="font-black uppercase tracking-widest mr-2">[PRC Plot — Invalid JSON]</span>
         <span className="text-red-600 opacity-70">Check browser console for details.</span>
         <pre className="mt-2 text-red-700/60 whitespace-pre-wrap break-all text-[10px]">{part.raw}</pre>
       </div>
     );
     if (part.type === 'dashboard') return (
-      <div key={i} className="my-10 rounded-none-[2rem] border border-white/10 bg-[#050508] overflow-hidden shadow-2xl animate-fade-in h-[500px]">
+      <div key={i} className="my-10 rounded-xl-[2rem] border border-white/10 bg-[#050508] overflow-hidden shadow-2xl animate-fade-in h-[500px]">
         <iframe
           srcDoc={`<html><head><script src="https://cdn.jsdelivr.net/npm/chart.js"></script><style>body{background:#050508;color:white;margin:0;padding:20px;font-family:sans-serif;overflow:hidden}canvas{max-height:450px!important}</style></head><body>${part.content}</body></html>`}
           className="w-full h-full border-0"
@@ -302,7 +302,7 @@ export function renderMessageContent(text) {
         key={i}
         href={part.url}
         download
-        className="my-4 inline-flex items-center gap-2.5 px-5 py-3 bg-yellow-950/30 hover:bg-yellow-900/50 border border-yellow-700/50 hover:border-yellow-500 text-yellow-300 font-black text-[11px] uppercase tracking-widest rounded-none transition-all active:scale-95 shadow-lg"
+        className="my-4 inline-flex items-center gap-2.5 px-5 py-3 bg-yellow-950/30 hover:bg-yellow-900/50 border border-yellow-700/50 hover:border-yellow-500 text-yellow-300 font-black text-[11px] uppercase tracking-widest rounded-xl transition-all active:scale-95 shadow-lg"
       >
         <Database className="w-4 h-4 text-yellow-400" />
         Download Executive SCAL Report (.docx)
@@ -319,7 +319,7 @@ export function renderMessageContent(text) {
             key={i}
             href={url}
             download
-            className="my-4 inline-flex items-center gap-2.5 px-5 py-3 bg-yellow-950/30 hover:bg-yellow-900/50 border border-yellow-700/50 hover:border-yellow-500 text-yellow-300 font-black text-[11px] uppercase tracking-widest rounded-none transition-all active:scale-95 shadow-lg"
+            className="my-4 inline-flex items-center gap-2.5 px-5 py-3 bg-yellow-950/30 hover:bg-yellow-900/50 border border-yellow-700/50 hover:border-yellow-500 text-yellow-300 font-black text-[11px] uppercase tracking-widest rounded-xl transition-all active:scale-95 shadow-lg"
           >
             <Database className="w-4 h-4 text-yellow-400" />
             Download Executive SCAL Report (.docx)
