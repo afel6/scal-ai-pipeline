@@ -9,50 +9,20 @@ import SimulationHeatmap from '../SimulationHeatmap';
 import KrCurvePlot from './KrCurvePlot';
 
 const SectionHeader = ({ text }) => {
-  const lowerText = text.toLowerCase();
-  const isComplete = lowerText.includes('complete') || lowerText.includes('done') || lowerText.includes('phase 3') || lowerText.includes('certified');
-  const isPhase = lowerText.includes('phase');
-  
   return (
-    <div className={`flex items-center gap-5 my-12 group animate-fade-in ${isPhase ? 'mt-16 mb-10' : 'my-10'}`}>
-      <div className={`flex-none w-14 h-14 rounded-xl flex items-center justify-center transition-all duration-700 shadow-[0_0_30px_rgba(0,0,0,0.5)] border-2 ${
-        isComplete ? 'bg-green-500/20 text-green-400 border-green-500/50 shadow-green-500/10' : 
-        isPhase ? 'bg-blue-600/20 text-blue-400 border-blue-500/50 shadow-blue-500/10' :
-        'bg-yellow-500/20 text-yellow-400 border-yellow-500/50 shadow-yellow-500/10'
-      } group-hover:scale-110 group-hover:rotate-3 relative overflow-hidden`}>
-        <div className="absolute inset-0 bg-gradient-to-br from-white/10 to-transparent opacity-50" />
-        {isComplete ? <CheckCircle2 className="w-7 h-7 animate-pulse-slow" /> : <Activity className="w-7 h-7" />}
-      </div>
-      <div className="flex-1">
-        <div className="flex items-center gap-5">
-          <h3 className={`font-black uppercase tracking-[0.4em] text-white whitespace-nowrap drop-shadow-md ${isPhase ? 'text-xl text-blue-400' : 'text-base text-slate-100'}`}>
-            {text.replace(/###\s*/, '').replace(/\.$/, '')}
-          </h3>
-          <div className={`h-[2px] w-full bg-gradient-to-r ${isPhase ? 'from-blue-500/50' : 'from-slate-200/20'} via-transparent to-transparent`} />
-        </div>
-        <p className="text-[12px] font-mono text-slate-400 uppercase tracking-[0.3em] mt-2 flex items-center gap-3">
-          <span className={`w-2.5 h-2.5 rounded-xl animate-pulse ${isComplete ? 'bg-green-500' : isPhase ? 'bg-blue-500' : 'bg-yellow-500'}`} />
-          {isComplete ? 'PRC SYSTEM CERTIFICATION ACTIVE' : isPhase ? 'STRUCTURAL PIPELINE MILESTONE' : 'ENGINEERING OBSERVATION'}
-        </p>
-      </div>
-    </div>
+    <h3 className="font-bold text-lg text-blue-400 mt-6 mb-3 flex items-center gap-2">
+      <div className="w-2 h-2 rounded-full bg-blue-500" />
+      {text.replace(/###\s*/, '')}
+    </h3>
   );
 };
 
 const KnowledgeCard = ({ title, content }) => {
   return (
-    <div className="my-8 relative group animate-fade-in">
-      <div className="absolute -inset-0.5 bg-gradient-to-r from-blue-500/20 to-purple-500/20 rounded-xl blur opacity-30 group-hover:opacity-100 transition duration-1000"></div>
-      <div className="relative bg-[#0d1117]/80 backdrop-blur-xl border border-white/10 rounded-xl overflow-hidden shadow-2xl">
-        <div className="bg-gradient-to-r from-blue-900/40 to-transparent p-4 border-b border-white/5">
-          <h4 className="text-sm font-black text-blue-100 uppercase tracking-widest flex items-center gap-3">
-            <div className="w-1.5 h-6 bg-blue-500 rounded-xl" />
-            {title.replace(/^\d+[\.\s]+/, '')}
-          </h4>
-        </div>
-        <div className="p-6 text-slate-300 leading-relaxed font-sans text-[15px] opacity-90">
-          {content}
-        </div>
+    <div className="my-4 p-4 bg-slate-800/50 border border-slate-700 rounded-lg">
+      <h4 className="text-sm font-bold text-slate-200 mb-2">{title.replace(/^\d+[\.\s]+/, '')}</h4>
+      <div className="text-sm text-slate-300 leading-relaxed">
+        {content}
       </div>
     </div>
   );
@@ -60,19 +30,12 @@ const KnowledgeCard = ({ title, content }) => {
 
 const CertificationSeal = () => {
   return (
-    <div className="my-12 p-8 bg-gradient-to-br from-green-500/10 to-emerald-900/10 border-2 border-green-500/30 rounded-xl relative overflow-hidden group animate-bounce-in">
-      <div className="absolute top-0 right-0 p-4 opacity-10 group-hover:opacity-20 transition-opacity">
-        <CheckCircle2 className="w-32 h-32 text-green-500 -rotate-12" />
-      </div>
-      <div className="relative z-10 flex flex-col items-center text-center">
-        <div className="w-20 h-20 bg-green-500/20 rounded-xl flex items-center justify-center border-4 border-green-500/40 mb-6 shadow-[0_0_40px_rgba(34,197,94,0.3)]">
-          <CheckCircle2 className="w-10 h-10 text-green-400" />
-        </div>
-        <h2 className="text-2xl font-black text-white uppercase tracking-[0.5em] mb-3">DATA CERTIFIED</h2>
-        <div className="h-1 w-24 bg-green-500 mb-4" />
-        <p className="text-green-100/60 font-mono text-[11px] uppercase tracking-widest max-w-md leading-relaxed">
-          The SCAL analytical suite has finalized the physical consistency audit. 
-          Results are verified for reservoir simulation deployment.
+    <div className="my-6 p-4 bg-green-500/10 border border-green-500/30 rounded-lg flex items-start gap-4">
+      <CheckCircle2 className="w-6 h-6 text-green-500 mt-0.5 flex-shrink-0" />
+      <div>
+        <h4 className="text-sm font-bold text-green-400 mb-1">Data Certified</h4>
+        <p className="text-xs text-green-300/80">
+          The SCAL analytical suite has finalized the physical consistency audit. Results are verified.
         </p>
       </div>
     </div>
