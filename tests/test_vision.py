@@ -11,13 +11,13 @@ def test_vision_auditor_exists():
     assert os.path.exists(vision_script), "Vision auditor script is missing from hermes_skills_library."
 
 def test_app_vision_protocol_active():
-    """Verify that SECTION 9 (VISION PROTOCOL) is present in the app.py prompt."""
-    app_py_path = "app.py"
-    assert os.path.exists(app_py_path), "app.py not found"
-    with open(app_py_path, 'r', encoding='utf-8') as f:
+    """Verify that SECTION 9 (VISION PROTOCOL) is present in the prompt file."""
+    prompt_path = "prompts/hviel_system_prompt.md"
+    assert os.path.exists(prompt_path), "prompts/hviel_system_prompt.md not found"
+    with open(prompt_path, 'r', encoding='utf-8') as f:
         content = f.read()
     
-    assert "SECTION 9 — VISION PROTOCOL" in content, "Vision protocol is missing from the system prompt in app.py"
+    assert "SECTION 9 — VISION PROTOCOL" in content, "Vision protocol is missing from the system prompt in prompts/hviel_system_prompt.md"
 
 def test_mock_vision_qa_payload():
     """Simulate a Vision QA payload processing for complex laboratory equipment photos."""
