@@ -1,17 +1,17 @@
 import pytest
-import requests
 import re
 import os
+from fastapi.testclient import TestClient
+from app import app
 
-# We'll assume the server is running on localhost:8000
-BASE_URL = "http://localhost:8000"
+client = TestClient(app)
 
 def send_chat(message: str, user_email: str = "test@prc.local", file_path: str = None):
     """
-    Sends a chat message to the Hviel API.
+    Sends a chat message to the Hviel API via TestClient.
     Matches the multipart/form-data contract: message, user_email, and optional file.
     """
-    url = f"{BASE_URL}/api/chat"
+    url = "/api/chat"
     data = {
         "message": message,
         "user_email": user_email
@@ -21,7 +21,7 @@ def send_chat(message: str, user_email: str = "test@prc.local", file_path: str =
     if file_path and os.path.exists(file_path):
         files["file"] = open(file_path, "rb")
         
-    response = requests.post(url, data=data, files=files if files else None)
+    response = client.post(url, data=data, files=files if files else None)
     
     if "file" in files:
         files["file"].close()
