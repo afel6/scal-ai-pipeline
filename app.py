@@ -3638,6 +3638,10 @@ async def chat_stream(
                 _tls.current_session_id = sid
 
                 full_reply = ""
+                
+                banner = "⚠️ Hviel is undergoing rebuild. Outputs are NOT validated for engineering use. Do not rely on these results until further notice.\n\n"
+                loop.call_soon_threadsafe(q.put_nowait, {"type": "token", "text": banner})
+                full_reply += banner
 
                 for chunk in assistant.chat(history, message, kb_context=kb_ctx, stream=True, sid=sid, email=email):
 
