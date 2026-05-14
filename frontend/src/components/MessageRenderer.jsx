@@ -138,6 +138,8 @@ export function renderMessageContent(text) {
       if (!parsed) {
         // _tryParseChartJson already logged the error with the raw JSON
         afterPlot.push({ type: 'plot_error', raw: jsonStr.slice(0, 400) });
+        const tail = seg.slice(bi + jsonStr.length).replace(/^\s*\n?/, '');
+        if (tail) afterPlot.push({ type: 'text', content: tail });
         continue;
       }
 
