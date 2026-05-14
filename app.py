@@ -13,14 +13,12 @@
 
 
 import os, io, uuid, time, re, hmac, hashlib, secrets as _secrets
-
 import json as _json, logging, threading, asyncio
+import anyio
 
 from contextlib import asynccontextmanager, contextmanager
-
 from typing import Optional
-
-
+from concurrent.futures import ThreadPoolExecutor
 
 import numpy as np
 
@@ -156,11 +154,9 @@ if DATABASE_URL:
 
         from psycopg2 import pool as _pg_pool_mod
 
-        _PG_POOL      = _pg_pool_mod.ThreadedConnectionPool(2, 15, DATABASE_URL)
-
+        _PG_POOL      = _pg_pool_mod.ThreadedConnectionPool(5, 50, DATABASE_URL)
         _PG_AVAILABLE = True
-
-        _logger.info("[DB] PostgreSQL pool ready (2â€“15 conns)")
+        _logger.info("[DB] PostgreSQL pool ready (5-50 conns)")
 
     except Exception as _e:
 
@@ -3142,11 +3138,17 @@ def init_db() -> None:
 
 
 @asynccontextmanager
-
 async def lifespan(app: FastAPI):
-
     init_db()
-
+    # Increase default thread pool size to support 50+ concurrent engineers (blocking I/O)
+    loop = asyncio.get_running_loop()
+    loop.set_default_executor(ThreadPoolExecutor(max_workers=100))
+    # Increase AnyIO's thread pool capacity (used by Starlette for sync generators)
+    try:
+        limiter = anyio.to_thread.current_default_thread_limiter()
+        limiter.total_tokens = 100
+    except Exception as e:
+        _logger.warning(f"Failed to set AnyIO thread limit: {e}")
     yield
 
 
