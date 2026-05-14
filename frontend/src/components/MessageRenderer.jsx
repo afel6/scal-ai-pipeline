@@ -208,18 +208,26 @@ export function renderMessageContent(text) {
     const lines = p.content.split('\n');
     let currentCard = null;
     const lineBlocks = [];
+    let currentText = [];
     lines.forEach(line => {
       const cardMatch = line.match(/^\*\*(\d+\..*?)\*\*/);
       if (cardMatch) {
+        if (currentText.length > 0) {
+          lineBlocks.push({ type: 'text', content: currentText.join('\n') });
+          currentText = [];
+        }
         if (currentCard) lineBlocks.push(currentCard);
         currentCard = { type: 'card', title: cardMatch[1], content: [] };
       } else if (currentCard && line.trim()) {
         currentCard.content.push(line);
       } else {
         if (currentCard) { lineBlocks.push(currentCard); currentCard = null; }
-        lineBlocks.push({ type: 'text', content: line });
+        currentText.push(line);
       }
     });
+    if (currentText.length > 0) {
+      lineBlocks.push({ type: 'text', content: currentText.join('\n') });
+    }
     if (currentCard) lineBlocks.push(currentCard);
 
     lineBlocks.forEach(b => {
