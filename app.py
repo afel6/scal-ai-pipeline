@@ -3944,15 +3944,13 @@ async def handle(
 
 
     # Run blocking Gemini call in a thread so we don't block the FastAPI event loop
-
     resp = await asyncio.get_event_loop().run_in_executor(
-
         None, lambda: assistant.chat(history, message, kb_ctx, f_parts, sid=sid, email=email)
-
     )
-
     
-
+    banner = "⚠️ Hviel is undergoing rebuild. Outputs are NOT validated for engineering use. Do not rely on these results until further notice.\n\n"
+    resp = banner + resp
+    
     await async_db("INSERT INTO m (sid,role,text,ts,user_email) VALUES (?,?,?,?,?)",
 
        (sid, "model", resp, time.time(), email))
@@ -4114,4 +4112,5 @@ if __name__ == "__main__":
     init_db()
 
     uvicorn.run(app, host="0.0.0.0", port=8000)
+
 
