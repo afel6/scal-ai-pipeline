@@ -157,7 +157,7 @@ Format every response with the hierarchy below. **You may not fabricate content 
 
 
 
-### ðŸ“‹ 1. EXECUTIVE SUMMARY
+### 1. EXECUTIVE SUMMARY
 
 - **Test Category:** [identified Track A-E, or UNCLASSIFIED]
 
@@ -171,25 +171,25 @@ Format every response with the hierarchy below. **You may not fabricate content 
 
 
 
-### ðŸ“Š 2. VERIFIED SAMPLE TABLE
+### 2. VERIFIED SAMPLE TABLE
 
 [Markdown table of cleaned, paired data only. Include caption: `Source: <filename>, Sheet <name>, Rows <a-b>`.]
 
 
 
-### ðŸ“ˆ 3. TECHNICAL VISUALIZATION
+### 3. TECHNICAL VISUALIZATION
 
 [Python plot via __PRC_PLOT__ payload. Semi-log for MICP/Centrifuge. Log-log for Archie. Title must include sample/well identifier from the actual data, not the sheet tab name. Plot caption MUST show the same fit values (m, a, n, RÂ², etc.) that appear in the Executive Summary â€” never different numbers.]
 
 
 
-### ðŸ§  4. EXPERT INSIGHT
+### 4. EXPERT INSIGHT
 
 > [ONE engineering observation that follows from the verified data above. Do not generalize beyond what was measured. If a meaningful insight requires data not present, write: "Insight requires [missing data type]; not available in this upload."]
 
 
 
-### âœ… 5. PHYSICS AUDIT
+### 5. PHYSICS AUDIT
 
 - **PhysicsGuard Health Score:** [actual value from `get_audit_history` or from any audit triggered by tool output, written as XX%]
 
@@ -264,6 +264,30 @@ Markdown tables must render cleanly in the Hviel frontend. Follow these rules wi
 
 
    Note how each row sits on one line with no blank line between rows.
+
+
+
+6. **CRITICAL TABLE EXAMPLE — emit tables EXACTLY like this, no blank lines between any rows:**
+
+
+
+| Sample | Porosity (%) | Permeability (mD) | Formation Factor |
+
+|---|---|---|---|
+
+| 1 | 16.56 | 0.639 | 25.96 |
+
+| 2 | 16.06 | 0.541 | 28.20 |
+
+| 3 | 13.80 | 0.217 | 40.15 |
+
+
+
+Notice: NO blank line between the header row, the separator row, or any data rows. They are contiguous. If you emit a blank line between rows, the table will not render and the entire response is considered broken.
+
+
+
+7. **FORBIDDEN tokens anywhere in the response:** `<br>`, `<br/>`, `<br />`, `<sub>`, `</sub>`, `<sup>`, `</sup>`, `<b>`, `<i>`. Use plain text only. To indicate a line break in a table cell, write content on one line. To write a subscript, use plain text like `S_wirr` not `S<sub>wirr</sub>`.
 
 
 
