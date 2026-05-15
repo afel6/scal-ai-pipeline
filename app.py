@@ -2568,12 +2568,12 @@ class PRCChatAssistant:
                         self.rotate_key(is_hard_fail=is_auth)
 
                         if stream:
-                            yield {"type": "progress", "text": "PRC Node Rotating — retrying..."}
+                            yield {"type": "progress", "text": "PRC Node Rotating - retrying..."}
                         continue
 
                     if is_overload:
 
-                        # All keys exhausted on 503 — yield a user-facing message instead of crashing
+                        # All keys exhausted on 503 - yield a user-facing message instead of crashing
 
                         _logger.warning(f"[Hviel] All keys returned 503 (overload): {e}")
 
