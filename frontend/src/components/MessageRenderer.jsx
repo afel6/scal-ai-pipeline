@@ -107,10 +107,6 @@ export function renderMessageContent(text) {
   // ── PASS 1: __PRC_PLOT__ extraction ─────────────────────────────────────────
   // MUST run on full text before any line-splitting, otherwise a marker on one
   // line and its JSON on the next line end up in different segments and never match.
-  if (cleanText.includes('__PRC_PLOT__')) {
-    console.log('[PRC Plot] marker detected, text length =', cleanText.length);
-  }
-
   const afterPlot = [];
   {
     const segs = cleanText.split('__PRC_PLOT__');
@@ -119,19 +115,11 @@ export function renderMessageContent(text) {
       const seg = segs[i];
       const bi = seg.indexOf('{');
 
-      if (bi === -1) {
-        console.log('[PRC Plot] seg', i, '— no { found (streaming in progress)');
-        continue;
-      }
+      if (bi === -1) continue;
 
       const jsonStr = _extractFirstJsonObject(seg.slice(bi));
 
-      if (!jsonStr) {
-        console.log('[PRC Plot] seg', i, '— brace-counter: null (JSON incomplete)');
-        continue;
-      }
-
-      console.log('[PRC Plot] seg', i, '— extracted', jsonStr.length, 'chars |', jsonStr.slice(0, 80));
+      if (!jsonStr) continue;
 
       const parsed = _tryParseChartJson(jsonStr);
 
@@ -255,9 +243,8 @@ export function renderMessageContent(text) {
     if (part.type === 'simulation') return <SimulationHeatmap key={i} content={JSON.stringify(part.content)} />;
     if (part.type === 'plot_error') return (
       <div key={i} className="my-6 px-5 py-4 bg-red-950/20 border border-red-800/40 rounded-xl font-mono text-[11px] text-red-400">
-        <span className="font-black uppercase tracking-widest mr-2">[PRC Plot — Invalid JSON]</span>
-        <span className="text-red-600 opacity-70">Check browser console for details.</span>
-        <pre className="mt-2 text-red-700/60 whitespace-pre-wrap break-all text-[10px]">{part.raw}</pre>
+        <span className="font-black uppercase tracking-widest mr-2">[PRC Plot — Render Error]</span>
+        <span className="text-red-600 opacity-70">Plot data could not be rendered. Please re-run the simulation.</span>
       </div>
     );
     if (part.type === 'dashboard') return (

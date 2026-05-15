@@ -336,9 +336,13 @@ export default function App() {
             refreshSessions();
           } else if (data.type === 'error') {
             es.close();
+            const isDocErr = data.msg?.toLowerCase().includes('document') || data.msg?.toLowerCase().includes('generat');
+            const userMsg  = isDocErr
+              ? ' Document generation paused. Please retry or request a different format.'
+              : ' Analysis paused. An error occurred during processing. Please retry your query.';
             setMessages(prev => [...prev, {
-              role: 'model', text: ` ${data.msg}`, isError: true,
-              isDocEngineError: data.msg?.includes('generate document'),
+              role: 'model', text: userMsg, isError: true,
+              isDocEngineError: isDocErr,
             }]);
             setLoading(false);
             setUploadStatus('');
@@ -417,10 +421,13 @@ export default function App() {
       }
       await refreshSessions();
     } catch (err) {
-      const detail = err.response ? `HTTP ${err.response.status}` : err.message;
       const msg = err.code === 'ECONNABORTED'
         ? ' Generation timed out. Deep analysis can take up to 4 minutes. Please try again or submit a smaller dataset.'
-        : ` Connection error during upload: ${detail}. Unable to reach the PRC Hub at this moment.`;
+        : err.response?.status === 503
+        ? ' The PRC Hub is temporarily at capacity. Please retry in a moment.'
+        : err.response?.status === 401
+        ? ' Session authentication failed. Please log out and log back in.'
+        : ' Unable to reach the PRC Hub. Please check your connection and retry.';
       setMessages(prev => [...prev, { role: 'model', text: msg, isError: true }]);
       setServerStatus('offline');
     } finally {
@@ -428,9 +435,9 @@ export default function App() {
       setUploadStatus('');
       if (retryObj) setRetryCooldown(15);
     }
-  }, [input, files, sessionId, user, refreshSessions]);
+  }, [input, files, sessionId, user, refreshSessions, simProgress]);
 
-  const statusConfig = useMemo(() => ({
+  const status = useMemo(() => ({
     online: { icon: <ShieldCheck className="w-3 h-3" />, text: 'Encrypted', color: 'text-emerald-500' },
     offline: { icon: <Activity className="w-3 h-3 animate-pulse" />, text: 'Offline', color: 'text-red-500' },
     busy: { icon: <Loader className="w-3 h-3 animate-spin" />, text: 'Processing', color: 'text-yellow-500' },

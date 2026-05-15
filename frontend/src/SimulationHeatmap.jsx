@@ -1,4 +1,4 @@
-/* eslint-disable no-unused-vars */
+/* eslint-disable no-unused-vars, react-hooks/set-state-in-effect */
 import React, { useState, useEffect } from 'react';
 import { Play, Pause, FastForward, Activity } from 'lucide-react';
 
@@ -52,7 +52,7 @@ const SimulationHeatmap = ({ content }) => {
 
   useEffect(() => {
     let interval;
-    if (isPlaying && data && currentStep < data.history.length - 1) {
+    if (isPlaying && data && data.history && currentStep < data.history.length - 1) {
       interval = setInterval(() => {
         setCurrentStep(prev => {
           if (prev >= data.history.length - 1) {
@@ -76,7 +76,7 @@ const SimulationHeatmap = ({ content }) => {
 
   if (!data) return null;
 
-  const { history, params } = data;
+  const { history = [], params = {} } = data;
   const nx = params.nx || 20;
   const ny = params.ny || 20;
   
@@ -156,7 +156,7 @@ const SimulationHeatmap = ({ content }) => {
             <input 
               type="range" 
               min="0" 
-              max={history.length - 1} 
+              max={Math.max(history.length - 1, 0)}
               value={currentStep}
               onChange={(e) => {
                 setCurrentStep(parseInt(e.target.value));

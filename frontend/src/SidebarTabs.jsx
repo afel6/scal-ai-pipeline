@@ -52,8 +52,8 @@ export default function SidebarTabs({ sessionId, sessions, handleLoadSession, ha
     const file = e.target.files[0];
     if (!file) return;
 
-    if (bookPassword !== '1509') {
-      alert("Invalid Admin Password.");
+    if (!bookPassword) {
+      setUploadMsg('❌ Admin PIN required.');
       e.target.value = '';
       return;
     }
@@ -72,7 +72,7 @@ export default function SidebarTabs({ sessionId, sessions, handleLoadSession, ha
         setUploadMsg(`❌ ${data.message || 'Upload failed'}`);
       }
     } catch (err) {
-      setUploadMsg('❌ Upload failed. Try again.');
+      setUploadMsg('❌ Upload failed. Check credentials and retry.');
     } finally {
       setUploading(false);
       e.target.value = '';

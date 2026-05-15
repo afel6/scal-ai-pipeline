@@ -34,15 +34,19 @@ const Mermaid = ({ content }) => {
       
       const uniqueId = `mermaid-${Math.random().toString(36).substr(2, 9)}`;
       
+      const fallback = '<div class="p-4 text-rose-500 text-xs font-mono bg-rose-500/10 rounded-none">Diagram rendering error</div>';
       try {
-        mermaid.render(uniqueId, content).then(({ svg }) => {
-          if (chartRef.current) {
-            chartRef.current.innerHTML = svg;
-          }
-        });
+        mermaid.render(uniqueId, content)
+          .then(({ svg }) => {
+            if (chartRef.current) chartRef.current.innerHTML = svg;
+          })
+          .catch(err => {
+            console.error('Mermaid rendering failed:', err);
+            if (chartRef.current) chartRef.current.innerHTML = fallback;
+          });
       } catch (err) {
         console.error('Mermaid rendering failed:', err);
-        chartRef.current.innerHTML = '<div class="p-4 text-rose-500 text-xs font-mono bg-rose-500/10 rounded-none">Diagram rendering error</div>';
+        chartRef.current.innerHTML = fallback;
       }
     }
   }, [content]);

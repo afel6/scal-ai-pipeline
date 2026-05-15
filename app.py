@@ -124,7 +124,7 @@ GEMINI_KEY_POOL: list[str] = list(dict.fromkeys(_GEMINI_POOL_RAW)) or [
 
 KB_INGEST_SECRET = os.getenv("KB_INGEST_SECRET", "").strip()
 
-ADMIN_PIN        = os.getenv("ADMIN_PIN", "1509").strip() or "1509"
+ADMIN_PIN        = os.getenv("ADMIN_PIN", "").strip()
 
 
 
@@ -714,7 +714,7 @@ class PRCChatAssistant:
 
         self._client      = None
 
-        self._pending_kb  = [] # Temporary storage for background indexing
+        # _pending_kb lives on _tls (thread-local) — see chat() — NOT on self.
 
         self._init_client()
 
@@ -2034,7 +2034,7 @@ class PRCChatAssistant:
 
     def chat(self, history: list, msg: str, kb_context: str = "", f_parts: list = [], stream: bool = False, sid: str = None, email: str = None):
 
-        self._pending_kb = [] # Reset for this turn
+        _tls.pending_kb = []  # thread-local: safe under 50+ concurrent workers
 
         
 
@@ -2132,7 +2132,7 @@ class PRCChatAssistant:
 
                         chunks = KnowledgeBase.chunk_text(data_json, f"File: {fname}")
 
-                        self._pending_kb.extend(chunks)
+                        _tls.pending_kb.extend(chunks)
 
                     else:
 
@@ -2146,7 +2146,7 @@ class PRCChatAssistant:
 
                             extracted_context += f"[RAW DATA PREVIEW - SHEET: {first_sheet}]:\n{raw_str}\n"
 
-                            self._pending_kb.append((f"Raw: {fname}", raw_str))
+                            _tls.pending_kb.append((f"Raw: {fname}", raw_str))
 
                 except Exception as e:
 
@@ -2246,22 +2246,6 @@ class PRCChatAssistant:
             # Dynamic Model Routing
 
             msg_low_routing = msg.lower() if msg else ""
-
-            needs_pro = (
-
-                len(f_parts) > 0 or 
-
-                bool(extracted_context) or 
-
-                any(x in msg_low_routing for x in ["simulate", "audit", "calculate", "fit", "report", "plot", "parameter"])
-
-            )
-
-            active_model = "gemini-2.5-pro" if needs_pro else "gemini-2.5-flash"
-
-            # Dynamic Model Routing
-
-            msg_low_routing = msg.lower()
 
             needs_pro = (
 
@@ -3017,7 +3001,7 @@ class KnowledgeBase:
 
     async def search_async(query: str, top_k: int = 15, sid: str = None, email: str = None) -> str:
 
-        loop = asyncio.get_event_loop()
+        loop = asyncio.get_running_loop()
 
         return await loop.run_in_executor(None, KnowledgeBase.search, query, top_k, sid, email)
 
@@ -3140,14 +3124,18 @@ async def lifespan(app: FastAPI):
     init_db()
     # Increase default thread pool size to support 50+ concurrent engineers (blocking I/O)
     loop = asyncio.get_running_loop()
-    loop.set_default_executor(ThreadPoolExecutor(max_workers=100))
+    executor = ThreadPoolExecutor(max_workers=100)
+    loop.set_default_executor(executor)
     # Increase AnyIO's thread pool capacity (used by Starlette for sync generators)
     try:
         limiter = anyio.to_thread.current_default_thread_limiter()
         limiter.total_tokens = 100
     except Exception as e:
         _logger.warning(f"Failed to set AnyIO thread limit: {e}")
-    yield
+    try:
+        yield
+    finally:
+        executor.shutdown(wait=False)  # release threads on shutdown; don't block SIGTERM
 
 
 
@@ -3161,11 +3149,17 @@ if _RATE_LIMIT:
 
 
 
+_CORS_ORIGINS: list[str] = [
+    o.strip()
+    for o in os.getenv("ALLOWED_ORIGINS", "*").split(",")
+    if o.strip()
+] or ["*"]
+
 app.add_middleware(
 
     CORSMiddleware,
 
-    allow_origins=["*"],
+    allow_origins=_CORS_ORIGINS,
 
     allow_credentials=True,
 
@@ -3257,9 +3251,9 @@ def verify_admin(authorization: str = Header(None)):
 
 async def user_login(pin: str = Form(...)):
 
-    # Sync with the same logic as admin but without the elevated token
+    # Auth against configured ADMIN_PIN (must be set in environment)
 
-    target_pin = ADMIN_PIN or "1509"
+    target_pin = ADMIN_PIN
 
     if pin != target_pin:
 
@@ -3277,9 +3271,9 @@ async def user_login(pin: str = Form(...)):
 
 async def admin_login(pin: str = Form(...)):
 
-    # Use ENV pin or fallback to 1509
+    # Auth against configured ADMIN_PIN (must be set in environment)
 
-    target_pin = ADMIN_PIN or "1509"
+    target_pin = ADMIN_PIN
 
     if pin != target_pin:
 
@@ -3509,9 +3503,15 @@ async def chat_stream(
 
     async def _producer():
 
-        q = asyncio.Queue()
+        q = asyncio.Queue(maxsize=2000)  # bounded: prevents unbounded growth on client disconnect
 
-        loop = asyncio.get_event_loop()
+        loop = asyncio.get_running_loop()
+
+        def _enqueue(item):
+            """Put an item on the queue only if the consumer is still alive."""
+            if q.qsize() < 1900:
+                loop.call_soon_threadsafe(q.put_nowait, item)
+            # else: consumer (_producer) has gone away; silently drop to stop memory growth
 
 
 
@@ -3568,12 +3568,12 @@ async def chat_stream(
                 _tls.current_session_id = sid
 
                 full_reply = ""
-                
-                banner = "⚠️ Hviel is undergoing rebuild. Outputs are NOT validated for engineering use. Do not rely on these results until further notice.\n\n"
-                loop.call_soon_threadsafe(q.put_nowait, {"type": "token", "text": banner})
-                full_reply += banner
 
                 for chunk in assistant.chat(history, message, kb_context=kb_ctx, stream=True, sid=sid, email=email):
+
+                    if q.qsize() >= 1900:  # consumer gone; abort stream to stop memory growth
+                        _logger.warning("[SSE Worker] Queue near-full — client likely disconnected, aborting.")
+                        break
 
                     if isinstance(chunk, dict):
 
@@ -3581,13 +3581,13 @@ async def chat_stream(
 
                             full_reply += chunk.get("text", "")
 
-                        loop.call_soon_threadsafe(q.put_nowait, chunk)
+                        _enqueue(chunk)
 
                     else:
 
                         full_reply += str(chunk)
 
-                        loop.call_soon_threadsafe(q.put_nowait, {"type": "token", "text": str(chunk)})
+                        _enqueue({"type": "token", "text": str(chunk)})
 
 
 
@@ -3595,35 +3595,39 @@ async def chat_stream(
 
                 if full_reply:
 
-                    db("INSERT INTO m (sid,role,text,ts,user_email) VALUES (?,?,?,?,?)", 
+                    db("INSERT INTO m (sid,role,text,ts,user_email) VALUES (?,?,?,?,?)",
 
                        (sid, "model", full_reply, time.time(), email))
 
 
 
-                if assistant._pending_kb:
+                if getattr(_tls, 'pending_kb', None):
 
-                    # Capture pending KB for main thread processing
+                    # Capture pending KB — _tls is this worker thread's own storage
 
-                    loop.call_soon_threadsafe(q.put_nowait, {"type": "__PENDING_KB__", "data": list(assistant._pending_kb)})
+                    _enqueue({"type": "__PENDING_KB__", "data": list(_tls.pending_kb)})
 
 
 
-                loop.call_soon_threadsafe(q.put_nowait, {"type": "done"})
+                _enqueue({"type": "done"})
 
             except Exception as e:
 
                 _logger.error(f"[SSE Worker] Error: {e}")
 
-                loop.call_soon_threadsafe(q.put_nowait, {"type": "error", "msg": str(e)})
+                _enqueue({"type": "error", "msg": str(e)})
 
-                loop.call_soon_threadsafe(q.put_nowait, {"type": "done"})
+                _enqueue({"type": "done"})
 
 
 
         # Start background processing
 
-        asyncio.create_task(asyncio.to_thread(_sync_worker))
+        task = asyncio.create_task(asyncio.to_thread(_sync_worker))
+        task.add_done_callback(
+            lambda t: _logger.error(f"[SSE Worker] Unhandled task exception: {t.exception()}")
+            if not t.cancelled() and t.exception() else None
+        )
 
 
 
@@ -3801,7 +3805,7 @@ async def handle(
 
 
 
-            filepath = await asyncio.get_event_loop().run_in_executor(None, _build_file)
+            filepath = await asyncio.get_running_loop().run_in_executor(None, _build_file)
 
             basename = os.path.basename(filepath)
 
@@ -3873,23 +3877,27 @@ async def handle(
 
 
 
-    # Run blocking Gemini call in a thread so we don't block the FastAPI event loop
-    resp = await asyncio.get_event_loop().run_in_executor(
-        None, lambda: assistant.chat(history, message, kb_ctx, f_parts, sid=sid, email=email)
-    )
-    
-    banner = "⚠️ Hviel is undergoing rebuild. Outputs are NOT validated for engineering use. Do not rely on these results until further notice.\n\n"
-    resp = banner + resp
-    
+    # Run blocking Gemini call in a thread so we don't block the FastAPI event loop.
+    # _post_kb captures _tls.pending_kb from INSIDE the executor thread where chat() runs,
+    # because _tls is thread-local and invisible across thread boundaries.
+    _post_kb: list = []
+
+    def _chat_capture():
+        result = assistant.chat(history, message, kb_ctx, f_parts, sid=sid, email=email)
+        _post_kb.extend(getattr(_tls, 'pending_kb', []))
+        return result
+
+    resp = await asyncio.get_running_loop().run_in_executor(None, _chat_capture)
+
     await async_db("INSERT INTO m (sid,role,text,ts,user_email) VALUES (?,?,?,?,?)",
 
        (sid, "model", resp, time.time(), email))
 
-    
 
-    if assistant._pending_kb:
 
-        background_tasks.add_task(KnowledgeBase.ingest_transactional, "SCAL Upload", list(assistant._pending_kb), sid=sid, email=email)
+    if _post_kb:
+
+        background_tasks.add_task(KnowledgeBase.ingest_transactional, "SCAL Upload", _post_kb, sid=sid, email=email)
 
 
 
