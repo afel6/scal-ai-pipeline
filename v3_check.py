@@ -1,4 +1,4 @@
-﻿# app.py
+# app.py
 
 # PRC-HUB-VER-14-PROD-READY | 2026-05-10
 
@@ -68,7 +68,7 @@ _logger = logging.getLogger("PRC-Hub")
 
 
 
-# ├óΓÇ¥Γé¼├óΓÇ¥Γé¼ ENV ├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼
+# ------ ENV ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
 
 try:
 
@@ -82,7 +82,7 @@ except Exception:
 
 
 
-# ├óΓÇ¥Γé¼├óΓÇ¥Γé¼ RATE LIMITER (optional dep) ├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼
+# ------ RATE LIMITER (optional dep) ---------------------------------------------------------------------------------------------------------------------------------------------
 
 try:
 
@@ -104,7 +104,7 @@ except ImportError:
 
 
 
-# ├óΓÇ¥Γé¼├óΓÇ¥Γé¼ SECRETS ├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼
+# ------ SECRETS ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
 
 _GEMINI_POOL_RAW: list[str] = []
 
@@ -130,13 +130,13 @@ ADMIN_PIN        = os.getenv("ADMIN_PIN", "").strip()
 
 
 
-_ADMIN_TOKENS:    dict[str, float] = {}   # token ├óΓÇáΓÇÖ expiry (epoch)
+_ADMIN_TOKENS:    dict[str, float] = {}   # token  ->  expiry (epoch)
 
 _ADMIN_TOKEN_TTL: int              = 900  # 15 min
 
 
 
-# ├óΓÇ¥Γé¼├óΓÇ¥Γé¼ DATABASE LAYER ├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼
+# ------ DATABASE LAYER ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
 
 DATABASE_URL  = os.getenv("DATABASE_URL", "").strip()
 
@@ -378,7 +378,7 @@ def _log_physics_audit(sid: str, data_type: str, audit_res: dict, file_name: str
 
 
 
-# ├óΓÇ¥Γé¼├óΓÇ¥Γé¼ THREAD-SAFE KEY TRACKING ├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼
+# ------ THREAD-SAFE KEY TRACKING ------------------------------------------------------------------------------------------------------------------------------------------------------
 
 _FAILED_KEYS:      dict[str, dict] = {}
 
@@ -410,7 +410,7 @@ def _key_healthy(key: str) -> bool:
 
 
 
-# ├óΓÇ¥Γé¼├óΓÇ¥Γé¼ SYSTEM PROMPT ├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼
+# ------ SYSTEM PROMPT ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
 
 SYSTEM_PROMPT = """SYSTEM PROMPT: SENIOR SCAL ANALYST & PETROPHYSICIST
 
@@ -422,9 +422,9 @@ You are the Lead Petrophysical Intelligence Engine for the PRC AI Hub. Your obje
 
 
 
-# PHASE 0: SOURCE BOUNDARY (HARD RULE ├óΓé¼ΓÇ¥ NEVER VIOLATE)
+# PHASE 0: SOURCE BOUNDARY (HARD RULE  -  NEVER VIOLATE)
 
-You analyze ONLY files uploaded in the CURRENT chat session. You may have access to summaries of prior chats, persistent knowledge items, or conversation logs through the platform. These exist for context recall ├óΓé¼ΓÇ¥ they are NOT data sources for analysis.
+You analyze ONLY files uploaded in the CURRENT chat session. You may have access to summaries of prior chats, persistent knowledge items, or conversation logs through the platform. These exist for context recall  -  they are NOT data sources for analysis.
 
 
 
@@ -446,15 +446,15 @@ If the user refers to a file or dataset not in this chat, ask them to re-upload 
 
 Do NOT rely on file names or sheet titles. Scan column units and value ranges to identify Test Tracks:
 
-1. **TRACK A (Electrical / RI / FF):** Detect 'Rt', 'Ro', 'F', 'I' alongside Porosity ├óΓÇáΓÇÖ Archie's Law.
+1. **TRACK A (Electrical / RI / FF):** Detect 'Rt', 'Ro', 'F', 'I' alongside Porosity  ->  Archie's Law.
 
-2. **TRACK B (MICP / Mercury):** Detect 'psia', 'MPa', 'Hg' paired with saturation [0-100] ├óΓÇáΓÇÖ Pore Throat Distribution.
+2. **TRACK B (MICP / Mercury):** Detect 'psia', 'MPa', 'Hg' paired with saturation [0-100]  ->  Pore Throat Distribution.
 
-3. **TRACK C (Relative Permeability):** Detect 'Sw', 'Krw', 'Kro' ├óΓÇáΓÇÖ endpoints and crossover.
+3. **TRACK C (Relative Permeability):** Detect 'Sw', 'Krw', 'Kro'  ->  endpoints and crossover.
 
-4. **TRACK D (Centrifuge):** Detect 'RPM', 'Speed', 'G-Force' paired with 'Volume', 'cc' ├óΓÇáΓÇÖ RPM is the pressure source.
+4. **TRACK D (Centrifuge):** Detect 'RPM', 'Speed', 'G-Force' paired with 'Volume', 'cc'  ->  RPM is the pressure source.
 
-5. **TRACK E (BCA):** Detect only 'Porosity' and 'Permeability' ├óΓÇáΓÇÖ basic reservoir quality.
+5. **TRACK E (BCA):** Detect only 'Porosity' and 'Permeability'  ->  basic reservoir quality.
 
 
 
@@ -496,11 +496,11 @@ If no track matches, report the file as UNCLASSIFIED and list the columns you fo
 
 # PHASE 4: CALCULATION ENGINE (TOOLS ONLY)
 
-Execute through tools ├óΓé¼ΓÇ¥ never inline arithmetic for fitted parameters:
+Execute through tools  -  never inline arithmetic for fitted parameters:
 
 - **Electrical (m, a, n):** `fit_petrophysical_curve` with model='ff' or 'ri'.
 
-- **MICP (Pd, Pe, modal radius, trapping):** `fit_petrophysical_curve` with model='micp'. Pass ├Å╞Æ and ├Ä┬╕ explicitly; default ├Å╞Æ=485 dyn/cm, ├Ä┬╕=140├é┬░ for Hg/air.
+- **MICP (Pd, Pe, modal radius, trapping):** `fit_petrophysical_curve` with model='micp'. Pass sigma and theta explicitly; default sigma=485 dyn/cm, theta=140 deg for Hg/air.
 
 - **Centrifuge (Pc, Swi):** `calculate_petrophysics_properties` with script='centrifuge_skill.py' (model='hassler_brunner' or 'forbes').
 
@@ -541,7 +541,7 @@ When reporting Archie cementation exponent (m) and tortuosity factor (a), you MU
 
 
 ## PHASE 4.2: SINGLE-RESPONSE ECONOMY (NO DUPLICATE PLOTS)
-For multi-pressure, multi-sample, or multi-condition datasets, you may call the fitting tools as many times as needed internally to gather values ΓÇö but emit only ONE plot payload (__PRC_PLOT__) per response. Choose the most informative single plot:
+For multi-pressure, multi-sample, or multi-condition datasets, you may call the fitting tools as many times as needed internally to gather values  -  but emit only ONE plot payload (__PRC_PLOT__) per response. Choose the most informative single plot:
 - For FF-vs-OBP datasets: ONE composite plot showing all data points across all pressures, with the composite fit line.
 - For RI datasets with multiple samples: ONE log-log plot with all samples overlaid.
 - For MICP with multiple samples: ONE semi-log Pc plot with sample curves.
@@ -556,7 +556,7 @@ Format every response with the hierarchy below. **You may not fabricate content 
 
 
 
-### ├░┼╕ΓÇ£ΓÇ╣ 1. EXECUTIVE SUMMARY
+### 1. 1. EXECUTIVE SUMMARY
 
 - **Test Category:** [identified Track A-E, or UNCLASSIFIED]
 
@@ -570,25 +570,25 @@ Format every response with the hierarchy below. **You may not fabricate content 
 
 
 
-### ├░┼╕ΓÇ£┼á 2. VERIFIED SAMPLE TABLE
+### 2. 2. VERIFIED SAMPLE TABLE
 
 [Markdown table of cleaned, paired data only. Include caption: `Source: <filename>, Sheet <name>, Rows <a-b>`.]
 
 
 
-### ├░┼╕ΓÇ£╦å 3. TECHNICAL VISUALIZATION
+### 3. 3. TECHNICAL VISUALIZATION
 
-[Python plot via __PRC_PLOT__ payload. Semi-log for MICP/Centrifuge. Log-log for Archie. Title must include sample/well identifier from the actual data, not the sheet tab name. Plot caption MUST show the same fit values (m, a, n, R├é┬▓, etc.) that appear in the Executive Summary ├óΓé¼ΓÇ¥ never different numbers.]
+[Python plot via __PRC_PLOT__ payload. Semi-log for MICP/Centrifuge. Log-log for Archie. Title must include sample/well identifier from the actual data, not the sheet tab name. Plot caption MUST show the same fit values (m, a, n, R^2, etc.) that appear in the Executive Summary  -  never different numbers.]
 
 
 
-### ├░┼╕┬º┬á 4. EXPERT INSIGHT
+### 4. 4. EXPERT INSIGHT
 
 > [ONE engineering observation that follows from the verified data above. Do not generalize beyond what was measured. If a meaningful insight requires data not present, write: "Insight requires [missing data type]; not available in this upload."]
 
 
 
-### ├ó┼ôΓÇª 5. PHYSICS AUDIT
+### 5. 5. PHYSICS AUDIT
 
 - **PhysicsGuard Health Score:** [actual value from `get_audit_history` or from any audit triggered by tool output, written as XX%]
 
@@ -606,7 +606,7 @@ Markdown tables must render cleanly in the Hviel frontend. Follow these rules wi
 
 
 
-` or blank lines between rows breaks rendering ├óΓé¼ΓÇ¥ each row becomes its own paragraph with awkward vertical spacing.
+` or blank lines between rows breaks rendering  -  each row becomes its own paragraph with awkward vertical spacing.
 
 
 
@@ -616,9 +616,9 @@ Markdown tables must render cleanly in the Hviel frontend. Follow these rules wi
 
 3. **Long tables (>12 data rows) MUST be summarized inline, not dumped.** When the underlying dataset has more than 12 rows:
 
-   - In Section 2, show a **summary table** (aggregated by sample, by pressure, or by sample type ├óΓé¼ΓÇ¥ whichever makes the data clearest in ├óΓÇ░┬ñ12 rows).
+   - In Section 2, show a **summary table** (aggregated by sample, by pressure, or by sample type  -  whichever makes the data clearest in <=12 rows).
 
-   - Append a one-line note: `Full N-row dataset available in the Executive Report (.docx) ├óΓé¼ΓÇ¥ call generate_executive_report.`
+   - Append a one-line note: `Full N-row dataset available in the Executive Report (.docx)  -  call generate_executive_report.`
 
    - The full data lives in the plot and in the downloadable report, not in the chat table.
 
@@ -645,19 +645,12 @@ Markdown tables must render cleanly in the Hviel frontend. Follow these rules wi
 
 
    | Overburden (psig) | n samples | mean Phi (%) | mean FF | m (forced fit) | a (free fit) | m (free fit) |
-
    |---|---|---|---|---|---|---|
-
    | 400 | 4 | 14.02 | 38.20 | 1.803 | 2.792 | 1.287 |
-
    | 800 | 4 | 13.93 | 39.13 | 1.809 | 2.776 | 1.298 |
-
    | 1500 | 4 | 13.82 | 40.94 | 1.821 | 2.746 | 1.318 |
-
    | 2500 | 4 | 13.70 | 42.42 | 1.829 | 2.715 | 1.334 |
-
    | 3500 | 4 | 13.62 | 43.95 | 1.844 | 2.684 | 1.355 |
-
    | 4839 | 4 | 13.48 | 45.51 | 1.854 | 2.668 | 1.369 |
 
 
@@ -672,7 +665,7 @@ If any Physics Health Score or PhysicsGuard finding appears ANYWHERE in your res
 
 
 
-Forbidden behavior: showing "Physics Health Score: 85%" at the top of the response and then writing "[NOT YET CHECKED]" in Section 5. This contradiction is a bug, not a refusal ├óΓé¼ΓÇ¥ if the score exists, report it consistently.
+Forbidden behavior: showing "Physics Health Score: 85%" at the top of the response and then writing "[NOT YET CHECKED]" in Section 5. This contradiction is a bug, not a refusal  -  if the score exists, report it consistently.
 
 
 
@@ -690,7 +683,7 @@ You MUST refuse, and report the refusal in the UI structure above, when:
 
 - The user requests SCAL parameters but no SCAL data was uploaded.
 
-- The data contradicts physics (RI < 1 at Sw < 1, Pc decreasing during drainage, negative saturations, etc.). Flag the violation and stop ├óΓé¼ΓÇ¥ do not smooth, interpolate, or "fix" the data silently.
+- The data contradicts physics (RI < 1 at Sw < 1, Pc decreasing during drainage, negative saturations, etc.). Flag the violation and stop  -  do not smooth, interpolate, or "fix" the data silently.
 
 
 
@@ -698,7 +691,7 @@ When refusing, still fill every UI section with the specific reason that section
 
 
 
-# SECTION 9 ΓÇö VISION PROTOCOL
+# SECTION 9  -  VISION PROTOCOL
 
 - Analyze lab photos only for configuration errors (valves, core seating, leaks).
 
@@ -714,7 +707,7 @@ When refusing, still fill every UI section with the specific reason that section
 
 
 
-# ├óΓÇ¥Γé¼├óΓÇ¥Γé¼ GEMINI TOOL DECLARATIONS ├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼
+# ------ GEMINI TOOL DECLARATIONS ------------------------------------------------------------------------------------------------------------------------------------------------------
 
 _HVIEL_TOOLS = [
 
@@ -822,27 +815,27 @@ _HVIEL_TOOLS = [
 
                 "description": (
 
-                    "**MANDATORY before reporting any fitted parameter (Archie n, m, a, MICP Pe/Pd/modal radius, Corey exponents, J-function values). Never report these values without calling this tool first. If the tool fails, report the failure ├óΓé¼ΓÇ¥ do not estimate.** "
+                    "**MANDATORY before reporting any fitted parameter (Archie n, m, a, MICP Pe/Pd/modal radius, Corey exponents, J-function values). Never report these values without calling this tool first. If the tool fails, report the failure  -  do not estimate.** "
 
                     "Fits raw SCAL lab data to standard petrophysical models. Select model by curve type:\n"
 
-                    "  model='brooks_corey' or 'let' ├óΓÇáΓÇÖ Relative Permeability (pass sw, krw, kro arrays).\n"
+                    "  model='brooks_corey' or 'let'  ->  Relative Permeability (pass sw, krw, kro arrays).\n"
 
-                    "  model='micp' ├óΓÇáΓÇÖ Mercury Injection (pass pc=[psia], s_hg=[fraction 0-1]). "
+                    "  model='micp'  ->  Mercury Injection (pass pc=[psia], s_hg=[fraction 0-1]). "
 
                     "For imbibition (recovery) cycle: also pass pc_imb=[psia], s_hg_imb=[fraction]. "
 
                     "Auto-generates log-scale Pc curve (drainage solid, imbibition dashed) + PSD.\n"
 
-                    "  model='ri' ├óΓÇáΓÇÖ Resistivity Index Archie fit (pass sw=[...], ri=[...]). Log-log plot, fits n exponent.\n"
+                    "  model='ri'  ->  Resistivity Index Archie fit (pass sw=[...], ri=[...]). Log-log plot, fits n exponent.\n"
 
-                    "  model='ff' ├óΓÇáΓÇÖ Formation Factor Archie fit (pass porosity=[...], ff=[...]). Log-log plot, fits m and a.\n"
+                    "  model='ff'  ->  Formation Factor Archie fit (pass porosity=[...], ff=[...]). Log-log plot, fits m and a.\n"
 
-                    "  model='jfunction' ├óΓÇáΓÇÖ Leverett J-Function (pass sw=[...], pc=[psia], k_md=X, phi_val=Y, ift_cos_theta=26.5).\n"
+                    "  model='jfunction'  ->  Leverett J-Function (pass sw=[...], pc=[psia], k_md=X, phi_val=Y, ift_cos_theta=26.5).\n"
 
-                    "  model='pc_centrifuge' ├óΓÇáΓÇÖ Capillary Pressure direct (pass sw=[...], pc=[psia values]).\n"
+                    "  model='pc_centrifuge'  ->  Capillary Pressure direct (pass sw=[...], pc=[psia values]).\n"
 
-                    "  model='overburden' ├óΓÇáΓÇÖ Compaction curves (pass pressure=[psia], porosity=[...], perm=[mD]). Dual-axis.\n"
+                    "  model='overburden'  ->  Compaction curves (pass pressure=[psia], porosity=[...], perm=[mD]). Dual-axis.\n"
 
                     "Pass sample_name='Core-1' to label multi-sample charts."
 
@@ -992,7 +985,7 @@ _tls = threading.local()
 
 
 
-# ├óΓÇ¥Γé¼├óΓÇ¥Γé¼ GEMINI HA CLIENT ├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼
+# ------ GEMINI HA CLIENT ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
 
 class PRCChatAssistant:
 
@@ -1198,7 +1191,7 @@ class PRCChatAssistant:
 
             if not sid:
 
-                result = "ERROR: session context unavailable ├óΓé¼ΓÇ¥ use the Download Report button instead."
+                result = "ERROR: session context unavailable  -  use the Download Report button instead."
 
             else:
 
@@ -1236,7 +1229,7 @@ class PRCChatAssistant:
 
                 else:
 
-                    summary = ["### PRC AUDIT LEDGER ├óΓé¼ΓÇ¥ SESSION HISTORY"]
+                    summary = ["### PRC AUDIT LEDGER  -  SESSION HISTORY"]
 
                     for r in rows:
 
@@ -1264,7 +1257,7 @@ class PRCChatAssistant:
 
         try:
 
-            # ├óΓÇ¥Γé¼├óΓÇ¥Γé¼ Executive Report ├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼
+            # ------ Executive Report ------------------------------------------------------------------------------------------------------------------------------------------------------------------
 
             if name == "generate_executive_report":
 
@@ -1278,7 +1271,7 @@ class PRCChatAssistant:
 
                     return (
 
-                        f"\n\n**Executive SCAL Report ├óΓé¼ΓÇ¥ {well}**\n\n"
+                        f"\n\n**Executive SCAL Report  -  {well}**\n\n"
 
                         f"The report has been compiled and is ready for download.\n\n"
 
@@ -1294,7 +1287,7 @@ class PRCChatAssistant:
 
 
 
-            # ├óΓÇ¥Γé¼├óΓÇ¥Γé¼ MICP: Drainage + Imbibition, log-Pc, % x-axis, hysteresis ├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼
+            # ------ MICP: Drainage + Imbibition, log-Pc, % x-axis, hysteresis ------------------------------------
 
             if name == "fit_petrophysical_curve" and args.get("model") == "micp":
 
@@ -1318,23 +1311,23 @@ class PRCChatAssistant:
 
                     shg_s   = shg_arr[idx]
 
-                    # X-axis: fraction ├óΓÇáΓÇÖ % Pore Volume
+                    # X-axis: fraction  ->  % Pore Volume
 
                     shg_pct = shg_s * 100.0
 
                     pc_pos  = np.maximum(pc_s, 0.1)
 
-                    # Washburn: r(├é┬╡m) = 107.5 / Pc_psia  (Hg-air: ├Ä┬│=480 mN/m, ├Ä┬╕=140├é┬░)
+                    # Washburn: r(├é┬╡m) = 107.5 / Pc_psia  (Hg-air: ├Ä┬│=480 mN/m, theta=140 deg)
 
                     r_um    = 107.5 / pc_pos
 
-                    # Entry pressure ├óΓé¼ΓÇ¥ first point where Hg_sat > 1 %
+                    # Entry pressure  -  first point where Hg_sat > 1 %
 
                     entry_mask = shg_s > 0.01
 
                     pe = float(pc_s[entry_mask][0]) if entry_mask.any() else float(pc_s[0])
 
-                    # Threshold pressure ├óΓé¼ΓÇ¥ inflection of Pc(Sw) curve
+                    # Threshold pressure  -  inflection of Pc(Sw) curve
 
                     if len(pc_s) > 2:
 
@@ -1370,7 +1363,7 @@ class PRCChatAssistant:
 
                     psd_pts.sort(key=lambda p: p["x"])
 
-                    # ├óΓÇ¥Γé¼├óΓÇ¥Γé¼ Imbibition (recovery) cycle ├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼
+                    # ------ Imbibition (recovery) cycle ------------------------------------------------------------------------------------------------
 
                     has_imb       = len(pc_imb_raw) > 1 and len(shg_imb_raw) > 1
 
@@ -1434,11 +1427,11 @@ class PRCChatAssistant:
 
 
 
-                    # Plot 1 ├óΓé¼ΓÇ¥ Capillary Pressure (log-scale Y)
+                    # Plot 1  -  Capillary Pressure (log-scale Y)
 
                     plot_pc = {
 
-                        "title":    "MICP ├óΓé¼ΓÇ¥ Capillary Pressure vs Mercury Saturation",
+                        "title":    "MICP  -  Capillary Pressure vs Mercury Saturation",
 
                         "xAxis":    {"label": "Mercury Saturation (% Pore Volume)"},
 
@@ -1466,7 +1459,7 @@ class PRCChatAssistant:
 
                     }
 
-                    # Plot 2 ├óΓé¼ΓÇ¥ Pore Size Distribution
+                    # Plot 2  -  Pore Size Distribution
 
                     plot_psd = {
 
@@ -1484,7 +1477,7 @@ class PRCChatAssistant:
 
                     }
 
-                    # ├óΓÇ¥Γé¼├óΓÇ¥Γé¼ Physics Guard ├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼
+                    # ------ Physics Guard ------------------------------------------------------------------------------------------------------------------------------
 
                     audit = PhysicsGuard().validate_micp(pc_s, shg_s).generate_health_score()
 
@@ -1538,7 +1531,7 @@ class PRCChatAssistant:
 
 
 
-            # ├óΓÇ¥Γé¼├óΓÇ¥Γé¼ RESISTIVITY INDEX (Archie n fit, log-log) ├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼
+            # ------ RESISTIVITY INDEX (Archie n fit, log-log) ------------------------------------------------------------------------------------------
 
             if name == "fit_petrophysical_curve" and args.get("model") == "ri":
 
@@ -1570,7 +1563,7 @@ class PRCChatAssistant:
 
                     plot_ri  = {
 
-                        "title":    f"Resistivity Index ├óΓé¼ΓÇ¥ RI vs Sw ({sample})",
+                        "title":    f"Resistivity Index  -  RI vs Sw ({sample})",
 
                         "xAxis":    {"label": "Water Saturation Sw (fraction)"},
 
@@ -1598,7 +1591,7 @@ class PRCChatAssistant:
 
                     }
 
-                    # ├óΓÇ¥Γé¼├óΓÇ¥Γé¼ Physics Guard ├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼
+                    # ------ Physics Guard ------------------------------------------------------------------------------------------------------------------------------
 
                     audit = PhysicsGuard().validate_archie(sw_a, ri_a, "RI").generate_health_score()
 
@@ -1632,7 +1625,7 @@ class PRCChatAssistant:
 
 
 
-            # ├óΓÇ¥Γé¼├óΓÇ¥Γé¼ FORMATION FACTOR (Archie m, a fit, log-log) ├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼
+            # ------ FORMATION FACTOR (Archie m, a fit, log-log) ------------------------------------------------------------------------------------
 
             if name == "fit_petrophysical_curve" and args.get("model") == "ff":
 
@@ -1662,9 +1655,9 @@ class PRCChatAssistant:
 
                     plot_ff = {
 
-                        "title":    f"Formation Factor ├óΓé¼ΓÇ¥ FF vs Porosity ({sample})",
+                        "title":    f"Formation Factor  -  FF vs Porosity ({sample})",
 
-                        "xAxis":    {"label": "Porosity ├ÅΓÇá (fraction)"},
+                        "xAxis":    {"label": "Porosity Phi (fraction)"},
 
                         "yAxis":    {"label": "Formation Factor FF (dimensionless)"},
 
@@ -1690,7 +1683,7 @@ class PRCChatAssistant:
 
                     }
 
-                    # ├óΓÇ¥Γé¼├óΓÇ¥Γé¼ Physics Guard ├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼
+                    # ------ Physics Guard ------------------------------------------------------------------------------------------------------------------------------
 
                     audit = PhysicsGuard().validate_archie(phi_a, ff_a, "FF").generate_health_score()
 
@@ -1724,7 +1717,7 @@ class PRCChatAssistant:
 
 
 
-            # ├óΓÇ¥Γé¼├óΓÇ¥Γé¼ LEVERETT J-FUNCTION ├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼
+            # ------ LEVERETT J-FUNCTION ------------------------------------------------------------------------------------------------------------------------------------------------------------
 
             if name == "fit_petrophysical_curve" and args.get("model") == "jfunction":
 
@@ -1746,7 +1739,7 @@ class PRCChatAssistant:
 
                     pc_a  = np.array(pc_raw, dtype=float)
 
-                    # J = 0.21645 ├âΓÇö Pc[psia] ├âΓÇö sqrt(k[mD]/├ÅΓÇá) / ├Å╞Æcos├Ä┬╕[dyn/cm]
+                    # J = 0.21645 ├â -  Pc[psia] ├â -  sqrt(k[mD]/Phi) / sigmacostheta[dyn/cm]
 
                     j_arr = 0.21645 * pc_a * np.sqrt(k_md / phi_val) / ift_ct
 
@@ -1754,7 +1747,7 @@ class PRCChatAssistant:
 
                     plot_j = {
 
-                        "title": f"Leverett J-Function ({sample}  k={k_md} mD  ├ÅΓÇá={phi_val:.3f})",
+                        "title": f"Leverett J-Function ({sample}  k={k_md} mD  Phi={phi_val:.3f})",
 
                         "xAxis": {"label": "Water Saturation Sw (fraction)"},
 
@@ -1778,7 +1771,7 @@ class PRCChatAssistant:
 
                         f"\n\nLeverett J-Function computed. "
 
-                        f"k = {k_md} mD, ├ÅΓÇá = {phi_val:.3f}, ├Å╞Æcos├Ä┬╕ = {ift_ct} mN/m\n\n"
+                        f"k = {k_md} mD, Phi = {phi_val:.3f}, sigmacostheta = {ift_ct} mN/m\n\n"
 
                         f"__PRC_PLOT__\n{_json.dumps(plot_j, ensure_ascii=False)}\n\n"
 
@@ -1786,7 +1779,7 @@ class PRCChatAssistant:
 
 
 
-            # ├óΓÇ¥Γé¼├óΓÇ¥Γé¼ CAPILLARY PRESSURE ├óΓé¼ΓÇ¥ CENTRIFUGE / POROUS PLATE ├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼
+            # ------ CAPILLARY PRESSURE  -  CENTRIFUGE / POROUS PLATE ------------------------------------------------------------------------
 
             if name == "fit_petrophysical_curve" and args.get("model") == "pc_centrifuge":
 
@@ -1806,7 +1799,7 @@ class PRCChatAssistant:
 
                     plot_pc = {
 
-                        "title": f"Capillary Pressure ├óΓé¼ΓÇ¥ Pc vs Sw ({sample})",
+                        "title": f"Capillary Pressure  -  Pc vs Sw ({sample})",
 
                         "xAxis": {"label": "Water Saturation Sw (fraction)"},
 
@@ -1824,7 +1817,7 @@ class PRCChatAssistant:
 
                     }
 
-                    # ├óΓÇ¥Γé¼├óΓÇ¥Γé¼ Physics Guard ├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼
+                    # ------ Physics Guard ------------------------------------------------------------------------------------------------------------------------------
 
                     audit = PhysicsGuard().validate_pc(sw_a, pc_a).generate_health_score()
 
@@ -1856,7 +1849,7 @@ class PRCChatAssistant:
 
 
 
-            # ├óΓÇ¥Γé¼├óΓÇ¥Γé¼ OVERBURDEN COMPACTION (dual-axis: ├ÅΓÇá left, k right log-scale) ├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼
+            # ------ OVERBURDEN COMPACTION (dual-axis: Phi left, k right log-scale) ------------------------------
 
             if name == "fit_petrophysical_curve" and args.get("model") == "overburden":
 
@@ -1882,7 +1875,7 @@ class PRCChatAssistant:
 
                         curves.append({
 
-                            "name": f"Porosity ├ÅΓÇá ({sample})", "showLine": True, "showPoints": True,
+                            "name": f"Porosity Phi ({sample})", "showLine": True, "showPoints": True,
 
                             "color": "#38bdf8", "yId": "left",
 
@@ -1906,11 +1899,11 @@ class PRCChatAssistant:
 
                     plot_ob = {
 
-                        "title":         f"Overburden Compaction ├óΓé¼ΓÇ¥ ├ÅΓÇá & k vs Net Stress ({sample})",
+                        "title":         f"Overburden Compaction  -  Phi & k vs Net Stress ({sample})",
 
                         "xAxis":         {"label": "Net Confining Pressure (psia)"},
 
-                        "yAxis":         {"label": "Porosity ├ÅΓÇá (fraction)"},
+                        "yAxis":         {"label": "Porosity Phi (fraction)"},
 
                         "yAxis2":        {"label": "Permeability k (mD)"},
 
@@ -1968,7 +1961,7 @@ class PRCChatAssistant:
 
 
 
-                # ├óΓÇ¥Γé¼├óΓÇ¥Γé¼ Physics Guard ├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼
+                # ------ Physics Guard ------------------------------------------------------------------------------------------------------------------------------------------
 
                 audit = PhysicsGuard().validate_kr(sw_arr, krw_arr, kro_arr).generate_health_score()
 
@@ -2036,7 +2029,7 @@ class PRCChatAssistant:
 
 
 
-                    # ├óΓÇ¥Γé¼├óΓÇ¥Γé¼ Physics Guard ├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼
+                    # ------ Physics Guard ------------------------------------------------------------------------------------------------------------------------------
 
                     audit = PhysicsGuard().validate_kr(sw_arr, krw_arr, kro_arr).generate_health_score()
 
@@ -2368,7 +2361,7 @@ class PRCChatAssistant:
 
         
 
-        # ├óΓÇ¥Γé¼├óΓÇ¥Γé¼ SESSION FILE REGISTRY (Persistence Guard) ├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼
+        # ------ SESSION FILE REGISTRY (Persistence Guard) ---------------------------------------------------------------------
 
         session_files_ctx = ""
 
@@ -2630,7 +2623,7 @@ class PRCChatAssistant:
 
 
 
-                    # ├óΓÇ¥Γé¼├óΓÇ¥Γé¼ STREAMING PATH (multi-turn tool use) ├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼
+                    # ------ STREAMING PATH (multi-turn tool use) ------------------------------------------------------------------------------
 
                     if stream:
 
@@ -2744,7 +2737,7 @@ class PRCChatAssistant:
 
                                 except Exception: pass
 
-                                break  # Pure text turn ├óΓé¼ΓÇ¥ conversation complete
+                                break  # Pure text turn  -  conversation complete
 
 
 
@@ -2786,7 +2779,7 @@ class PRCChatAssistant:
 
 
 
-                    # ├óΓÇ¥Γé¼├óΓÇ¥Γé¼ NON-STREAMING PATH (multi-turn tool use) ├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼
+                    # ------ NON-STREAMING PATH (multi-turn tool use) ------------------------------------------------------------------
 
                     current_contents = list(contents)
 
@@ -2918,13 +2911,13 @@ class PRCChatAssistant:
 
                         if stream:
 
-                            yield {"type": "progress", "text": "PRC Node Rotating ├óΓé¼ΓÇ¥ retrying..."}
+                            yield {"type": "progress", "text": "PRC Node Rotating  -  retrying..."}
 
                         continue
 
                     if is_overload:
 
-                        # All keys exhausted on 503 ├óΓé¼ΓÇ¥ yield a user-facing message instead of crashing
+                        # All keys exhausted on 503  -  yield a user-facing message instead of crashing
 
                         _logger.warning(f"[Hviel] All keys returned 503 (overload): {e}")
 
@@ -2970,7 +2963,7 @@ class PRCChatAssistant:
 
         """Call Gemini (no tools) to produce structured JSON for HvielDocEngine.build_from_json().
 
-        Returns raw JSON string ├óΓé¼ΓÇ¥ may have ```json fences which build_from_json strips."""
+        Returns raw JSON string  -  may have ```json fences which build_from_json strips."""
 
         _SCHEMAS = {
 
@@ -3030,7 +3023,7 @@ class PRCChatAssistant:
 
         system_doc = (
 
-            f"You are Hviel ├óΓé¼ΓÇ¥ PRC Senior AI Petrophysical Specialist, Petroleum Research Center, Libya.\n"
+            f"You are Hviel  -  PRC Senior AI Petrophysical Specialist, Petroleum Research Center, Libya.\n"
 
             f"Generate a professional {file_type.upper()} export for the PRC.\n"
 
@@ -3046,13 +3039,13 @@ class PRCChatAssistant:
 
             f"- Include Executive Summary, Methodology, Results & Interpretation, and Conclusions sections\n"
 
-            f"- Tables must contain realistic numerical SCAL data ├óΓé¼ΓÇ¥ no placeholder values\n"
+            f"- Tables must contain realistic numerical SCAL data  -  no placeholder values\n"
 
             f"- Minimum 4 sections (docx/pdf) or 2 data sheets (xlsx) with substantive content\n"
 
             f"- author field: \"{engineer}\"\n"
 
-            f"- Never use '...' or '[insert value]' ├óΓé¼ΓÇ¥ derive everything from the conversation\n"
+            f"- Never use '...' or '[insert value]'  -  derive everything from the conversation\n"
 
         )
 
@@ -3132,7 +3125,7 @@ class PRCChatAssistant:
 
 
 
-# ├óΓÇ¥Γé¼├óΓÇ¥Γé¼ RAG / KNOWLEDGE BASE ├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼
+# ------ RAG / KNOWLEDGE BASE ------------------------------------------------------------------------------------------------------------------------------------------------------------------
 
 EMBED_MODEL        = "gemini-embedding-2"
 
@@ -3394,7 +3387,7 @@ class KnowledgeBase:
 
 
 
-# ├óΓÇ¥Γé¼├óΓÇ¥Γé¼ APP SETUP ├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼
+# ------ APP SETUP ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
 
 def init_db() -> None:
 
@@ -3414,7 +3407,7 @@ def init_db() -> None:
 
         "CREATE TABLE IF NOT EXISTS analytics_events (id INTEGER PRIMARY KEY AUTOINCREMENT, user_email TEXT, event_type TEXT, event_data TEXT, ts REAL)",
 
-        # THE AUDITOR'S LEDGER ├óΓé¼ΓÇ¥ append-only physics integrity log
+        # THE AUDITOR'S LEDGER  -  append-only physics integrity log
 
         "CREATE TABLE IF NOT EXISTS physics_audits (id INTEGER PRIMARY KEY AUTOINCREMENT, session_id TEXT, user_email TEXT, timestamp REAL, data_type TEXT, health_score INTEGER, violations TEXT, file_name TEXT)",
 
@@ -3446,7 +3439,7 @@ def init_db() -> None:
 
         except Exception: pass
 
-    # Backfill existing m rows ├óΓÇáΓÇÖ sessions table (migration for pre-existing installs)
+    # Backfill existing m rows  ->  sessions table (migration for pre-existing installs)
 
     try:
 
@@ -3520,9 +3513,9 @@ except Exception as _he:
 
 
 
-# ├óΓÇ¥Γé¼├óΓÇ¥Γé¼ ROUTES ├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼
+# ------ ROUTES ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
 
-# ├óΓÇ¥Γé¼├óΓÇ¥Γé¼ AUTH & SESSION VERIFICATION ├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼
+# ------ AUTH & SESSION VERIFICATION ------------------------------------------------------------------------------------------------------------------------------------------
 
 def _verify_session_owner(sid: str, email: str):
 
@@ -3536,7 +3529,7 @@ def _verify_session_owner(sid: str, email: str):
 
     if row and row[0][0] and row[0][0].lower().strip() != email.lower().strip():
 
-        _logger.warning(f"[SECURITY] Unauthorized access attempt: {email} ├óΓÇáΓÇÖ session {sid}")
+        _logger.warning(f"[SECURITY] Unauthorized access attempt: {email}  ->  session {sid}")
 
         raise HTTPException(status_code=403, detail="Unauthorized: You do not own this session.")
 
@@ -3562,7 +3555,7 @@ def diag():
 
 
 
-# ├óΓÇ¥Γé¼├óΓÇ¥Γé¼ ADMIN AUTH ├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼
+# ------ ADMIN AUTH ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
 
 def verify_admin(authorization: str = Header(None)):
 
@@ -3834,7 +3827,7 @@ async def chat_stream(
 
     
 
-    # ├óΓÇ¥Γé¼├óΓÇ¥Γé¼ SSE PRODUCER WITH HEARTBEAT ├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼
+    # ------ SSE PRODUCER WITH HEARTBEAT ------------------------------------------------------------------------------------------------------------------------------
 
     async def _producer():
 
@@ -4092,13 +4085,13 @@ async def handle(
 
 
 
-    # ├óΓÇ¥Γé¼├óΓÇ¥Γé¼ Security Guard: Verify session ownership before any data access ├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼
+    # ------ Security Guard: Verify session ownership before any data access ---------------------
 
     _verify_session_owner(sid, email)
 
 
 
-    # ├óΓÇ¥Γé¼├óΓÇ¥Γé¼ Document generation path (Gemini JSON ├óΓÇáΓÇÖ HvielDocEngine file) ├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼
+    # ------ Document generation path (Gemini JSON  ->  HvielDocEngine file) ------------------------------
 
     file_type = hviel_engine._detect_type(message) if hviel_engine else None
 
@@ -4190,7 +4183,7 @@ async def handle(
 
 
 
-    # ├óΓÇ¥Γé¼├óΓÇ¥Γé¼ Standard chat path (Gemini with file analysis) ├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼
+    # ------ Standard chat path (Gemini with file analysis) ------------------------------------------------------------------------
 
     hist_rows = db("SELECT role, text FROM m WHERE sid=? AND user_email=? ORDER BY id DESC LIMIT 10", (sid, email))
 
@@ -4304,7 +4297,7 @@ async def download_report(filename: str):
 
 
 
-# ├óΓÇ¥Γé¼├óΓÇ¥Γé¼ FRONTEND SERVING (SPA) ├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼
+# ------ FRONTEND SERVING (SPA) ---------------------------------------------------------------------------------------------------------------------------------------------------------
 
 _DIST_DIR = os.path.join(os.path.dirname(__file__), "frontend", "dist")
 

@@ -66,7 +66,7 @@ _logger = logging.getLogger("PRC-Hub")
 
 
 
-# â”€â”€ ENV â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+# -- ENV ----------------------------------------------------------------------
 
 try:
 
@@ -80,7 +80,7 @@ except Exception:
 
 
 
-# â”€â”€ RATE LIMITER (optional dep) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+# -- RATE LIMITER (optional dep) -----------------------------------------------
 
 try:
 
@@ -102,7 +102,7 @@ except ImportError:
 
 
 
-# â”€â”€ SECRETS â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+# -- SECRETS -------------------------------------------------------------------
 
 _GEMINI_POOL_RAW: list[str] = []
 
@@ -128,13 +128,13 @@ ADMIN_PIN        = os.getenv("ADMIN_PIN", "").strip()
 
 
 
-_ADMIN_TOKENS:    dict[str, float] = {}   # token â†’ expiry (epoch)
+_ADMIN_TOKENS:    dict[str, float] = {}   # token  ->  expiry (epoch)
 
 _ADMIN_TOKEN_TTL: int              = 900  # 15 min
 
 
 
-# â”€â”€ DATABASE LAYER â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+# -- DATABASE LAYER ------------------------------------------------------------
 
 DATABASE_URL  = os.getenv("DATABASE_URL", "").strip()
 
@@ -374,7 +374,7 @@ def _log_physics_audit(sid: str, data_type: str, audit_res: dict, file_name: str
 
 
 
-# â”€â”€ THREAD-SAFE KEY TRACKING â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+# -- THREAD-SAFE KEY TRACKING --------------------------------------------------
 
 _FAILED_KEYS:      dict[str, dict] = {}
 
@@ -406,7 +406,7 @@ def _key_healthy(key: str) -> bool:
 
 
 
-# â”€â”€ SYSTEM PROMPT â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+# -- SYSTEM PROMPT -------------------------------------------------------------
 
 from pathlib import Path
 SYSTEM_PROMPT = (Path(__file__).parent / "prompts" / "hviel_system_prompt.md").read_text(encoding="utf-8")
@@ -418,7 +418,7 @@ SYSTEM_PROMPT = (Path(__file__).parent / "prompts" / "hviel_system_prompt.md").r
 
 
 
-# â”€â”€ GEMINI TOOL DECLARATIONS â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+# -- GEMINI TOOL DECLARATIONS --------------------------------------------------
 
 _HVIEL_TOOLS = [
 
@@ -526,27 +526,27 @@ _HVIEL_TOOLS = [
 
                 "description": (
 
-                    "**MANDATORY before reporting any fitted parameter (Archie n, m, a, MICP Pe/Pd/modal radius, Corey exponents, J-function values). Never report these values without calling this tool first. If the tool fails, report the failure â€” do not estimate.** "
+                    "**MANDATORY before reporting any fitted parameter (Archie n, m, a, MICP Pe/Pd/modal radius, Corey exponents, J-function values). Never report these values without calling this tool first. If the tool fails, report the failure  -  do not estimate.** "
 
                     "Fits raw SCAL lab data to standard petrophysical models. Select model by curve type:\n"
 
-                    "  model='brooks_corey' or 'let' â†’ Relative Permeability (pass sw, krw, kro arrays).\n"
+                    "  model='brooks_corey' or 'let'  ->  Relative Permeability (pass sw, krw, kro arrays).\n"
 
-                    "  model='micp' â†’ Mercury Injection (pass pc=[psia], s_hg=[fraction 0-1]). "
+                    "  model='micp'  ->  Mercury Injection (pass pc=[psia], s_hg=[fraction 0-1]). "
 
                     "For imbibition (recovery) cycle: also pass pc_imb=[psia], s_hg_imb=[fraction]. "
 
                     "Auto-generates log-scale Pc curve (drainage solid, imbibition dashed) + PSD.\n"
 
-                    "  model='ri' â†’ Resistivity Index Archie fit (pass sw=[...], ri=[...]). Log-log plot, fits n exponent.\n"
+                    "  model='ri'  ->  Resistivity Index Archie fit (pass sw=[...], ri=[...]). Log-log plot, fits n exponent.\n"
 
-                    "  model='ff' â†’ Formation Factor Archie fit (pass porosity=[...], ff=[...]). Log-log plot, fits m and a.\n"
+                    "  model='ff'  ->  Formation Factor Archie fit (pass porosity=[...], ff=[...]). Log-log plot, fits m and a.\n"
 
-                    "  model='jfunction' â†’ Leverett J-Function (pass sw=[...], pc=[psia], k_md=X, phi_val=Y, ift_cos_theta=26.5).\n"
+                    "  model='jfunction'  ->  Leverett J-Function (pass sw=[...], pc=[psia], k_md=X, phi_val=Y, ift_cos_theta=26.5).\n"
 
-                    "  model='pc_centrifuge' â†’ Capillary Pressure direct (pass sw=[...], pc=[psia values]).\n"
+                    "  model='pc_centrifuge'  ->  Capillary Pressure direct (pass sw=[...], pc=[psia values]).\n"
 
-                    "  model='overburden' â†’ Compaction curves (pass pressure=[psia], porosity=[...], perm=[mD]). Dual-axis.\n"
+                    "  model='overburden'  ->  Compaction curves (pass pressure=[psia], porosity=[...], perm=[mD]). Dual-axis.\n"
 
                     "Pass sample_name='Core-1' to label multi-sample charts."
 
@@ -902,7 +902,7 @@ class PRCChatAssistant:
 
             if not sid:
 
-                result = "ERROR: session context unavailable â€” use the Download Report button instead."
+                result = "ERROR: session context unavailable  -  use the Download Report button instead."
 
             else:
 
@@ -940,7 +940,7 @@ class PRCChatAssistant:
 
                 else:
 
-                    summary = ["### PRC AUDIT LEDGER â€” SESSION HISTORY"]
+                    summary = ["### PRC AUDIT LEDGER  -  SESSION HISTORY"]
 
                     for r in rows:
 
@@ -982,7 +982,7 @@ class PRCChatAssistant:
 
                     return (
 
-                        f"\n\n**Executive SCAL Report â€” {well}**\n\n"
+                        f"\n\n**Executive SCAL Report  -  {well}**\n\n"
 
                         f"The report has been compiled and is ready for download.\n\n"
 
@@ -1022,7 +1022,7 @@ class PRCChatAssistant:
 
                     shg_s   = shg_arr[idx]
 
-                    # X-axis: fraction â†’ % Pore Volume
+                    # X-axis: fraction  ->  % Pore Volume
 
                     shg_pct = shg_s * 100.0
 
@@ -1032,13 +1032,13 @@ class PRCChatAssistant:
 
                     r_um    = 107.5 / pc_pos
 
-                    # Entry pressure â€” first point where Hg_sat > 1 %
+                    # Entry pressure  -  first point where Hg_sat > 1 %
 
                     entry_mask = shg_s > 0.01
 
                     pe = float(pc_s[entry_mask][0]) if entry_mask.any() else float(pc_s[0])
 
-                    # Threshold pressure â€” inflection of Pc(Sw) curve
+                    # Threshold pressure  -  inflection of Pc(Sw) curve
 
                     if len(pc_s) > 2:
 
@@ -1138,11 +1138,11 @@ class PRCChatAssistant:
 
 
 
-                    # Plot 1 â€” Capillary Pressure (log-scale Y)
+                    # Plot 1  -  Capillary Pressure (log-scale Y)
 
                     plot_pc = {
 
-                        "title":    "MICP â€” Capillary Pressure vs Mercury Saturation",
+                        "title":    "MICP  -  Capillary Pressure vs Mercury Saturation",
 
                         "xAxis":    {"label": "Mercury Saturation (% Pore Volume)"},
 
@@ -1170,7 +1170,7 @@ class PRCChatAssistant:
 
                     }
 
-                    # Plot 2 â€” Pore Size Distribution
+                    # Plot 2  -  Pore Size Distribution
 
                     plot_psd = {
 
@@ -1270,7 +1270,7 @@ class PRCChatAssistant:
 
                     plot_ri  = {
 
-                        "title":    f"Resistivity Index â€” RI vs Sw ({sample})",
+                        "title":    f"Resistivity Index  -  RI vs Sw ({sample})",
 
                         "xAxis":    {"label": "Water Saturation Sw (fraction)"},
 
@@ -1356,7 +1356,7 @@ class PRCChatAssistant:
 
                     plot_ff = {
 
-                        "title":    f"Formation Factor â€” FF vs Porosity ({sample})",
+                        "title":    f"Formation Factor  -  FF vs Porosity ({sample})",
 
                         "xAxis":    {"label": "Porosity Ï† (fraction)"},
 
@@ -1434,7 +1434,7 @@ class PRCChatAssistant:
 
                     pc_a  = np.array(pc_raw, dtype=float)
 
-                    # J = 0.21645 Ã— Pc[psia] Ã— sqrt(k[mD]/Ï†) / ÏƒcosÎ¸[dyn/cm]
+                    # J = 0.21645  x  Pc[psia]  x  sqrt(k[mD]/Ï†) / ÏƒcosÎ¸[dyn/cm]
 
                     j_arr = 0.21645 * pc_a * np.sqrt(k_md / phi_val) / ift_ct
 
@@ -1470,7 +1470,7 @@ class PRCChatAssistant:
 
 
 
-            # â”€â”€ CAPILLARY PRESSURE â€” CENTRIFUGE / POROUS PLATE â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+            # â”€â”€ CAPILLARY PRESSURE  -  CENTRIFUGE / POROUS PLATE â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
             if name == "fit_petrophysical_curve" and args.get("model") == "pc_centrifuge":
 
@@ -1490,7 +1490,7 @@ class PRCChatAssistant:
 
                     plot_pc = {
 
-                        "title": f"Capillary Pressure â€” Pc vs Sw ({sample})",
+                        "title": f"Capillary Pressure  -  Pc vs Sw ({sample})",
 
                         "xAxis": {"label": "Water Saturation Sw (fraction)"},
 
@@ -1586,7 +1586,7 @@ class PRCChatAssistant:
 
                     plot_ob = {
 
-                        "title":         f"Overburden Compaction â€” Ï† & k vs Net Stress ({sample})",
+                        "title":         f"Overburden Compaction  -  Ï† & k vs Net Stress ({sample})",
 
                         "xAxis":         {"label": "Net Confining Pressure (psia)"},
 
@@ -2577,7 +2577,7 @@ class PRCChatAssistant:
 
                         _logger.warning(f"[Hviel] All keys returned 503 (overload): {e}")
 
-                        yield {"type": "token", "text": "âš ï¸� Gemini is currently under high demand (503). Please retry in a few seconds."}
+                        yield {"type": "token", "text": "[!]� Gemini is currently under high demand (503). Please retry in a few seconds."}
 
                         return
 
@@ -2619,7 +2619,7 @@ class PRCChatAssistant:
 
         """Call Gemini (no tools) to produce structured JSON for HvielDocEngine.build_from_json().
 
-        Returns raw JSON string â€” may have ```json fences which build_from_json strips."""
+        Returns raw JSON string  -  may have ```json fences which build_from_json strips."""
 
         _SCHEMAS = {
 
@@ -2679,7 +2679,7 @@ class PRCChatAssistant:
 
         system_doc = (
 
-            f"You are Hviel â€” PRC Senior AI Petrophysical Specialist, Petroleum Research Center, Libya.\n"
+            f"You are Hviel  -  PRC Senior AI Petrophysical Specialist, Petroleum Research Center, Libya.\n"
 
             f"Generate a professional {file_type.upper()} export for the PRC.\n"
 
@@ -2695,13 +2695,13 @@ class PRCChatAssistant:
 
             f"- Include Executive Summary, Methodology, Results & Interpretation, and Conclusions sections\n"
 
-            f"- Tables must contain realistic numerical SCAL data â€” no placeholder values\n"
+            f"- Tables must contain realistic numerical SCAL data  -  no placeholder values\n"
 
             f"- Minimum 4 sections (docx/pdf) or 2 data sheets (xlsx) with substantive content\n"
 
             f"- author field: \"{engineer}\"\n"
 
-            f"- Never use '...' or '[insert value]' â€” derive everything from the conversation\n"
+            f"- Never use '...' or '[insert value]'  -  derive everything from the conversation\n"
 
         )
 
@@ -3063,7 +3063,7 @@ def init_db() -> None:
 
         "CREATE TABLE IF NOT EXISTS analytics_events (id INTEGER PRIMARY KEY AUTOINCREMENT, user_email TEXT, event_type TEXT, event_data TEXT, ts REAL)",
 
-        # THE AUDITOR'S LEDGER â€” append-only physics integrity log
+        # THE AUDITOR'S LEDGER  -  append-only physics integrity log
 
         "CREATE TABLE IF NOT EXISTS physics_audits (id INTEGER PRIMARY KEY AUTOINCREMENT, session_id TEXT, user_email TEXT, timestamp REAL, data_type TEXT, health_score INTEGER, violations TEXT, file_name TEXT)",
 
@@ -3095,7 +3095,7 @@ def init_db() -> None:
 
         except Exception: pass
 
-    # Backfill existing m rows â†’ sessions table (migration for pre-existing installs)
+    # Backfill existing m rows  ->  sessions table (migration for pre-existing installs)
 
     try:
 
@@ -3201,7 +3201,7 @@ def _verify_session_owner(sid: str, email: str):
 
     if row and row[0][0] and row[0][0].lower().strip() != email.lower().strip():
 
-        _logger.warning(f"[SECURITY] Unauthorized access attempt: {email} â†’ session {sid}")
+        _logger.warning(f"[SECURITY] Unauthorized access attempt: {email}  ->  session {sid}")
 
         raise HTTPException(status_code=403, detail="Unauthorized: You do not own this session.")
 
@@ -3777,7 +3777,7 @@ async def handle(
 
 
 
-    # â”€â”€ Document generation path (Gemini JSON â†’ HvielDocEngine file) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    # â”€â”€ Document generation path (Gemini JSON  ->  HvielDocEngine file) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
     file_type = hviel_engine._detect_type(message) if hviel_engine else None
 

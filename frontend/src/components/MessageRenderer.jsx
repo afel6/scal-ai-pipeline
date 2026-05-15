@@ -21,8 +21,10 @@ const KnowledgeCard = ({ title, content }) => {
   return (
     <div className="my-4 p-4 bg-slate-800/50 border border-slate-700 rounded-lg">
       <h4 className="text-sm font-bold text-slate-200 mb-2">{title.replace(/^\d+[\.\s]+/, '')}</h4>
-      <div className="text-sm text-slate-300 leading-relaxed">
-        {content}
+      <div className="text-sm text-slate-300 leading-relaxed prc-markdown">
+        <ReactMarkdown remarkPlugins={[remarkGfm]}>
+          {content}
+        </ReactMarkdown>
       </div>
     </div>
   );

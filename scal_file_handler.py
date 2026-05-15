@@ -33,39 +33,25 @@ class SCALFileHandler:
     # ------------------------------------------------------------------ #
 
     def read(self):
-        """Read the file efficiently by scanning sheet names first."""
+        """Read ALL sheets in the workbook without filtering by name.
 
+        The previous optimisation that whitelisted sheet names by keyword
+        silently dropped sheets named "Sample 1", "Sample 2", etc.
+        For SCAL files we cannot afford silent data loss — read everything
+        and let the extractor decide what is relevant.
+        """
         if self.extension in ('.xlsx', '.xlsm', '.xls', '.ods'):
-            engine = 'openpyxl' if self.extension in ('.xlsx', '.xlsm') else ('xlrd' if self.extension == '.xls' else 'odf')
+            engine = (
+                'openpyxl' if self.extension in ('.xlsx', '.xlsm')
+                else ('xlrd' if self.extension == '.xls' else 'odf')
+            )
             xl = pd.ExcelFile(self.file_path, engine=engine)
             self.sheet_names = xl.sheet_names
-            
-            # Optimization: Only read sheets that likely contain SCAL data
-            # This prevents "taking too long" on huge multi-sheet workbooks.
-            target_sheets = []
-            all_keywords = []
-            for klist in self.KEYWORDS.values():
-                all_keywords.extend(klist)
-            
-            for sheet in self.sheet_names:
-                s_lower = sheet.lower()
-                # Direct match or likely candidate
-                if any(kw in s_lower for kw in ['scal', 'core', 'data', 'test', 'result', 'analysis', 'summary', 'centrifuge', 'micp', 'permeability', 'porosity']):
-                    target_sheets.append(sheet)
-                elif any(kw in s_lower for kw in all_keywords):
-                    target_sheets.append(sheet)
-            
-            # If no sheets match, we must read the first few just in case
-            if not target_sheets and self.sheet_names:
-                target_sheets = self.sheet_names[:3] 
 
-            for sheet in target_sheets:
+            for sheet in self.sheet_names:
                 self.raw_data[sheet] = pd.read_excel(
                     xl, sheet_name=sheet, header=None
                 )
-            
-            # Update sheet_names to only reflect what we actually read
-            self.sheet_names = list(self.raw_data.keys())
 
         elif self.extension == '.csv':
             df = pd.read_csv(self.file_path, header=None)
@@ -168,49 +154,158 @@ class SCALFileHandler:
             extractors[self.data_type]()
         return self
 
+    # ------------------------------------------------------------------ #
+    # MICP HELPERS
+    # ------------------------------------------------------------------ #
+
+    # Column header substrings that prove a column is a volume measurement
+    # (e.g. "Cumulative Intrusion (mL/g)") and must NEVER be used as saturation.
+    _VOL_UNIT_REJECT = frozenset([
+        'ml/g', 'cc/g', 'ml/gm', 'cc/gm', 'cm3/g', 'cm³/g',
+        'ml/gram', 'cc/gram',
+    ])
+
+    # Sheet name fragments that identify aggregate / summary sheets.
+    # These are NOT individual rock samples and must not be treated as such.
+    _SUMMARY_SHEET_KEYWORDS = frozenset([
+        'all data', 'all_data', 'alldata', 'all sheet', 'summary',
+        'combined', 'composite', 'total', 'overview', 'aggregate',
+        'report', 'master',
+    ])
+
+    def _is_summary_sheet(self, sheet_name: str) -> bool:
+        """Return True when the sheet name suggests it is a summary/aggregate sheet."""
+        s = sheet_name.lower().strip()
+        return any(kw in s for kw in self._SUMMARY_SHEET_KEYWORDS)
+
+    def _pick_micp_sat_col(self, headers: list):
+        """
+        Return the column index most likely to hold Hg Saturation (% or fraction).
+
+        Scoring (highest wins):
+          +100  header contains '%'  — explicit percent marker
+          + 80  'hg sat' / 's_hg' / 'shg' literal
+          + 50  'sat' in header (no volume unit present)
+          + 40  'sw' in header
+          + 20  'pv' in header (pore-volume fraction, dimensionless)
+          + 10  'hg' alone (last-resort fallback)
+          −200  'intrusion' without '%' → volume intrusion, NOT saturation
+          SKIP  any header containing a volume unit (ml/g, cc/g, …)
+        """
+        candidates = []
+        for j, h in enumerate(headers):
+            h_str = str(h).lower().strip()
+
+            # Hard reject: any column whose header contains a volume unit.
+            # "Cumulative Intrusion (mL/g)" must never be picked as saturation.
+            if any(vunit in h_str for vunit in self._VOL_UNIT_REJECT):
+                continue
+
+            score = 0
+
+            # Strongly penalise 'intrusion' unless a '%' sign co-occurs
+            if 'intrusion' in h_str and '%' not in h_str:
+                score -= 200
+
+            if '%' in h_str:                                         score += 100
+            if 'hg sat' in h_str or 's_hg' in h_str:               score += 80
+            if h_str.replace(' ', '') in ('shg', 's_hg'):           score += 80
+            if 'sat' in h_str:                                       score += 50
+            if 'sw' in h_str:                                        score += 40
+            if 'pv' in h_str and 'intrusion' not in h_str:          score += 20
+            if 'hg' in h_str and 'intrusion' not in h_str:          score += 10
+
+            if score > 0:
+                candidates.append((score, j))
+
+        if not candidates:
+            return None
+        return max(candidates, key=lambda x: x[0])[1]
+
     # ---- MICP ---- #
     def _extract_micp(self):
+        """
+        Extract MICP drainage/imbibition curves from every sheet.
+
+        Each result is tagged with:
+          sheet_name   — the exact Excel sheet name
+          sheet_type   — 'sample' | 'summary'
+          sat_column_used — the exact header string chosen for saturation
+          sat_is_percent  — True if values appear to be 0-100 %, False if 0-1 fraction
+
+        Summary sheets are still extracted (they may be useful for reference)
+        but are clearly flagged so the AI does not treat them as distinct rock samples.
+        """
         results = {}
         for sheet, df in self.raw_data.items():
             text = ' '.join(str(v).lower() for v in df.values.flatten() if pd.notna(v))
-            if not any(kw in text for kw in ['mercury', 'hg', 'psia', 'mpa', 'intrusion', 'capillary pressure', 'pc']):
+            if not any(kw in text for kw in [
+                'mercury', 'hg', 'psia', 'mpa', 'intrusion', 'capillary pressure', 'pc'
+            ]):
                 continue
-                
+
+            sheet_type = 'summary' if self._is_summary_sheet(sheet) else 'sample'
+
             for i in range(min(30, len(df))):
                 row = [str(v).lower() for v in df.iloc[i] if pd.notna(v)]
-                if any(kw in c for c in row for kw in ['press', 'psia', 'mpa', 'pc']) and any(kw in c for c in row for kw in ['sat', 'hg', 'pv', 'intrusion', 'sw']):
-                    headers = list(df.iloc[i])
-                    data = df.iloc[i+1:].reset_index(drop=True)
-                    data.columns = range(len(data.columns))
-                    press_col = next((j for j, h in enumerate(headers) if any(kw in str(h).lower() for kw in ['press', 'psia', 'mpa', 'pc'])), None)
-                    sat_col = next((j for j, h in enumerate(headers) if any(kw in str(h).lower() for kw in ['sat', 'hg', 'pv', 'intrusion', 'sw'])), None)
-                    
-                    if press_col is not None and sat_col is not None and press_col != sat_col:
-                        cycle_col = next((j for j, h in enumerate(headers) if 'cycle' in str(h).lower()), None)
-                        
-                        drainage = {'pressure': [], 'sat_pv': []}
-                        imbibition = {'pressure': [], 'sat_pv': []}
-                        
-                        for idx, r in data.iterrows():
-                            p = pd.to_numeric(r[press_col], errors='coerce')
-                            s = pd.to_numeric(r[sat_col], errors='coerce')
-                            if pd.isna(p) or pd.isna(s):
-                                continue
-                                
-                            c = str(r[cycle_col]).strip().upper() if cycle_col is not None else 'D'
-                            if c.startswith('I'):
-                                imbibition['pressure'].append(round(float(p), 3))
-                                imbibition['sat_pv'].append(round(float(s), 4))
-                            else:
-                                drainage['pressure'].append(round(float(p), 3))
-                                drainage['sat_pv'].append(round(float(s), 4))
-                                
-                        if drainage['pressure'] or imbibition['pressure']:
-                            results[sheet] = {
-                                'drainage': drainage,
-                                'imbibition': imbibition
-                            }
-                            break
+                has_press = any(kw in c for c in row for kw in ['press', 'psia', 'mpa', 'pc'])
+                has_sat   = any(kw in c for c in row for kw in ['sat', 'hg', 'pv', 'intrusion', 'sw'])
+                if not (has_press and has_sat):
+                    continue
+
+                headers  = list(df.iloc[i])
+                data     = df.iloc[i + 1:].reset_index(drop=True)
+                data.columns = range(len(data.columns))
+
+                press_col = next(
+                    (j for j, h in enumerate(headers)
+                     if any(kw in str(h).lower() for kw in ['press', 'psia', 'mpa', 'pc'])),
+                    None
+                )
+                # FIX 3 — use scored selector, not plain next()
+                sat_col = self._pick_micp_sat_col(headers)
+
+                if press_col is None or sat_col is None or press_col == sat_col:
+                    continue
+
+                cycle_col = next(
+                    (j for j, h in enumerate(headers) if 'cycle' in str(h).lower()), None
+                )
+
+                drainage    = {'pressure': [], 'sat_pv': []}
+                imbibition  = {'pressure': [], 'sat_pv': []}
+
+                for _, r in data.iterrows():
+                    p = pd.to_numeric(r[press_col], errors='coerce')
+                    s = pd.to_numeric(r[sat_col],   errors='coerce')
+                    if pd.isna(p) or pd.isna(s):
+                        continue
+
+                    cycle = str(r[cycle_col]).strip().upper() if cycle_col is not None else 'D'
+                    if cycle.startswith('I'):
+                        imbibition['pressure'].append(round(float(p), 3))
+                        imbibition['sat_pv'].append(round(float(s), 4))
+                    else:
+                        drainage['pressure'].append(round(float(p), 3))
+                        drainage['sat_pv'].append(round(float(s), 4))
+
+                if not (drainage['pressure'] or imbibition['pressure']):
+                    continue
+
+                # Detect whether saturation is already a percentage or a fraction
+                all_sat = drainage['sat_pv'] + imbibition['sat_pv']
+                sat_is_percent = bool(all_sat) and max(all_sat) > 1.5
+
+                # FIX 2 — tag every result with sheet identity and type
+                results[sheet] = {
+                    'sheet_name':      sheet,
+                    'sheet_type':      sheet_type,
+                    'sat_column_used': str(headers[sat_col]),
+                    'sat_is_percent':  sat_is_percent,
+                    'drainage':        drainage,
+                    'imbibition':      imbibition,
+                }
+                break  # found the data block in this sheet; move to next sheet
 
         self.extracted = {'type': 'MICP', 'samples': results}
 
@@ -249,23 +344,23 @@ class SCALFileHandler:
 
             indep_var = 'Sw' if 'Sw' in col_map else ('Sg' if 'Sg' in col_map else None)
             extracted_cols = {k: [] for k in col_map.keys()}
-            
+
             for idx, r in data_df.iterrows():
                 if indep_var:
                     x = pd.to_numeric(r[col_map[indep_var]], errors='coerce')
                     if pd.isna(x):
                         continue
-                
+
                 has_dep = False
                 for k, j in col_map.items():
                     if k != indep_var:
                         v = pd.to_numeric(r[j], errors='coerce')
                         if not pd.isna(v):
                             has_dep = True
-                            
+
                 if not has_dep and len(col_map) > 1:
                     continue
-                    
+
                 for k, j in col_map.items():
                     v = pd.to_numeric(r[j], errors='coerce')
                     extracted_cols[k].append(v if not pd.isna(v) else None)
@@ -405,21 +500,21 @@ class SCALFileHandler:
                     phi_col   = next((j for j, h in enumerate(headers) if 'poros' in str(h).lower()), None)
                     perm_col  = next((j for j, h in enumerate(headers) if 'perm'  in str(h).lower()), None)
                     depth_col = next((j for j, h in enumerate(headers) if 'depth' in str(h).lower()), None)
-                    
+
                     phi_vals, perm_vals, depth_vals = [], [], []
                     for idx, r in data.iterrows():
-                        phi = pd.to_numeric(r[phi_col], errors='coerce') if phi_col is not None else None
-                        perm = pd.to_numeric(r[perm_col], errors='coerce') if perm_col is not None else None
-                        depth = pd.to_numeric(r[depth_col], errors='coerce') if depth_col is not None else None
-                        
+                        phi  = pd.to_numeric(r[phi_col],   errors='coerce') if phi_col  is not None else None
+                        perm = pd.to_numeric(r[perm_col],  errors='coerce') if perm_col is not None else None
+                        depth= pd.to_numeric(r[depth_col], errors='coerce') if depth_col is not None else None
+
                         if pd.isna(phi) or pd.isna(perm):
                             continue
-                            
+
                         phi_vals.append(phi)
                         perm_vals.append(perm)
                         if depth_col is not None:
                             depth_vals.append(depth)
-                            
+
                     sheet_data = {}
                     if phi_vals:
                         sheet_data['porosity'] = phi_vals
@@ -437,7 +532,6 @@ class SCALFileHandler:
             text = ' '.join(str(v).lower() for v in df.values.flatten() if pd.notna(v))
             if 'amott' not in text and 'usbm' not in text:
                 continue
-            # Collect all numeric values with their labels
             sheet_data = {}
             for i in range(len(df)):
                 row = df.iloc[i].tolist()
@@ -455,36 +549,45 @@ class SCALFileHandler:
         for sheet, df in self.raw_data.items():
             for i in range(min(30, len(df))):
                 row = [str(v).lower() for v in df.iloc[i] if pd.notna(v)]
-                
-                is_standard_pc = any(kw in c for c in row for kw in ['sw', 'sat', 'saturation']) and any(kw in c for c in row for kw in ['pc', 'capillary', 'psia', 'mpa', 'press', 'pressure'])
-                is_centrifuge = any(kw in c for c in row for kw in ['rpm', 'speed', 'g-force', 'step']) and any(kw in c for c in row for kw in ['volume', 'produced', 'cc', 'ml', 'production', 'recovery', 'fluid'])
-                
-                if is_standard_pc or is_centrifuge:
-                    headers = list(df.iloc[i])
-                    data = df.iloc[i+1:].reset_index(drop=True)
-                    data.columns = range(len(data.columns))
-                    
-                    if is_standard_pc:
-                        x_col = next((j for j, h in enumerate(headers) if any(kw in str(h).lower() for kw in ['sw', 'sat', 'saturation'])), None)
-                        y_col = next((j for j, h in enumerate(headers) if any(kw in str(h).lower() for kw in ['pc', 'capillary', 'psia', 'mpa', 'press', 'pressure'])), None)
-                        x_name, y_name = 'Sw', 'Pc'
-                    else:
-                        x_col = next((j for j, h in enumerate(headers) if any(kw in str(h).lower() for kw in ['rpm', 'speed', 'g-force', 'step'])), None)
-                        y_col = next((j for j, h in enumerate(headers) if any(kw in str(h).lower() for kw in ['volume', 'produced', 'cc', 'ml', 'production', 'recovery', 'fluid'])), None)
-                        x_name, y_name = 'RPM', 'Produced Volume'
-                        
-                    if x_col is not None and y_col is not None and x_col != y_col:
-                        x_vals = []
-                        y_vals = []
-                        for idx, r in data.iterrows():
-                            x = pd.to_numeric(r[x_col], errors='coerce')
-                            y = pd.to_numeric(r[y_col], errors='coerce')
-                            if not pd.isna(x) and not pd.isna(y):
-                                x_vals.append(x)
-                                y_vals.append(y)
-                        if x_vals:
-                            results[sheet] = {x_name: x_vals, y_name: y_vals}
-                            break
+
+                is_standard_pc = (
+                    any(kw in c for c in row for kw in ['sw', 'sat', 'saturation']) and
+                    any(kw in c for c in row for kw in ['pc', 'capillary', 'psia', 'mpa', 'press', 'pressure'])
+                )
+                is_centrifuge = (
+                    any(kw in c for c in row for kw in ['rpm', 'speed', 'g-force', 'step']) and
+                    any(kw in c for c in row for kw in ['volume', 'produced', 'cc', 'ml', 'production', 'recovery', 'fluid'])
+                )
+
+                if not (is_standard_pc or is_centrifuge):
+                    continue
+
+                headers = list(df.iloc[i])
+                data = df.iloc[i+1:].reset_index(drop=True)
+                data.columns = range(len(data.columns))
+
+                if is_standard_pc:
+                    x_col = next((j for j, h in enumerate(headers) if any(kw in str(h).lower() for kw in ['sw', 'sat', 'saturation'])), None)
+                    y_col = next((j for j, h in enumerate(headers) if any(kw in str(h).lower() for kw in ['pc', 'capillary', 'psia', 'mpa', 'press', 'pressure'])), None)
+                    x_name, y_name = 'Sw', 'Pc'
+                else:
+                    x_col = next((j for j, h in enumerate(headers) if any(kw in str(h).lower() for kw in ['rpm', 'speed', 'g-force', 'step'])), None)
+                    y_col = next((j for j, h in enumerate(headers) if any(kw in str(h).lower() for kw in ['volume', 'produced', 'cc', 'ml', 'production', 'recovery', 'fluid'])), None)
+                    x_name, y_name = 'RPM', 'Produced Volume'
+
+                if x_col is None or y_col is None or x_col == y_col:
+                    continue
+
+                x_vals, y_vals = [], []
+                for idx, r in data.iterrows():
+                    x = pd.to_numeric(r[x_col], errors='coerce')
+                    y = pd.to_numeric(r[y_col], errors='coerce')
+                    if not pd.isna(x) and not pd.isna(y):
+                        x_vals.append(x)
+                        y_vals.append(y)
+                if x_vals:
+                    results[sheet] = {x_name: x_vals, y_name: y_vals}
+                    break
         self.extracted = {'type': 'PC', 'samples': results}
 
     # ------------------------------------------------------------------ #
@@ -520,9 +623,12 @@ class SCALFileHandler:
 
 def build_prompt_for_ai(processed: dict) -> str:
     """
-    Takes the output of SCALFileHandler.process() and builds
-    a prompt to send to your AI (Gemini, Claude, etc.)
-    so it can plot or analyze the data.
+    Takes the output of SCALFileHandler.process() and builds a structured
+    prompt for the AI so it can analyse and plot the data correctly.
+
+    MICP data is routed through a purpose-built prompt that handles
+    summary-sheet disambiguation, correct Pd extraction, and an explicit
+    anti-fabrication guardrail for geological interpretation.
     """
     data_type = processed['data_type']
     extracted  = processed['extracted']
@@ -533,15 +639,19 @@ def build_prompt_for_ai(processed: dict) -> str:
             "Please check the file and re-upload."
         )
 
-    data_json = json.dumps(extracted, indent=2)
+    # FIX 2 + FIX 4 — MICP gets a dedicated, guardrailed prompt
+    if data_type == 'MICP':
+        return _build_micp_prompt(extracted)
 
-    prompt = f"""
+    # Generic prompt for all other data types
+    data_json = json.dumps(extracted, indent=2)
+    return f"""
 You are a petrophysics AI assistant. The engineer has uploaded a SCAL file.
 I have already read and extracted the data for you. Do not read the file again.
 
 Data type identified: {data_type}
 
-Extracted data:
+Extracted data (each top-level key is the Excel sheet name the data came from):
 {data_json}
 
 Instructions:
@@ -549,10 +659,107 @@ Instructions:
 2. Use the correct axis scales and labels as per petroleum engineering standards.
 3. After the chart, give 3-5 bullet points of key observations.
 4. Do NOT generate or invent any data. Use only what is provided above.
+5. All data comes from the same well. Do not fabricate geological differences
+   between sheets just because values differ — sample-to-sample variation is normal.
 """
-    return prompt
 
 
+def _build_micp_prompt(extracted: dict) -> str:
+    """
+    Purpose-built MICP prompt that enforces:
+      FIX 2 — summary vs. sample sheet disambiguation
+      FIX 4 — anti-hallucination guardrail for geological interpretation
+    """
+    samples = extracted.get('samples', {})
+
+    sample_sheets  = [k for k, v in samples.items() if isinstance(v, dict) and v.get('sheet_type') == 'sample']
+    summary_sheets = [k for k, v in samples.items() if isinstance(v, dict) and v.get('sheet_type') == 'summary']
+
+    sample_list_str  = '\n'.join(f'  - "{s}"' for s in sample_sheets)  or '  (none detected)'
+    summary_list_str = '\n'.join(f'  - "{s}"' for s in summary_sheets) or '  (none)'
+
+    data_json = json.dumps(extracted, indent=2)
+
+    return f"""
+You are a petrophysics AI assistant performing MICP (Mercury Injection Capillary Pressure) analysis.
+The file has already been parsed. The extracted data is below. Do NOT re-read the file.
+
+═══════════════════════════════════════════════════════════
+SHEET CLASSIFICATION (determined by sheet name)
+═══════════════════════════════════════════════════════════
+Individual sample sheets — use ONLY these for per-sample analysis:
+{sample_list_str}
+
+Summary / aggregate sheets — these consolidate data across samples.
+Do NOT treat them as distinct rock samples or distinct data sources:
+{summary_list_str}
+
+═══════════════════════════════════════════════════════════
+EXTRACTED DATA  (keyed by exact Excel sheet name)
+═══════════════════════════════════════════════════════════
+{data_json}
+
+═══════════════════════════════════════════════════════════
+MANDATORY ANALYSIS INSTRUCTIONS
+═══════════════════════════════════════════════════════════
+
+1. PER-SAMPLE ANALYSIS ONLY
+   Analyse and report results individually for each sheet listed under
+   "Individual sample sheets" above. Do NOT analyse summary/aggregate
+   sheets as independent rock samples. If a summary sheet is present,
+   note it exists but do not compare its aggregated values against
+   individual sample curves as if they represent different rocks.
+
+2. SATURATION COLUMN VALIDATION
+   Each sample entry includes a "sat_column_used" field — the exact
+   column header extracted from the file.
+   • If "sat_is_percent" is true, values are already in % (0–100). Use as-is.
+   • If "sat_is_percent" is false, values are fractional (0–1). Multiply by 100
+     before reporting or plotting.
+   Report the maximum Hg saturation reached (%) for every sample.
+
+3. ENTRY (THRESHOLD) PRESSURE Pd PER SAMPLE
+   For each sample's drainage curve, identify Pd as the pressure at which
+   Hg saturation first rises meaningfully (the "knee" of the curve).
+   Report Pd explicitly in the units present in the data (psia or MPa).
+   State Pd clearly as: "Sample X (sheet: <sheet_name>): Pd = N psia"
+
+4. PORE THROAT SIZE ESTIMATE
+   Using the Washburn equation (assuming IFT = 485 dyne/cm, contact angle = 140°):
+     r_μm ≈ 107 / Pc_psia
+   Categorise dominant pore throats as:
+     macro (>10 μm) | meso (1–10 μm) | micro (0.1–1 μm) | nano (<0.1 μm)
+
+5. PLOT
+   Generate a semi-log plot:
+     X-axis: Hg Saturation (%)  — linear scale, 0 to 100
+     Y-axis: Capillary Pressure — log scale
+   One curve per individual sample sheet. Use distinct colours. Mark Pd
+   for each sample with a vertical dashed line or annotation.
+
+6. ══ ANTI-FABRICATION GUARDRAIL — READ AND ENFORCE ══
+   • ALL data comes from the SAME well.
+   • Different threshold pressures (Pd) between samples are NORMAL —
+     they reflect natural pore-size heterogeneity within the same formation.
+   • Do NOT interpret differing Pd values as evidence of different rock
+     types, different facies, or different geological formations UNLESS
+     the uploaded data explicitly contains depth intervals or lithology
+     annotations that support such a conclusion.
+   • Do NOT hallucinate geological facies names, formation names, or
+     depositional environment descriptions.
+   • Confine all geological language strictly to what the numbers directly
+     support — e.g. "Sample 3 has a higher Pd (smaller pore throats) than
+     Sample 1" is correct. "Sample 3 represents a tighter, lower-quality
+     facies from a different stratigraphic interval" is fabrication unless
+     depth data is present.
+   • Every number you report must be directly traceable to the extracted
+     data above. Do not invent, interpolate, or extrapolate values.
+"""
+
+
+# ------------------------------------------------------------------ #
+# ROBUST FALLBACK EXTRACTOR (unchanged — do not modify)
+# ------------------------------------------------------------------ #
 
 def _detect_data_block(df_raw):
     n_rows, n_cols = df_raw.shape
@@ -578,6 +785,7 @@ def _detect_data_block(df_raw):
             header_row = max(0, data_start - 1)
             return header_row, data_start, data_end
     return None, None, None
+
 
 def _extract_metadata(df_raw, data_start_idx):
     meta = {}
@@ -606,6 +814,7 @@ def _extract_metadata(df_raw, data_start_idx):
                                 break
     return meta
 
+
 def _classify_track(headers, data):
     header_str = " ".join(str(h).lower() for h in headers if pd.notna(h))
 
@@ -624,6 +833,7 @@ def _classify_track(headers, data):
     if "porosity" in header_str and ("permeability" in header_str or " k " in header_str or "ka" in header_str):
         return "BCA"
     return "UNKNOWN"
+
 
 def robust_extract_scal(filepath):
     result = {
@@ -652,7 +862,7 @@ def robust_extract_scal(filepath):
     for eng in engines_to_try:
         try:
             if eng == "csv":
-                sep = "," if ext == ".csv" else "	"
+                sep = "," if ext == ".csv" else "\t"
                 df = pd.read_csv(filepath, header=None, sep=sep)
                 sheets_dict = {"Sheet1": df}
                 result["engine_used"] = "csv"
@@ -715,6 +925,7 @@ def robust_extract_scal(filepath):
 
     return result
 
+
 def extract_file_data(filepath):
     try:
         handler = SCALFileHandler(filepath)
@@ -726,7 +937,6 @@ def extract_file_data(filepath):
 
     robust_result = robust_extract_scal(filepath)
     if any(s.get("data_block") for s in robust_result["sheets"]):
-        # Adapt format for app.py
         data_types = [s["track"] for s in robust_result["sheets"] if s.get("data_block") and s["track"] != "UNKNOWN"]
         dt = data_types[0] if data_types else "UNKNOWN"
         return {
@@ -746,4 +956,3 @@ def extract_file_data(filepath):
         "engines_tried": [e.split(":")[0] for e in robust_result["errors"]],
         "errors": robust_result["errors"],
     }
-
