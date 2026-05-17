@@ -336,6 +336,7 @@ Before every push to `master` (which triggers Render auto-deploy):
 - [ ] Chat smoke test passes (see §5)
 - [ ] No new `db()` call sites use string interpolation
 - [ ] New download paths (if any) use the path traversal guard from §4
+- [ ] `ADMIN_PIN` is set in Render environment variables — not just `.env` (`.env` is never deployed; an unset `ADMIN_PIN` makes every admin login return 401)
 
 ---
 
