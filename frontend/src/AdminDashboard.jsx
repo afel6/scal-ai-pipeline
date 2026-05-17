@@ -1,5 +1,5 @@
 /* eslint-disable no-unused-vars, react-hooks/set-state-in-effect */
-import React, { useState, useEffect, useCallback, useMemo } from 'react';
+import React, { useState, useEffect, useCallback, useMemo, useRef } from 'react';
 import { Users, MessageSquare, BarChart3, Bug, Database, Activity, ArrowLeft, RefreshCw, Clock, Mail, ChevronDown, ChevronUp, LogOut } from 'lucide-react';
 import axios from 'axios';
 
@@ -98,6 +98,15 @@ export default function AdminDashboard({ adminToken, onBack, onLogout }) {
   const [activeTab, setActiveTab] = useState('overview');
   const [loading, setLoading] = useState(true);
 
+  // Tracks mount state so in-flight requests don't setState after unmount (fix 2c).
+  const isMountedRef = useRef(true);
+  useEffect(() => () => { isMountedRef.current = false; }, []);
+
+  // Stable ref for onBack — keeps it out of fetchAll's dep array so a
+  // non-memoised parent prop doesn't trigger an infinite refetch loop (fix 2b).
+  const onBackRef = useRef(onBack);
+  useEffect(() => { onBackRef.current = onBack; }, [onBack]);
+
   const fetchAll = useCallback(async () => {
     if (!adminToken) return;
     setLoading(true);
@@ -109,16 +118,20 @@ export default function AdminDashboard({ adminToken, onBack, onLogout }) {
         axios.get(`${API_URL}/api/admin/feedback`, config),
         axios.get(`${API_URL}/api/admin/users`, config),
       ]);
+      if (!isMountedRef.current) return;
       setSummary(sumRes.data);
       setEvents(evtRes.data?.events || []);
       setFeedback(fbRes.data?.feedback || []);
       setUsers(usrRes.data?.users || []);
     } catch (e) {
       console.error('Admin fetch error:', e);
-      if (e.response?.status === 401) onBack(); 
+      if (e.response?.status === 401) onBackRef.current?.();
+    } finally {
+      // fix 2a: setLoading inside finally so it runs before onBack unmounts,
+      // guarded by isMountedRef so it never fires on a dead component.
+      if (isMountedRef.current) setLoading(false);
     }
-    setLoading(false);
-  }, [adminToken, onBack]);
+  }, [adminToken]); // onBack removed from deps — read via ref (fix 2b)
 
   useEffect(() => { fetchAll(); }, [fetchAll]);
 

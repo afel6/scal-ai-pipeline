@@ -109,11 +109,12 @@ export default function App() {
     }
   }, [adminToken]);
 
-  // ── session loader (stable ref — no stale-closure risk) ───────────────────
+  // ── session loader — includes email for RLS (/api/session/:sid?email=) ────
   const handleLoadSession = useCallback(async (sid) => {
     if (!sid) return;
+    const emailParam = user?.email ? `?email=${encodeURIComponent(user.email)}` : '';
     try {
-      const { data } = await axios.get(`${API_URL}/api/session/${sid}`);
+      const { data } = await axios.get(`${API_URL}/api/session/${sid}${emailParam}`);
       if (data.status === 'ok') {
         startTransition(() => {
           setSessionId(sid);
@@ -136,9 +137,9 @@ export default function App() {
       }
     } catch { /* silently ignore network errors on load */ }
     if (window.innerWidth < 768) setSidebarOpen(false);
-  }, []); // stable — no deps that change
+  }, [user?.email]); // recreates only when email changes — provides RLS param
 
-  // ── server wake + initial session load ────────────────────────────────────
+  // ── server wake — mount only, no session logic here ──────────────────────
   useEffect(() => {
     const wake = async () => {
       try {
@@ -150,9 +151,14 @@ export default function App() {
     };
     wake();
     if (window.innerWidth >= 768) setSidebarOpen(true);
+  }, []); // intentionally empty — runs once on mount
+
+  // ── restore saved session once user is authenticated ─────────────────────
+  useEffect(() => {
+    if (!user?.email) return; // wait for auth before hitting RLS-protected endpoint
     const saved = localStorage.getItem('prc_session_id');
-    if (saved) handleLoadSession(saved);
-  }, [handleLoadSession]);
+    if (saved && saved !== 'null' && saved !== 'undefined') handleLoadSession(saved);
+  }, [user?.email, handleLoadSession]); // fires on login and when handleLoadSession stabilises
 
   // ── session list polling ───────────────────────────────────────────────────
   const refreshSessions = useCallback(async () => {
@@ -163,11 +169,14 @@ export default function App() {
     } catch { /* ignore */ }
   }, [user]);
 
+  // Immediate fetch on login (refreshSessions recreates when user changes),
+  // then keep polling every 8 s.
   useEffect(() => {
+    if (!user?.email) return; // don't poll unauthenticated — backend returns []
     refreshSessions();
     const interval = setInterval(refreshSessions, 8_000);
     return () => clearInterval(interval);
-  }, [refreshSessions]);
+  }, [user?.email, refreshSessions]);
 
   // Auto-load most-recent session once, after sessions list populates
   useEffect(() => {
