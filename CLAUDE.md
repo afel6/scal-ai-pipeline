@@ -197,6 +197,20 @@ Windows layout.
 
 ---
 
+### [2026-05-17] Developer Path Exposure — `push_advanced.cmd` hardcoded `C:\Program Files\Git\cmd`
+
+**Class:** CWE-426 Untrusted Search Path / portability issue  
+**Discovery:** Status audit (follow-up to deploy.ps1 fix on 2026-05-10 — push_advanced.cmd was missed)  
+**Risk:** `set PATH=%PATH%;C:\Program Files\Git\cmd` unconditionally prepended the developer's
+machine-specific Git installation path, silently failing or conflicting on any machine where
+Git lives elsewhere.  
+**Patch:** Replaced with a conditional injection using `WHERE git >nul 2>&1 || SET PATH=C:\Program Files\Git\cmd;%PATH%`
+— only injects the fallback path when `git` is not already resolvable from the current PATH.
+A `REM` comment explains the intent.  
+**Status:** RESOLVED 2026-05-17.
+
+---
+
 ### [2026-05-10] CRITICAL — Live API Keys in `.env` (NOT in git — `.gitignore` confirmed)
 
 **Class:** CWE-312 Cleartext Storage of Sensitive Information  
@@ -209,7 +223,7 @@ historical keys are compromised regardless of current `.gitignore` state.
 
 **REQUIRED ACTIONS (not yet completed — developer must action manually):**
 1. Rotate all `GEMINI_API_KEY` values in Google AI Studio.
-2. Rotate the Neon PostgreSQL password via the Neon console.
+2. ~~Rotate the Neon PostgreSQL password via the Neon console.~~ — **ROTATED 2026-05-17**
 3. Revoke the Vercel OIDC token in `.env.local`.
 4. If the repo was ever public: run `git filter-repo` or BFG Repo-Cleaner to purge
    historical `.env` commits, then force-push. All historical keys are permanently

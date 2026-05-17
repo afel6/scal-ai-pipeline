@@ -140,6 +140,42 @@ DATABASE_URL  = os.getenv("DATABASE_URL", "").strip()
 
 DB_PATH       = "chat_history.db"
 
+
+
+# ── JSON SAFETY HELPER ────────────────────────────────────────────────────────
+# NumPy / math can produce NaN or Infinity which are valid Python but INVALID
+# JSON — JSON.parse() in the browser will throw, causing the PARSE FAILURE error.
+# This helper recursively replaces them with None (serialized as JSON null).
+def _sanitize_for_json(obj):
+    """Recursively replace NaN/Inf with None so json.dumps stays valid JSON."""
+    import math
+    if isinstance(obj, float):
+        if math.isnan(obj) or math.isinf(obj):
+            return None
+        return obj
+    if isinstance(obj, dict):
+        return {k: _sanitize_for_json(v) for k, v in obj.items()}
+    if isinstance(obj, (list, tuple)):
+        return [_sanitize_for_json(v) for v in obj]
+    # numpy scalar types
+    try:
+        import numpy as _np
+        if isinstance(obj, _np.floating):
+            v = float(obj)
+            return None if (math.isnan(v) or math.isinf(v)) else v
+        if isinstance(obj, _np.integer):
+            return int(obj)
+        if isinstance(obj, _np.ndarray):
+            return [_sanitize_for_json(x) for x in obj.tolist()]
+    except ImportError:
+        pass
+    return obj
+
+def _safe_json_dumps(obj, **kwargs):
+    """Sanitize then dump — guaranteed valid JSON, no NaN/Infinity leakage."""
+    return _json.dumps(_sanitize_for_json(obj), ensure_ascii=False, **kwargs)
+
+
 _PG_POOL      = None
 
 _PG_AVAILABLE = False
@@ -898,7 +934,10 @@ class PRCChatAssistant:
 
             sid  = getattr(_tls, 'current_session_id', None)
 
-            well = args.get("well_name", "UNKNOWN WELL")
+            well = args.get("well_name", "")
+            if not well or well.upper() == "UNKNOWN WELL":
+                # Fall back to the well name extracted from the uploaded file this turn
+                well = getattr(_tls, 'last_well_name', None) or "UNKNOWN WELL"
 
             if not sid:
 
@@ -1230,9 +1269,9 @@ class PRCChatAssistant:
 
                     return (
 
-                        f"__PRC_PLOT__\n{_json.dumps(plot_pc, ensure_ascii=False)}\n\n"
+                        f"__PRC_PLOT__\n{_safe_json_dumps(plot_pc)}\n\n"
 
-                        f"__PRC_PLOT__\n{_json.dumps(plot_psd, ensure_ascii=False)}\n\n"
+                        f"__PRC_PLOT__\n{_safe_json_dumps(plot_psd)}\n\n"
 
                     )
 
@@ -1320,7 +1359,7 @@ class PRCChatAssistant:
 
                     return (
 
-                        f"__PRC_PLOT__\n{_json.dumps(plot_ri, ensure_ascii=False)}\n\n"
+                        f"__PRC_PLOT__\n{_safe_json_dumps(plot_ri)}\n\n"
 
                     )
 
@@ -1406,7 +1445,7 @@ class PRCChatAssistant:
 
                     return (
 
-                        f"__PRC_PLOT__\n{_json.dumps(plot_ff, ensure_ascii=False)}\n\n"
+                        f"__PRC_PLOT__\n{_safe_json_dumps(plot_ff)}\n\n"
 
                     )
 
@@ -1464,7 +1503,7 @@ class PRCChatAssistant:
 
                     return (
 
-                        f"__PRC_PLOT__\n{_json.dumps(plot_j, ensure_ascii=False)}\n\n"
+                        f"__PRC_PLOT__\n{_safe_json_dumps(plot_j)}\n\n"
 
                     )
 
@@ -1532,7 +1571,7 @@ class PRCChatAssistant:
 
                                f"Sw range: {float(sw_a.min()):.3f} â€“ {float(sw_a.max()):.3f}")
 
-                    return (f"__PRC_PLOT__\n{_json.dumps(plot_pc, ensure_ascii=False)}\n\n")
+                    return (f"__PRC_PLOT__\n{_safe_json_dumps(plot_pc)}\n\n")
 
 
 
@@ -1604,7 +1643,7 @@ class PRCChatAssistant:
 
                     summary = (f"Pressure range: {float(pres_a.min()):.0f} â€“ {float(pres_a.max()):.0f} psia")
 
-                    return (f"__PRC_PLOT__\n{_json.dumps(plot_ob, ensure_ascii=False)}\n\n")
+                    return (f"__PRC_PLOT__\n{_safe_json_dumps(plot_ob)}\n\n")
 
 
 
@@ -1670,7 +1709,7 @@ class PRCChatAssistant:
 
                 return (
 
-                    f"__PRC_PLOT__\n{_json.dumps(plot_data)}\n\n"
+                    f"__PRC_PLOT__\n{_safe_json_dumps(plot_data)}\n\n"
 
                 )
 
@@ -1734,7 +1773,7 @@ class PRCChatAssistant:
 
                     return (
 
-                        f"__PRC_PLOT__\n{_json.dumps(plot_data)}\n\n"
+                        f"__PRC_PLOT__\n{_safe_json_dumps(plot_data)}\n\n"
 
                     )
 
@@ -2034,7 +2073,8 @@ class PRCChatAssistant:
 
     def chat(self, history: list, msg: str, kb_context: str = "", f_parts: list = [], stream: bool = False, sid: str = None, email: str = None):
 
-        _tls.pending_kb = []  # thread-local: safe under 50+ concurrent workers
+        _tls.pending_kb = []       # thread-local: safe under 50+ concurrent workers
+        _tls.last_well_name = None  # updated when a SCAL file is processed this turn
 
         
 
@@ -2114,7 +2154,10 @@ class PRCChatAssistant:
 
                     result = extract_file_data(tmp_path)
 
-                    inventory = f"FILE: {fname}\nSHEETS: {', '.join(result['sheet_names'])}\nIDENTIFIED TYPE: {result['data_type']}\nTOTAL ROWS: {result['row_count']}\n"
+                    well_name = result.get('well_name', 'PROVISIONAL WELL')
+                    _tls.last_well_name = well_name  # make available to report tool
+
+                    inventory = f"FILE: {fname}\nWELL: {well_name}\nSHEETS: {', '.join(result['sheet_names'])}\nIDENTIFIED TYPE: {result['data_type']}\nTOTAL ROWS: {result['row_count']}\n"
 
                     extracted_context += f"\n\n[NEW UPLOAD INVENTORY]:\n{inventory}"
 
@@ -2126,7 +2169,7 @@ class PRCChatAssistant:
 
                         sampled = _sample_data(result['extracted'])
 
-                        extracted_context += f"[EXTRACTED DATA]:\n{_json.dumps(sampled, indent=2)}\n"
+                        extracted_context += f"[EXTRACTED DATA - WELL: {well_name}]:\n{_json.dumps(sampled, indent=2)}\n"
 
                         # Use the class method to chunk the JSON string
 
@@ -2260,6 +2303,10 @@ class PRCChatAssistant:
             active_model = "gemini-2.5-pro" if needs_pro else "gemini-2.5-flash"
 
 
+
+            _MAX_OVERLOAD_RETRIES = 3  # retries per key on 503
+
+            _MAX_503_RETRIES = 3
 
             for attempt in range(len(self._keys)):
 

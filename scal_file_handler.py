@@ -178,42 +178,62 @@ class SCALFileHandler:
         s = sheet_name.lower().strip()
         return any(kw in s for kw in self._SUMMARY_SHEET_KEYWORDS)
 
-    def _pick_micp_sat_col(self, headers: list):
+    def _pick_micp_sat_col(self, headers: list, df_subset: pd.DataFrame = None):
         """
         Return the column index most likely to hold Hg Saturation (% or fraction).
 
         Scoring (highest wins):
           +100  header contains '%'  — explicit percent marker
           + 80  'hg sat' / 's_hg' / 'shg' literal
+          + 60  'cumul' — cumulative column is the gold standard
           + 50  'sat' in header (no volume unit present)
           + 40  'sw' in header
           + 20  'pv' in header (pore-volume fraction, dimensionless)
           + 10  'hg' alone (last-resort fallback)
           −200  'intrusion' without '%' → volume intrusion, NOT saturation
           SKIP  any header containing a volume unit (ml/g, cc/g, …)
+          SKIP  any 'incremental'/'incr.'/'delta' header not also labelled 'cumulative'
+          REJECT if numerical series looks incremental (if df_subset provided)
         """
         candidates = []
         for j, h in enumerate(headers):
             h_str = str(h).lower().strip()
 
             # Hard reject: any column whose header contains a volume unit.
-            # "Cumulative Intrusion (mL/g)" must never be picked as saturation.
             if any(vunit in h_str for vunit in self._VOL_UNIT_REJECT):
                 continue
 
             score = 0
+            # ── HARD REJECT 2: incremental headers ──
+            is_header_incremental = ('incremental' in h_str or 'incr.' in h_str
+                                     or 'delta' in h_str or 'Δ' in h_str)
+            is_header_cumulative  = 'cumul' in h_str or 'total' in h_str or 'cum.' in h_str
+            if is_header_incremental and not is_header_cumulative:
+                continue
 
-            # Strongly penalise 'intrusion' unless a '%' sign co-occurs
-            if 'intrusion' in h_str and '%' not in h_str:
-                score -= 200
+            # ── HARD REJECT 3: Numerical incremental check (Data-aware validation) ──
+            if df_subset is not None and j < df_subset.shape[1]:
+                # Sample the series to see if it's cumulative saturation or incremental delta
+                series = pd.to_numeric(df_subset.iloc[:, j], errors='coerce').dropna().values
+                if len(series) > 5:
+                    net_range = abs(series[-1] - series[0])
+                    total_mvmt = np.sum(np.abs(np.diff(series)))
+                    # Incremental data sums much larger than its range.
+                    # Strict threshold: 1.8x. If total movement is > 1.8x net range, it's not a cumulative saturation curve.
+                    if total_mvmt > 1.8 * net_range and net_range > 0.01:
+                        continue
 
+            # ── POSITIVE SCORES ──
             if '%' in h_str:                                         score += 100
+            if 'cumul' in h_str:                                     score += 60
             if 'hg sat' in h_str or 's_hg' in h_str:               score += 80
             if h_str.replace(' ', '') in ('shg', 's_hg'):           score += 80
             if 'sat' in h_str:                                       score += 50
             if 'sw' in h_str:                                        score += 40
             if 'pv' in h_str and 'intrusion' not in h_str:          score += 20
             if 'hg' in h_str and 'intrusion' not in h_str:          score += 10
+            # ── Penalise generic intrusion headers that have no % sign ──
+            if 'intrusion' in h_str and '%' not in h_str:           score -= 200
 
             if score > 0:
                 candidates.append((score, j))
@@ -262,8 +282,8 @@ class SCALFileHandler:
                      if any(kw in str(h).lower() for kw in ['press', 'psia', 'mpa', 'pc'])),
                     None
                 )
-                # FIX 3 — use scored selector, not plain next()
-                sat_col = self._pick_micp_sat_col(headers)
+                # FIX 3 — use scored selector with data-aware validation
+                sat_col = self._pick_micp_sat_col(headers, data)
 
                 if press_col is None or sat_col is None or press_col == sat_col:
                     continue
@@ -296,14 +316,24 @@ class SCALFileHandler:
                 all_sat = drainage['sat_pv'] + imbibition['sat_pv']
                 sat_is_percent = bool(all_sat) and max(all_sat) > 1.5
 
+                # Log whether the chosen column looks incremental (should always be False
+                # after the _pick_micp_sat_col fix, but kept for audit transparency).
+                chosen_h = str(headers[sat_col]).lower()
+                sat_is_incremental = (
+                    'incremental' in chosen_h
+                    or 'incr.' in chosen_h
+                    or 'delta' in chosen_h
+                )
+
                 # FIX 2 — tag every result with sheet identity and type
                 results[sheet] = {
-                    'sheet_name':      sheet,
-                    'sheet_type':      sheet_type,
-                    'sat_column_used': str(headers[sat_col]),
-                    'sat_is_percent':  sat_is_percent,
-                    'drainage':        drainage,
-                    'imbibition':      imbibition,
+                    'sheet_name':       sheet,
+                    'sheet_type':       sheet_type,
+                    'sat_column_used':  str(headers[sat_col]),
+                    'sat_is_percent':   sat_is_percent,
+                    'sat_is_incremental': sat_is_incremental,
+                    'drainage':         drainage,
+                    'imbibition':       imbibition,
                 }
                 break  # found the data block in this sheet; move to next sheet
 
@@ -591,6 +621,55 @@ class SCALFileHandler:
         self.extracted = {'type': 'PC', 'samples': results}
 
     # ------------------------------------------------------------------ #
+    # WELL NAME EXTRACTION
+    # ------------------------------------------------------------------ #
+
+    def _extract_well_name(self) -> str:
+        """
+        Identify the well name from sheet headers or the filename.
+        Scans for 'Well', 'Field', 'Reservoir', 'Project', etc.
+        """
+        # ── 1. HEADER SCAN ──
+        # Expanded keywords to catch legacy or non-standard reports
+        patterns = [
+            re.compile(r'well\s*[#:no.]*\s*', re.IGNORECASE),
+            re.compile(r'field\s*', re.IGNORECASE),
+            re.compile(r'reservoir\s*', re.IGNORECASE),
+            re.compile(r'project\s*', re.IGNORECASE),
+            re.compile(r'block\s*', re.IGNORECASE),
+        ]
+
+        for _sheet, _df in self.raw_data.items():
+            # Scan top 15 rows of each sheet
+            for i in range(min(15, len(_df))):
+                _row = _df.iloc[i].tolist()
+                for j, _cell in enumerate(_row):
+                    if isinstance(_cell, str):
+                        for pat in patterns:
+                            if pat.search(_cell):
+                                # Check next 3 cells for the value
+                                for k in range(j + 1, min(j + 5, len(_row))):
+                                    _val = str(_row[k]).strip()
+                                    if _val and _val.lower() not in ('#', 'no.', 'name', 'well', 'field', 'nan'):
+                                        # Validate value length and content
+                                        if 1 < len(_val) < 40 and not _val.lower().startswith('unnamed'):
+                                            return _val
+        
+        # ── 2. FILENAME FALLBACK ──
+        _stem = os.path.splitext(os.path.basename(self.file_path))[0]
+        # Common well patterns: T1-31, A-12, B_10, etc.
+        well_match = re.search(r'([A-Z]{1,3}[-_]?\d{1,4}[A-Z]?)', _stem, re.IGNORECASE)
+        if well_match:
+            return well_match.group(1).upper()
+
+        # Token based fallback
+        for _token in re.split(r'[_\-\s]+', _stem):
+            if 3 <= len(_token) <= 15 and re.search(r'[A-Za-z]', _token) and re.search(r'\d', _token):
+                return _token
+
+        return "PROVISIONAL WELL"
+
+    # ------------------------------------------------------------------ #
     # MAIN ENTRY POINT
     # ------------------------------------------------------------------ #
 
@@ -603,7 +682,8 @@ class SCALFileHandler:
             'data_type':   self.data_type,
             'sheet_names': self.sheet_names,
             'extracted':   self.extracted,
-            'row_count':   self._count_rows(self.extracted)
+            'row_count':   self._count_rows(self.extracted),
+            'well_name':   self._extract_well_name(),
         }
 
     def _count_rows(self, data: dict) -> int:
@@ -641,7 +721,7 @@ def build_prompt_for_ai(processed: dict) -> str:
 
     # FIX 2 + FIX 4 — MICP gets a dedicated, guardrailed prompt
     if data_type == 'MICP':
-        return _build_micp_prompt(extracted)
+        return _build_micp_prompt(extracted, processed.get('well_name', 'PROVISIONAL WELL'))
 
     # Generic prompt for all other data types
     data_json = json.dumps(extracted, indent=2)
@@ -649,6 +729,7 @@ def build_prompt_for_ai(processed: dict) -> str:
 You are a petrophysics AI assistant. The engineer has uploaded a SCAL file.
 I have already read and extracted the data for you. Do not read the file again.
 
+SOURCE WELL: {processed.get('well_name', 'PROVISIONAL WELL')}
 Data type identified: {data_type}
 
 Extracted data (each top-level key is the Excel sheet name the data came from):
@@ -664,7 +745,7 @@ Instructions:
 """
 
 
-def _build_micp_prompt(extracted: dict) -> str:
+def _build_micp_prompt(extracted: dict, well_name: str = "PROVISIONAL WELL") -> str:
     """
     Purpose-built MICP prompt that enforces:
       FIX 2 — summary vs. sample sheet disambiguation
@@ -684,6 +765,7 @@ def _build_micp_prompt(extracted: dict) -> str:
 You are a petrophysics AI assistant performing MICP (Mercury Injection Capillary Pressure) analysis.
 The file has already been parsed. The extracted data is below. Do NOT re-read the file.
 
+SOURCE WELL: {well_name}
 ═══════════════════════════════════════════════════════════
 SHEET CLASSIFICATION (determined by sheet name)
 ═══════════════════════════════════════════════════════════

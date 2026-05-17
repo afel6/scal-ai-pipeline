@@ -186,6 +186,22 @@ class PhysicsGuard:
             severity="MEDIUM",
         )
 
+        # 5 — Detect if the saturation column appears to be incremental (delta), not cumulative.
+        #     Incremental data has many near-zero or negative consecutive differences,
+        #     and the running sum over the series is much larger than the max single value.
+        total_range = float(shg_s[-1] - shg_s[0])
+        running_sum = float(np.sum(np.abs(np.diff(shg_s))))
+        # If the sum of absolute steps is more than 1.8x the net range, data is likely incremental.
+        is_likely_incremental = running_sum > 1.8 * abs(total_range) and len(shg_s) > 3
+        self._check(
+            not is_likely_incremental,
+            "MICP_INCREMENTAL_COLUMN_DETECTED",
+            f"Saturation series shows incremental (delta) pattern — "
+            f"sum of |ΔSat| ({running_sum:.3f}) >> net range ({total_range:.3f}). "
+            "The parser likely chose an 'Incremental Intrusion' column instead of "
+            "'Cumulative Intrusion'. Re-check column selection.",
+        )
+
         return self
 
     def validate_archie(self, x, y, model_type="RI") -> "PhysicsGuard":

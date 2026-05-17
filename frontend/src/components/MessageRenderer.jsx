@@ -22,7 +22,16 @@ const KnowledgeCard = ({ title, content }) => {
     <div className="my-4 p-4 bg-slate-800/50 border border-slate-700 rounded-lg">
       <h4 className="text-sm font-bold text-slate-200 mb-2">{title.replace(/^\d+[\.\s]+/, '')}</h4>
       <div className="text-sm text-slate-300 leading-relaxed prc-markdown">
-        <ReactMarkdown remarkPlugins={[remarkGfm]}>
+        <ReactMarkdown 
+          remarkPlugins={[remarkGfm]}
+          components={{
+            table: ({node, ...props}) => <div className="overflow-x-auto my-4"><table className="w-full text-sm text-left border-collapse border border-slate-700/50" {...props} /></div>,
+            th: ({node, ...props}) => <th className="px-4 py-2 bg-slate-800/80 border border-slate-700/50 font-bold text-slate-200" {...props} />,
+            td: ({node, ...props}) => <td className="px-4 py-2 border border-slate-700/50 text-slate-300 bg-slate-900/30" {...props} />,
+            a: ({node, ...props}) => <a className="text-yellow-400 hover:text-yellow-300 underline underline-offset-2" {...props} />,
+            p: ({node, ...props}) => <p className="mb-4 whitespace-pre-wrap" {...props} />
+          }}
+        >
           {content}
         </ReactMarkdown>
       </div>
