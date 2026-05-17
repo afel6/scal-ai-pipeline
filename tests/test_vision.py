@@ -17,7 +17,7 @@ def test_app_vision_protocol_active():
     with open(prompt_path, 'r', encoding='utf-8') as f:
         content = f.read()
     
-    assert "SECTION 9 — VISION PROTOCOL" in content, "Vision protocol is missing from the system prompt in prompts/hviel_system_prompt.md"
+    assert "SECTION 9 - VISION PROTOCOL" in content, "Vision protocol is missing from the system prompt in prompts/hviel_system_prompt.md"
 
 def test_mock_vision_qa_payload():
     """Simulate a Vision QA payload processing for complex laboratory equipment photos."""
