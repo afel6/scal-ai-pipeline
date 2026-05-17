@@ -48,7 +48,7 @@ from petrophysical_curves import Endpoints, KrCurveFitter
 
 from physics_validator import PhysicsGuard
 
-from scal_file_handler import SCALFileHandler, extract_file_data
+from scal_file_handler import SCALFileHandler, extract_file_data, _extract_pdf as _sfh_extract_pdf, _extract_docx as _sfh_extract_docx
 
 from report_generator import PRCReportEngine
 
@@ -466,6 +466,22 @@ def _save_summary_background(sid: str, email: str, response_text: str, file_name
                 (sid, email, well, dtype, key_params_json, time.time()),
             )
         _logger.info(f"[Summary] Saved {dtype} summary for session {sid} (well: {well})")
+
+        # Back-fill key_params into user_files for the file that triggered this analysis
+        try:
+            if _PG_AVAILABLE:
+                db(
+                    "UPDATE user_files SET key_params=? WHERE user_email=? AND filename=?",
+                    (key_params_json, email, file_name),
+                )
+            else:
+                db(
+                    "UPDATE user_files SET key_params=? WHERE user_email=? AND filename=?",
+                    (key_params_json, email, file_name),
+                )
+        except Exception:
+            pass
+
     except Exception as e:
         _logger.error(f"[Summary] DB save failed for {sid}: {e}")
 
@@ -497,6 +513,126 @@ def get_session_summary_context(sid: str) -> str:
         return ""
 
 
+# ── USER FILE HISTORY ─────────────────────────────────────────────────────────
+
+def get_user_file_history_context(email: str) -> str:
+    """Return formatted ENGINEER FILE HISTORY block for the last 5 user uploads."""
+    if not email:
+        return ""
+    try:
+        rows = db(
+            "SELECT filename, data_type, key_params, created_at FROM user_files "
+            "WHERE user_email=? ORDER BY created_at DESC LIMIT 5",
+            (email,),
+        )
+        if not rows:
+            return ""
+        lines = ["ENGINEER FILE HISTORY (your previously uploaded files):"]
+        for i, (fname, dtype, params_json, ts) in enumerate(rows, 1):
+            date_str = time.strftime("%Y-%m-%d", time.localtime(ts)) if ts else "unknown"
+            params: dict = {}
+            try:
+                params = _json.loads(params_json or "{}")
+            except Exception:
+                pass
+            param_str = ", ".join(f"{k}={v}" for k, v in params.items() if v is not None)
+            entry = f"{i}. {fname} ({dtype or 'unknown'}) — uploaded {date_str}"
+            if param_str:
+                entry += f" — {param_str}"
+            lines.append(entry)
+        return "\n".join(lines)
+    except Exception as e:
+        _logger.warning(f"[UserFiles] History read failed for {email}: {e}")
+        return ""
+
+
+# ── LIBRARY HELPERS ───────────────────────────────────────────────────────────
+
+def _chunk_with_overlap(text: str, chunk_words: int = 500, overlap_words: int = 50) -> list[str]:
+    """Split text into overlapping word-count chunks."""
+    words = text.split()
+    if not words:
+        return []
+    step = max(chunk_words - overlap_words, 1)
+    chunks = []
+    for i in range(0, len(words), step):
+        chunk = " ".join(words[i : i + chunk_words])
+        if chunk.strip():
+            chunks.append(chunk)
+        if i + chunk_words >= len(words):
+            break
+    return chunks
+
+
+def _extract_text_for_library(file_bytes: bytes, filename: str) -> str:
+    """Extract plain text from PDF, DOCX, or plain text file bytes."""
+    ext = os.path.splitext(filename.lower())[1]
+    if ext == ".pdf":
+        return _sfh_extract_pdf(file_bytes)
+    if ext in (".docx", ".doc"):
+        return _sfh_extract_docx(file_bytes)
+    try:
+        return file_bytes.decode("utf-8", errors="replace")
+    except Exception:
+        return ""
+
+
+def _ingest_library_file(file_bytes: bytes, filename: str, uploader_email: str) -> dict:
+    """Blocking: hash-check, extract, chunk, embed, insert. Returns result dict."""
+    file_hash = hashlib.sha256(file_bytes).hexdigest()
+
+    # Deduplication check
+    existing = db("SELECT filename FROM library_docs WHERE file_hash=?", (file_hash,))
+    if existing:
+        return {"duplicate": True, "existing_file": existing[0][0]}
+
+    ext = os.path.splitext(filename.lower())[1].lstrip(".")
+    data_type = ext.upper() or "UNKNOWN"
+
+    text = _extract_text_for_library(file_bytes, filename)
+    if not text.strip():
+        return {"error": "Could not extract text from file"}
+
+    chunks = _chunk_with_overlap(text)
+    if not chunks:
+        return {"error": "No usable text chunks extracted"}
+
+    # Embed all chunks (may be slow for large docs)
+    embedded: list[tuple[str, bytes | None]] = []
+    for chunk in chunks:
+        vec = KnowledgeBase._embed(chunk)
+        embedded.append((chunk, vec.tobytes() if vec is not None else None))
+
+    with _get_conn() as (conn, ph):
+        cur = conn.cursor()
+        try:
+            if ph == "?":
+                cur.execute(
+                    "INSERT INTO library_docs (filename, file_hash, data_type, uploaded_by, created_at) VALUES (?,?,?,?,?)",
+                    (filename, file_hash, data_type, uploader_email, time.time()),
+                )
+                doc_id = cur.lastrowid
+            else:
+                cur.execute(
+                    "INSERT INTO library_docs (filename, file_hash, data_type, uploaded_by, created_at) VALUES (%s,%s,%s,%s,%s) RETURNING id",
+                    (filename, file_hash, data_type, uploader_email, time.time()),
+                )
+                doc_id = cur.fetchone()[0]
+
+            for chunk_text, emb_bytes in embedded:
+                cur.execute(
+                    f"INSERT INTO library_chunks (doc_id, chunk_text, embedding, source) VALUES ({ph},{ph},{ph},{ph})",
+                    (doc_id, chunk_text, emb_bytes, filename),
+                )
+
+            conn.commit()
+            _logger.info(f"[Library] Ingested '{filename}' — {len(embedded)} chunks (doc_id={doc_id})")
+            return {"status": "ingested", "chunks": len(embedded), "doc_id": doc_id}
+
+        except Exception as e:
+            conn.rollback()
+            _logger.error(f"[Library] Ingest DB error: {e}")
+            return {"error": str(e)}
 
 
 
@@ -3066,17 +3202,25 @@ class KnowledgeBase:
 
 
 
-            # Filter KB chunks by session ID (Strict Isolation)
+            # Filter KB chunks by session ID, or user-email for cross-session user files
 
             with _get_conn() as (conn, ph):
 
                 cur = conn.cursor()
 
-                cur.execute(f"SELECT COUNT(*) FROM kb_vectors JOIN kb ON kb.id = kb_vectors.chunk_id WHERE kb.sid = {ph}", (sid,))
+                cur.execute(
+                    f"SELECT COUNT(*) FROM kb_vectors JOIN kb ON kb.id = kb_vectors.chunk_id "
+                    f"WHERE (kb.sid = {ph} OR (kb.sid IS NULL AND kb.user_email = {ph}))",
+                    (sid, email),
+                )
 
                 vec_count = cur.fetchone()[0]
 
-                
+
+
+            # ── Session / user-file vector search ──────────────────────────────
+            scored_parts: list[tuple[float, str]] = []
+            q_vec = None
 
             if 0 < vec_count < 5000:
 
@@ -3084,9 +3228,12 @@ class KnowledgeBase:
 
                 if q_vec is not None:
 
-                    # Optimized: Only pull vectors for THIS session
-
-                    rows = db(f"SELECT kb.source, kb.chunk, kb_vectors.embedding FROM kb_vectors JOIN kb ON kb.id = kb_vectors.chunk_id WHERE kb.sid = {ph}", (sid,))
+                    rows = db(
+                        f"SELECT kb.source, kb.chunk, kb_vectors.embedding FROM kb_vectors "
+                        f"JOIN kb ON kb.id = kb_vectors.chunk_id "
+                        f"WHERE (kb.sid = {ph} OR (kb.sid IS NULL AND kb.user_email = {ph}))",
+                        (sid, email),
+                    )
 
                     if rows:
 
@@ -3100,13 +3247,33 @@ class KnowledgeBase:
 
                         scores = v_norms @ q_norm
 
-                        top_idx = np.argsort(scores)[::-1][:top_k]
+                        for i in np.argsort(scores)[::-1][:top_k]:
+                            if scores[i] > 0.40:
+                                scored_parts.append((float(scores[i]), f"[From: {sources[i]}]\n{texts[i]}"))
 
-                        parts = [f"[From: {sources[i]}]\n{texts[i]}" for i in top_idx if scores[i] > 0.40]
+            # ── Library vector search (global, shared) ──────────────────────────
+            try:
+                lib_rows = db("SELECT source, chunk_text, embedding FROM library_chunks WHERE embedding IS NOT NULL")
+                if lib_rows:
+                    if q_vec is None:
+                        q_vec = KnowledgeBase._embed(clean_q)
+                    if q_vec is not None:
+                        lib_sources = [r[0] for r in lib_rows]
+                        lib_texts   = [r[1] for r in lib_rows]
+                        lib_raw     = [r[2] for r in lib_rows]
+                        lib_vecs = np.stack([np.frombuffer(bytes(v) if isinstance(v, memoryview) else v, dtype=np.float32) for v in lib_raw])
+                        q_norm_lib = q_vec / (np.linalg.norm(q_vec) + 1e-9)
+                        lv_norms   = lib_vecs / (np.linalg.norm(lib_vecs, axis=1, keepdims=True) + 1e-9)
+                        lib_scores = lv_norms @ q_norm_lib
+                        for i in np.argsort(lib_scores)[::-1][:5]:
+                            if lib_scores[i] > 0.35:
+                                scored_parts.append((float(lib_scores[i]), f"[Library: {lib_sources[i]}]\n{lib_texts[i]}"))
+            except Exception as _le:
+                _logger.debug(f"[RAG] Library search error: {_le}")
 
-                        if parts: return "\n\n".join(parts)
-
-
+            if scored_parts:
+                scored_parts.sort(key=lambda x: x[0], reverse=True)
+                return "\n\n".join(t for _, t in scored_parts[:top_k])
 
             # Fallback to keyword search with session filtering
 
@@ -3114,15 +3281,19 @@ class KnowledgeBase:
 
             if not words: return ""
 
-            
+
 
             with _get_conn() as (conn, ph):
 
                 clause = " OR ".join([f"LOWER(chunk) LIKE {ph}" for _ in words])
 
-                params = tuple([f"%{w}%" for w in words] + [sid])
+                params = tuple([sid, email] + [f"%{w}%" for w in words])
 
-                rows = db(f"SELECT source, chunk FROM kb WHERE sid = {ph} AND ({clause}) LIMIT {top_k}", params)
+                rows = db(
+                    f"SELECT source, chunk FROM kb "
+                    f"WHERE (sid = {ph} OR (sid IS NULL AND user_email = {ph})) AND ({clause}) LIMIT {top_k}",
+                    params,
+                )
 
                 return "\n\n".join([f"[From: {r[0]}]\n{r[1]}" for r in rows])
 
@@ -3208,6 +3379,13 @@ def init_db() -> None:
 
         "CREATE TABLE IF NOT EXISTS session_summaries (id INTEGER PRIMARY KEY AUTOINCREMENT, session_id TEXT UNIQUE, user_email TEXT, well_name TEXT, data_type TEXT, key_params TEXT, created_at REAL)",
 
+        # ── LIBRARY (shared, global, admin-ingested documents) ─────────────────
+        "CREATE TABLE IF NOT EXISTS library_docs (id INTEGER PRIMARY KEY AUTOINCREMENT, filename TEXT NOT NULL, file_hash TEXT NOT NULL UNIQUE, data_type TEXT, uploaded_by TEXT, created_at REAL)",
+        "CREATE TABLE IF NOT EXISTS library_chunks (id INTEGER PRIMARY KEY AUTOINCREMENT, doc_id INTEGER REFERENCES library_docs(id) ON DELETE CASCADE, chunk_text TEXT NOT NULL, embedding BLOB, source TEXT)",
+
+        # ── USER FILE STORE (per-user persistent file history) ─────────────────
+        "CREATE TABLE IF NOT EXISTS user_files (id INTEGER PRIMARY KEY AUTOINCREMENT, user_email TEXT NOT NULL, filename TEXT NOT NULL, file_hash TEXT NOT NULL, extracted_text TEXT, data_type TEXT, key_params TEXT, created_at REAL, UNIQUE(user_email, file_hash))",
+
     ]
 
     if _PG_AVAILABLE:
@@ -3224,7 +3402,13 @@ def init_db() -> None:
 
     except Exception: pass
 
-    
+    try: db("CREATE INDEX IF NOT EXISTS idx_library_chunks_doc ON library_chunks(doc_id)")
+
+    except Exception: pass
+
+    try: db("CREATE INDEX IF NOT EXISTS idx_user_files_email ON user_files(user_email)")
+
+    except Exception: pass
 
     # Migrations for KB isolation
 
@@ -3675,9 +3859,11 @@ async def chat_stream(
 
                 kb_ctx = KnowledgeBase.search(message, sid=sid, email=email)
 
+                file_history_ctx = get_user_file_history_context(email)
                 summary_ctx = get_session_summary_context(sid)
-                if summary_ctx:
-                    kb_ctx = summary_ctx + "\n\n" + kb_ctx if kb_ctx else summary_ctx
+                prefix = "\n\n".join(filter(None, [file_history_ctx, summary_ctx]))
+                if prefix:
+                    kb_ctx = prefix + "\n\n" + kb_ctx if kb_ctx else prefix
 
                 # 2. Log User Message
 
@@ -3897,13 +4083,35 @@ async def handle(
 
             f_parts.append((b, file.content_type, file.filename))
 
+            # Persist a file record for cross-session history (key_params filled later by background task)
+            try:
+                fhash = hashlib.sha256(b).hexdigest()
+                fext  = os.path.splitext(file.filename.lower())[1].lstrip(".")
+                ftype = fext.upper() or "UNKNOWN"
+                if _PG_AVAILABLE:
+                    db(
+                        "INSERT INTO user_files (user_email, filename, file_hash, data_type, created_at) "
+                        "VALUES (?,?,?,?,?) ON CONFLICT (user_email, file_hash) DO NOTHING",
+                        (email, file.filename, fhash, ftype, time.time()),
+                    )
+                else:
+                    db(
+                        "INSERT OR IGNORE INTO user_files (user_email, filename, file_hash, data_type, created_at) "
+                        "VALUES (?,?,?,?,?)",
+                        (email, file.filename, fhash, ftype, time.time()),
+                    )
+            except Exception as _ufe:
+                _logger.warning(f"[UserFiles] Could not record file for {email}: {_ufe}")
+
 
 
     kb_ctx = await KnowledgeBase.search_async(message, sid=sid, email=email)
 
+    file_history_ctx = get_user_file_history_context(email)
     summary_ctx = get_session_summary_context(sid)
-    if summary_ctx:
-        kb_ctx = summary_ctx + "\n\n" + kb_ctx if kb_ctx else summary_ctx
+    prefix = "\n\n".join(filter(None, [file_history_ctx, summary_ctx]))
+    if prefix:
+        kb_ctx = prefix + "\n\n" + kb_ctx if kb_ctx else prefix
 
     # Save user message WITH filename if applicable
 
@@ -4078,6 +4286,47 @@ async def handle(
 
 
 
+
+
+# ── LIBRARY INGEST ROUTE ──────────────────────────────────────────────────────
+
+@app.post("/api/library/ingest")
+async def library_ingest(
+    file: UploadFile = File(...),
+    uploader_email: str = Form(""),
+    x_ingest_secret: str = Header("", alias="X-Ingest-Secret"),
+):
+    if not KB_INGEST_SECRET or not hmac.compare_digest(x_ingest_secret.strip(), KB_INGEST_SECRET):
+        raise HTTPException(status_code=403, detail="Invalid ingest secret")
+    if not file.filename:
+        raise HTTPException(status_code=400, detail="No file provided")
+
+    file_bytes = await file.read()
+    if not file_bytes:
+        raise HTTPException(status_code=400, detail="Empty file")
+
+    loop = asyncio.get_running_loop()
+    result = await loop.run_in_executor(
+        None, _ingest_library_file, file_bytes, file.filename, uploader_email.lower().strip()
+    )
+
+    if result.get("duplicate"):
+        raise HTTPException(
+            status_code=409,
+            detail={"error": "This document is already in the library", "existing_file": result["existing_file"]},
+        )
+    if result.get("error"):
+        raise HTTPException(status_code=500, detail=result["error"])
+
+    return result
+
+
+@app.get("/api/library/docs")
+async def library_list(x_ingest_secret: str = Header("", alias="X-Ingest-Secret")):
+    if not KB_INGEST_SECRET or not hmac.compare_digest(x_ingest_secret.strip(), KB_INGEST_SECRET):
+        raise HTTPException(status_code=403, detail="Invalid ingest secret")
+    rows = db("SELECT id, filename, data_type, uploaded_by, created_at FROM library_docs ORDER BY created_at DESC")
+    return {"docs": [{"id": r[0], "filename": r[1], "data_type": r[2], "uploaded_by": r[3], "created_at": r[4]} for r in rows]}
 
 
 # Resolved once at startup; files are written to CWD by HvielDocEngine(output_dir=".")
