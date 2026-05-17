@@ -407,6 +407,96 @@ def _log_physics_audit(sid: str, data_type: str, audit_res: dict, file_name: str
         _logger.error(f"[AUDIT] Failed to log audit: {e}")
 
 
+# ── SESSION MEMORY SUMMARY ────────────────────────────────────────────────────
+
+def _extract_petrophysical_summary(response_text: str, file_name: str) -> dict:
+    """Quick non-streaming Gemini call to extract key params from analysis reply."""
+    prompt = (
+        "You are a petrophysical parameter extractor. Given the assistant response below, "
+        "extract key values into JSON. Return ONLY valid JSON with these exact keys "
+        "(use null for any not found): "
+        "{\"well_name\": string_or_null, \"data_type\": string_or_null, "
+        "\"Pd_psia\": number_or_null, \"Sw_i\": number_or_null, \"Sor\": number_or_null, "
+        "\"krw_max\": number_or_null, \"kro_max\": number_or_null, "
+        "\"m_cementation\": number_or_null, \"n_saturation\": number_or_null, "
+        "\"sample_count\": integer_or_null}\n\n"
+        f"Source file: {file_name}\n\nAssistant response:\n{response_text[:4000]}"
+    )
+    try:
+        client = genai_new.Client(api_key=GEMINI_KEY_POOL[0])
+        resp = client.models.generate_content(model="gemini-2.5-flash", contents=prompt)
+        raw = ""
+        if resp and resp.candidates and resp.candidates[0].content:
+            raw = "".join(p.text for p in (resp.candidates[0].content.parts or []) if p.text)
+        raw = raw.strip()
+        if raw.startswith("```"):
+            parts = raw.split("```")
+            raw = parts[1] if len(parts) > 1 else raw
+            if raw.startswith("json"):
+                raw = raw[4:]
+        return _json.loads(raw.strip())
+    except Exception as e:
+        _logger.warning(f"[Summary] Extraction failed for {file_name}: {e}")
+        return {}
+
+
+def _save_summary_background(sid: str, email: str, response_text: str, file_name: str):
+    """Background task: extract params from analysis reply and persist to session_summaries."""
+    params = _extract_petrophysical_summary(response_text, file_name)
+    if not params:
+        return
+    try:
+        well = params.get("well_name")
+        dtype = params.get("data_type")
+        key_params_json = _json.dumps({
+            k: v for k, v in params.items()
+            if v is not None and k not in ("well_name", "data_type")
+        })
+        if _PG_AVAILABLE:
+            db(
+                "INSERT INTO session_summaries (session_id, user_email, well_name, data_type, key_params, created_at) "
+                "VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT (session_id) DO UPDATE SET "
+                "well_name=EXCLUDED.well_name, data_type=EXCLUDED.data_type, key_params=EXCLUDED.key_params",
+                (sid, email, well, dtype, key_params_json, time.time()),
+            )
+        else:
+            db(
+                "INSERT OR REPLACE INTO session_summaries (session_id, user_email, well_name, data_type, key_params, created_at) "
+                "VALUES (?, ?, ?, ?, ?, ?)",
+                (sid, email, well, dtype, key_params_json, time.time()),
+            )
+        _logger.info(f"[Summary] Saved {dtype} summary for session {sid} (well: {well})")
+    except Exception as e:
+        _logger.error(f"[Summary] DB save failed for {sid}: {e}")
+
+
+def get_session_summary_context(sid: str) -> str:
+    """Return a formatted session memory block to prepend to kb_ctx, or empty string."""
+    try:
+        rows = db("SELECT well_name, data_type, key_params FROM session_summaries WHERE session_id=?", (sid,))
+        if not rows:
+            return ""
+        well, dtype, params_json = rows[0]
+        params: dict = {}
+        try:
+            params = _json.loads(params_json or "{}")
+        except Exception:
+            pass
+        lines = ["[SESSION MEMORY — previously analysed data for this session]"]
+        if well:
+            lines.append(f"Well: {well}")
+        if dtype:
+            lines.append(f"Data type: {dtype}")
+        for k, v in params.items():
+            if v is not None:
+                lines.append(f"{k}: {v}")
+        lines.append("[END SESSION MEMORY]")
+        return "\n".join(lines)
+    except Exception as e:
+        _logger.warning(f"[Summary] Context read failed for {sid}: {e}")
+        return ""
+
+
 
 
 
@@ -3116,6 +3206,8 @@ def init_db() -> None:
 
         "CREATE TABLE IF NOT EXISTS response_cache (id INTEGER PRIMARY KEY AUTOINCREMENT, query_hash TEXT UNIQUE, response TEXT, created_at REAL)",
 
+        "CREATE TABLE IF NOT EXISTS session_summaries (id INTEGER PRIMARY KEY AUTOINCREMENT, session_id TEXT UNIQUE, user_email TEXT, well_name TEXT, data_type TEXT, key_params TEXT, created_at REAL)",
+
     ]
 
     if _PG_AVAILABLE:
@@ -3583,7 +3675,9 @@ async def chat_stream(
 
                 kb_ctx = KnowledgeBase.search(message, sid=sid, email=email)
 
-                
+                summary_ctx = get_session_summary_context(sid)
+                if summary_ctx:
+                    kb_ctx = summary_ctx + "\n\n" + kb_ctx if kb_ctx else summary_ctx
 
                 # 2. Log User Message
 
@@ -3790,9 +3884,14 @@ async def handle(
 
     _tls.current_session_id = sid
 
+    _MAX_UPLOAD_BYTES = 20 * 1024 * 1024  # 20 MB
+
     for file in valid_files:
 
-        b = await file.read()
+        b = await file.read(_MAX_UPLOAD_BYTES + 1)
+
+        if len(b) > _MAX_UPLOAD_BYTES:
+            raise HTTPException(status_code=413, detail=f"File '{file.filename}' exceeds the 20 MB limit.")
 
         if b:
 
@@ -3802,7 +3901,9 @@ async def handle(
 
     kb_ctx = await KnowledgeBase.search_async(message, sid=sid, email=email)
 
-    
+    summary_ctx = get_session_summary_context(sid)
+    if summary_ctx:
+        kb_ctx = summary_ctx + "\n\n" + kb_ctx if kb_ctx else summary_ctx
 
     # Save user message WITH filename if applicable
 
@@ -3970,7 +4071,8 @@ async def handle(
 
         background_tasks.add_task(KnowledgeBase.ingest_transactional, "SCAL Upload", _post_kb, sid=sid, email=email)
 
-
+    if valid_files and resp_text:
+        background_tasks.add_task(_save_summary_background, sid, email, resp_text, valid_files[0].filename)
 
     return {"status": "success", "session_id": sid, "reply": resp_text}
 
