@@ -26,7 +26,7 @@ import numpy as np
 
 from fastapi import FastAPI, UploadFile, File, Form, Request, HTTPException, Header, Depends, BackgroundTasks
 
-from fastapi.responses import FileResponse, StreamingResponse
+from fastapi.responses import FileResponse, StreamingResponse, JSONResponse
 
 from fastapi.staticfiles import StaticFiles
 
@@ -3196,6 +3196,17 @@ if _RATE_LIMIT:
 
 
 
+@app.exception_handler(Exception)
+async def _global_exception_handler(request: Request, exc: Exception):
+    import traceback
+    _logger.error(f"UNHANDLED ERROR {request.method} {request.url.path}: {traceback.format_exc()}")
+    return JSONResponse(
+        status_code=500,
+        content={"error": "Internal server error. Please try again.", "detail": str(exc)},
+    )
+
+
+
 _CORS_ORIGINS: list[str] = [
     o.strip()
     for o in os.getenv("ALLOWED_ORIGINS", "*").split(",")
@@ -3668,61 +3679,66 @@ async def chat_stream(
 
 
 
-        # Start background processing
+        # Start background processing — outer try/except catches task-creation
+        # failures, the handshake yield, and any exception that escapes the
+        # per-iteration try/except inside the while loop.
+        try:
+            task = asyncio.create_task(asyncio.to_thread(_sync_worker))
+            task.add_done_callback(
+                lambda t: _logger.error(f"[SSE Worker] Unhandled task exception: {t.exception()}")
+                if not t.cancelled() and t.exception() else None
+            )
 
-        task = asyncio.create_task(asyncio.to_thread(_sync_worker))
-        task.add_done_callback(
-            lambda t: _logger.error(f"[SSE Worker] Unhandled task exception: {t.exception()}")
-            if not t.cancelled() and t.exception() else None
-        )
+            # Initial handshake
+            yield f"data: {_json.dumps({'type': 'session', 'session_id': sid})}\n\n"
+
+            while True:
+
+                try:
+
+                    # Wait for data with 15s timeout to send heartbeat
+
+                    chunk = await asyncio.wait_for(q.get(), timeout=15.0)
 
 
 
-        # Initial handshake
+                    if chunk["type"] == "done":
 
-        yield f"data: {_json.dumps({'type': 'session', 'session_id': sid})}\n\n"
+                        yield f"data: {_json.dumps(chunk)}\n\n"
+
+                        break
+
+                    elif chunk["type"] == "__PENDING_KB__":
+
+                        background_tasks.add_task(KnowledgeBase.ingest_transactional, "SCAL Upload", chunk["data"], sid=sid, email=email)
+
+                        continue
 
 
-
-        while True:
-
-            try:
-
-                # Wait for data with 15s timeout to send heartbeat
-
-                chunk = await asyncio.wait_for(q.get(), timeout=15.0)
-
-                
-
-                if chunk["type"] == "done":
 
                     yield f"data: {_json.dumps(chunk)}\n\n"
 
+                except asyncio.TimeoutError:
+
+                    # Keep-alive heartbeat (SSE comment)
+
+                    yield ": ping\n\n"
+
+                except Exception as e:
+
+                    _logger.error(f"[SSE Producer] Error: {e}")
+
+                    yield f"data: {_json.dumps({'type': 'error', 'msg': 'Internal Stream Error'})}\n\n"
+
                     break
 
-                elif chunk["type"] == "__PENDING_KB__":
-
-                    background_tasks.add_task(KnowledgeBase.ingest_transactional, "SCAL Upload", chunk["data"], sid=sid, email=email)
-
-                    continue
-
-                
-
-                yield f"data: {_json.dumps(chunk)}\n\n"
-
-            except asyncio.TimeoutError:
-
-                # Keep-alive heartbeat (SSE comment)
-
-                yield ": ping\n\n"
-
-            except Exception as e:
-
-                _logger.error(f"[SSE Producer] Error: {e}")
-
-                yield f"data: {_json.dumps({'type': 'error', 'msg': 'Internal Stream Error'})}\n\n"
-
-                break
+        except Exception as e:
+            _logger.error(f"[SSE Producer] Fatal outer error: {e}")
+            try:
+                yield f"data: {_json.dumps({'type': 'error', 'msg': f'Stream error: {str(e)[:200]}'})}\n\n"
+                yield f"data: {_json.dumps({'type': 'done'})}\n\n"
+            except Exception:
+                pass
 
 
 
