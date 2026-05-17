@@ -3296,19 +3296,18 @@ class KnowledgeBase:
 
 
 
-            with _get_conn() as (conn, ph):
+            # ph is still in scope from the vec_count query above — no second _get_conn() needed
+            clause = " OR ".join([f"LOWER(chunk) LIKE {ph}" for _ in words])
 
-                clause = " OR ".join([f"LOWER(chunk) LIKE {ph}" for _ in words])
+            params = tuple([sid, email] + [f"%{w}%" for w in words])
 
-                params = tuple([sid, email] + [f"%{w}%" for w in words])
+            rows = db(
+                f"SELECT source, chunk FROM kb "
+                f"WHERE (sid = {ph} OR (sid IS NULL AND user_email = {ph})) AND ({clause}) LIMIT {top_k}",
+                params,
+            )
 
-                rows = db(
-                    f"SELECT source, chunk FROM kb "
-                    f"WHERE (sid = {ph} OR (sid IS NULL AND user_email = {ph})) AND ({clause}) LIMIT {top_k}",
-                    params,
-                )
-
-                return "\n\n".join([f"[From: {r[0]}]\n{r[1]}" for r in rows])
+            return "\n\n".join([f"[From: {r[0]}]\n{r[1]}" for r in rows])
 
         except Exception as e:
 
