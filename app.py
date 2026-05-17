@@ -2245,11 +2245,9 @@ class PRCChatAssistant:
 
 
 
-            # Skip native Gemini upload for spreadsheets to eliminate 30s+ TTFT latency.
-
-            # SCALFileHandler already extracts this data and provides it in the prompt.
-
-            if "spreadsheet" in safe_mime or "excel" in safe_mime or "csv" in safe_mime or "sheet" in safe_mime:
+            # Skip Gemini Files API for spreadsheets, PDFs, and DOCX — text already
+            # extracted locally in chat() and injected into the prompt. Avoids 30-120s upload latency.
+            if any(x in safe_mime for x in ["spreadsheet", "excel", "csv", "sheet", "pdf", "wordprocessingml"]):
 
                 continue
 
@@ -2393,7 +2391,7 @@ class PRCChatAssistant:
 
                     extracted_context += f"\n\n[NEW UPLOAD INVENTORY]:\n{inventory}"
 
-                    
+
 
                     if result.get('data_type') != 'UNKNOWN':
 
@@ -2432,6 +2430,28 @@ class PRCChatAssistant:
                     try: os.unlink(tmp_path)
 
                     except: pass
+
+            elif "pdf" in safe_mime:
+                # Extract PDF locally — avoids 30-120s Gemini Files API upload
+                try:
+                    text = _sfh_extract_pdf(data_bytes)
+                    if text.strip():
+                        extracted_context += f"\n\n[PDF DOCUMENT: {fname}]\n{text[:50000]}\n"
+                        chunks = KnowledgeBase.chunk_text(text, f"File: {fname}")
+                        _tls.pending_kb.extend(chunks)
+                except Exception as e:
+                    _logger.warning(f"[PDF Extract] {fname}: {e}")
+
+            elif "wordprocessingml" in safe_mime:
+                # Extract DOCX locally — avoids Files API upload latency
+                try:
+                    text = _sfh_extract_docx(data_bytes)
+                    if text.strip():
+                        extracted_context += f"\n\n[WORD DOCUMENT: {fname}]\n{text[:50000]}\n"
+                        chunks = KnowledgeBase.chunk_text(text, f"File: {fname}")
+                        _tls.pending_kb.extend(chunks)
+                except Exception as e:
+                    _logger.warning(f"[DOCX Extract] {fname}: {e}")
 
 
 
@@ -4339,6 +4359,159 @@ async def library_list(x_ingest_secret: str = Header("", alias="X-Ingest-Secret"
         raise HTTPException(status_code=403, detail="Invalid ingest secret")
     rows = db("SELECT id, filename, data_type, uploaded_by, created_at FROM library_docs ORDER BY created_at DESC")
     return {"docs": [{"id": r[0], "filename": r[1], "data_type": r[2], "uploaded_by": r[3], "created_at": r[4]} for r in rows]}
+
+
+# ── KNOWLEDGE BASE & SKILLS REGISTRY ENDPOINTS ───────────────────────────────
+
+def _parse_skill_md(file_path: str) -> dict:
+    """Parse YAML frontmatter from SKILL.md and return dict of metadata."""
+    metadata = {"name": "", "description": ""}
+    try:
+        with open(file_path, "r", encoding="utf-8", errors="replace") as f:
+            content = f.read().strip()
+        if content.startswith("---"):
+            parts = content.split("---", 2)
+            if len(parts) >= 3:
+                yaml_block = parts[1]
+                lines = yaml_block.splitlines()
+                idx = 0
+                while idx < len(lines):
+                    line = lines[idx]
+                    stripped = line.strip()
+                    if not stripped or stripped.startswith("#"):
+                        idx += 1
+                        continue
+                    if ":" in line:
+                        k, v = line.split(":", 1)
+                        k = k.strip().lower()
+                        v = v.strip()
+                        if k == "name":
+                            metadata["name"] = v.strip('"\'')
+                        elif k in ("description", "desc"):
+                            if v in (">", "|"):
+                                desc_lines = []
+                                idx += 1
+                                while idx < len(lines):
+                                    next_line = lines[idx]
+                                    if next_line.strip() and not next_line.startswith(" ") and not next_line.startswith("\t"):
+                                        idx -= 1
+                                        break
+                                    desc_lines.append(next_line.strip())
+                                    idx += 1
+                                metadata["description"] = " ".join(desc_lines)
+                            else:
+                                metadata["description"] = v.strip('"\'')
+                    idx += 1
+    except Exception as e:
+        _logger.warning(f"[Skills] Failed to parse skill metadata from {file_path}: {e}")
+    return metadata
+
+
+@app.get("/api/kb/status")
+async def kb_status():
+    try:
+        # Aggregate global chunks from library_docs and library_chunks
+        global_rows = await async_db(
+            "SELECT filename, (SELECT COUNT(*) FROM library_chunks WHERE doc_id = library_docs.id) FROM library_docs"
+        )
+        
+        # Aggregate transactional chunks from kb
+        trans_rows = await async_db(
+            "SELECT source, COUNT(*) FROM kb GROUP BY source"
+        )
+        
+        books_map = {}
+        for filename, count in global_rows:
+            if filename:
+                books_map[filename] = books_map.get(filename, 0) + (count or 0)
+                
+        for source, count in trans_rows:
+            if source:
+                books_map[source] = books_map.get(source, 0) + (count or 0)
+                
+        books = [{"name": k, "chunks": v} for k, v in books_map.items()]
+        total_chunks = sum(books_map.values())
+        
+        return {"books": books, "total_chunks": total_chunks}
+    except Exception as e:
+        _logger.error(f"[KB Status] Failed to get status: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/kb/ingest")
+async def kb_ingest(
+    file: UploadFile = File(...),
+    password: str = Form(...),
+):
+    if not KB_INGEST_SECRET or not hmac.compare_digest(password.strip(), KB_INGEST_SECRET):
+        raise HTTPException(status_code=403, detail="Invalid admin pin")
+    if not file.filename:
+        raise HTTPException(status_code=400, detail="No file provided")
+
+    file_bytes = await file.read()
+    if not file_bytes:
+        raise HTTPException(status_code=400, detail="Empty file")
+
+    loop = asyncio.get_running_loop()
+    result = await loop.run_in_executor(
+        None, _ingest_library_file, file_bytes, file.filename, "admin"
+    )
+
+    if result.get("duplicate"):
+        raise HTTPException(
+            status_code=409,
+            detail=f"This document is already in the library as '{result['existing_file']}'",
+        )
+    if result.get("error"):
+        raise HTTPException(status_code=500, detail=result["error"])
+
+    # Calculate words count
+    words_count = 0
+    try:
+        text = _extract_text_for_library(file_bytes, file.filename)
+        words_count = len(text.split())
+    except Exception:
+        words_count = result.get("chunks", 0) * 150
+
+    return {
+        "status": "success",
+        "book": file.filename,
+        "chunks_stored": result.get("chunks", 0),
+        "words": words_count
+    }
+
+
+@app.get("/api/skills/list")
+async def list_skills_endpoint():
+    skills_dir = os.path.join(os.path.dirname(__file__), "hermes_skills_library")
+    skills_list = []
+    
+    if not os.path.exists(skills_dir):
+        return {"skills": []}
+        
+    try:
+        categories = [d for d in os.listdir(skills_dir) if os.path.isdir(os.path.join(skills_dir, d))]
+        for cat in categories:
+            cat_path = os.path.join(skills_dir, cat)
+            skill_folders = [sf for sf in os.listdir(cat_path) if os.path.isdir(os.path.join(cat_path, sf))]
+            for sf in skill_folders:
+                skill_path = os.path.join(cat_path, sf)
+                skill_md_path = os.path.join(skill_path, "SKILL.md")
+                if os.path.exists(skill_md_path):
+                    meta = _parse_skill_md(skill_md_path)
+                    name = meta.get("name") or sf.replace("-", " ").title()
+                    desc = meta.get("description") or ""
+                    desc = re.sub(r'\s+', ' ', desc).strip()
+                    skills_list.append({
+                        "category": cat.replace("-", " ").title(),
+                        "name": name,
+                        "desc": desc
+                    })
+    except Exception as e:
+        _logger.error(f"[Skills List] Failed to list skills: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+        
+    return {"skills": skills_list}
 
 
 # Resolved once at startup; files are written to CWD by HvielDocEngine(output_dir=".")
