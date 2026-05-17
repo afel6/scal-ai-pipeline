@@ -597,11 +597,17 @@ def _ingest_library_file(file_bytes: bytes, filename: str, uploader_email: str) 
     if not chunks:
         return {"error": "No usable text chunks extracted"}
 
-    # Embed all chunks (may be slow for large docs)
+    # Embed all chunks concurrently (massively speeds up ingestion for large docs)
     embedded: list[tuple[str, bytes | None]] = []
-    for chunk in chunks:
-        vec = KnowledgeBase._embed(chunk)
-        embedded.append((chunk, vec.tobytes() if vec is not None else None))
+    with ThreadPoolExecutor(max_workers=16) as executor:
+        futures = [executor.submit(KnowledgeBase._embed, chunk) for chunk in chunks]
+        for chunk, fut in zip(chunks, futures):
+            try:
+                vec = fut.result()
+            except Exception as e:
+                _logger.warning(f"[Library] Parallel embed error: {e}")
+                vec = None
+            embedded.append((chunk, vec.tobytes() if vec is not None else None))
 
     with _get_conn() as (conn, ph):
         cur = conn.cursor()
@@ -3119,14 +3125,21 @@ class KnowledgeBase:
         if not chunks: return
 
         chunk_data = []
-
+        valid_chunks = []
         for source, chunk in chunks:
-
             if not chunk or len(chunk.strip()) < 10: continue
+            valid_chunks.append((source, chunk))
 
-            vec = KnowledgeBase._embed(chunk)
-
-            chunk_data.append((source, chunk, vec))
+        if valid_chunks:
+            with ThreadPoolExecutor(max_workers=16) as executor:
+                futures = [executor.submit(KnowledgeBase._embed, chunk) for _, chunk in valid_chunks]
+                for (source, chunk), fut in zip(valid_chunks, futures):
+                    try:
+                        vec = fut.result()
+                    except Exception as e:
+                        _logger.warning(f"[RAG] Parallel embed error: {e}")
+                        vec = None
+                    chunk_data.append((source, chunk, vec))
 
         if not chunk_data: return
 
