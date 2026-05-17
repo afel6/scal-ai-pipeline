@@ -3934,11 +3934,19 @@ async def handle(
         _post_kb.extend(getattr(_tls, 'pending_kb', []))
         return result
 
-    resp = await asyncio.get_running_loop().run_in_executor(None, _chat_capture)
+    try:
+        resp = await asyncio.get_running_loop().run_in_executor(None, _chat_capture)
+    except Exception as e:
+        _logger.error(f"[Chat] Gemini/file processing error: {e}")
+        reply = f"Processing error: {str(e)[:300]}. Please retry or contact PRC support."
+        await async_db("INSERT INTO m (sid,role,text,ts,user_email) VALUES (?,?,?,?,?)",
+           (sid, "model", reply, time.time(), email))
+        return {"status": "error", "session_id": sid, "reply": reply}
 
+    resp_text = resp if isinstance(resp, str) else str(resp) if resp is not None else ""
     await async_db("INSERT INTO m (sid,role,text,ts,user_email) VALUES (?,?,?,?,?)",
 
-       (sid, "model", resp, time.time(), email))
+       (sid, "model", resp_text, time.time(), email))
 
 
 
@@ -3948,7 +3956,7 @@ async def handle(
 
 
 
-    return {"status": "success", "session_id": sid, "reply": resp}
+    return {"status": "success", "session_id": sid, "reply": resp_text}
 
 
 
