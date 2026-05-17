@@ -24,3 +24,5 @@ services:
         sync: false
       - key: KB_INGEST_PASSWORD
         sync: false
+      - key: KB_INGEST_SECRET
+        sync: false
