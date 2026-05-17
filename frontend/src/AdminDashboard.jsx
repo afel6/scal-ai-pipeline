@@ -107,6 +107,11 @@ export default function AdminDashboard({ adminToken, onBack, onLogout }) {
   const onBackRef = useRef(onBack);
   useEffect(() => { onBackRef.current = onBack; }, [onBack]);
 
+  // Stable ref for onLogout — used on 401 to clear the stale token so the
+  // PIN gate is shown on the next Admin click instead of looping indefinitely.
+  const onLogoutRef = useRef(onLogout);
+  useEffect(() => { onLogoutRef.current = onLogout; }, [onLogout]);
+
   const fetchAll = useCallback(async () => {
     if (!adminToken) return;
     setLoading(true);
@@ -125,7 +130,7 @@ export default function AdminDashboard({ adminToken, onBack, onLogout }) {
       setUsers(usrRes.data?.users || []);
     } catch (e) {
       console.error('Admin fetch error:', e);
-      if (e.response?.status === 401) onBackRef.current?.();
+      if (e.response?.status === 401) onLogoutRef.current?.();
     } finally {
       // fix 2a: setLoading inside finally so it runs before onBack unmounts,
       // guarded by isMountedRef so it never fires on a dead component.
