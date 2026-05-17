@@ -221,17 +221,14 @@ string (`npg_sHZyj8OBDS1G@...`). `.env.local` contains a Vercel OIDC JWT.
 earlier key rotations in git history. If this repository is or was ever public, those
 historical keys are compromised regardless of current `.gitignore` state.  
 
-**REQUIRED ACTIONS (not yet completed — developer must action manually):**
-1. Rotate all `GEMINI_API_KEY` values in Google AI Studio.
+**REQUIRED ACTIONS:**
+1. ~~Rotate all `GEMINI_API_KEY` values in Google AI Studio.~~ — **COMPLETED 2026-05-17** (all 5 keys rotated in Google AI Studio, updated in `.env` and Render dashboard)
 2. ~~Rotate the Neon PostgreSQL password via the Neon console.~~ — **ROTATED 2026-05-17**
-3. Revoke the Vercel OIDC token in `.env.local`.
-4. If the repo was ever public: run `git filter-repo` or BFG Repo-Cleaner to purge
-   historical `.env` commits, then force-push. All historical keys are permanently
-   compromised until rotated.
-5. Confirm `.gitignore` excludes `.env`, `.env.*`, `*.db` before every push (see §6).
+3. ~~Revoke the Vercel OIDC token in `.env.local`.~~ — **CLOSED 2026-05-17** (Vercel no longer used; deployment moved to Render. Token removed from `.env.local`, file cleaned.)
+4. ~~Run `git filter-repo` or BFG Repo-Cleaner to purge historical `.env` commits, then force-push.~~ — **COMPLETED 2026-05-17** (`git filter-repo --path .env --invert-paths --force` run; verified via `git log --all --oneline -- .env` (empty output). History force-pushed to `origin/master`. Commits `e50e822`, `6a8d5a8`, `d369152` are permanently purged.)
+5. ~~Confirm `.gitignore` excludes `.env`, `.env.*`, `*.db` before every push (see §6).~~ — **CONFIRMED 2026-05-17**
 
-**Status:** OPEN — `.env` files are correctly excluded from git. Key rotation and
-git-history scrub pending manual action.
+**Status:** FULLY RESOLVED 2026-05-17 — All keys rotated, Vercel removed, `.env` purged from git history and force-pushed. Backup bundle saved at `C:\Users\Asus\Downloads\scal-ai-pipeline-backup-before-scrub.bundle` (34.1 MB).
 
 ---
 
