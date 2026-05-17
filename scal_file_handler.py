@@ -11,6 +11,7 @@ Usage:
 """
 
 import re
+import io
 from pathlib import Path
 import pandas as pd
 import numpy as np
@@ -342,8 +343,10 @@ class SCALFileHandler:
     # ---- RELATIVE PERMEABILITY ---- #
     def _extract_kr(self):
         """
-        Look for columns: Sw (or Sg), Kro, Krw (or Krg)
-        Works across any sheet that has these headers.
+        Look for columns: Sw (or Sg), Kro, Krog, Krw (or Krg).
+        Detects whether saturation/Kr columns are in percent or fraction and
+        normalises everything to fraction (0-1). Original units are stored in
+        'units_detected' so Gemini can state them explicitly in analysis.
         """
         results = {}
         kr_keywords = {'sw', 'sg', 'kro', 'krw', 'krg', 'kr'}
@@ -365,12 +368,27 @@ class SCALFileHandler:
             data_df.columns = range(len(headers))
 
             col_map = {}
+            units_detected = {}
             for j, col in enumerate(headers):
-                if 'sw' in col:   col_map['Sw']  = j
-                elif 'sg' in col:   col_map['Sg']  = j
-                elif 'kro' in col:  col_map['Kro'] = j
-                elif 'krw' in col:  col_map['Krw'] = j
-                elif 'krg' in col:  col_map['Krg'] = j
+                is_pct = '%' in col or 'percent' in col
+                if 'sw' in col:
+                    col_map['Sw']   = j
+                    units_detected['Sw']   = 'percent' if is_pct else 'fraction'
+                elif 'sg' in col:
+                    col_map['Sg']   = j
+                    units_detected['Sg']   = 'percent' if is_pct else 'fraction'
+                elif 'krog' in col:          # check krog before kro to avoid substring clash
+                    col_map['Krog'] = j
+                    units_detected['Krog'] = 'percent' if is_pct else 'fraction'
+                elif 'kro' in col:
+                    col_map['Kro']  = j
+                    units_detected['Kro']  = 'percent' if is_pct else 'fraction'
+                elif 'krw' in col:
+                    col_map['Krw']  = j
+                    units_detected['Krw']  = 'percent' if is_pct else 'fraction'
+                elif 'krg' in col:
+                    col_map['Krg']  = j
+                    units_detected['Krg']  = 'percent' if is_pct else 'fraction'
 
             indep_var = 'Sw' if 'Sw' in col_map else ('Sg' if 'Sg' in col_map else None)
             extracted_cols = {k: [] for k in col_map.keys()}
@@ -395,8 +413,18 @@ class SCALFileHandler:
                     v = pd.to_numeric(r[j], errors='coerce')
                     extracted_cols[k].append(v if not pd.isna(v) else None)
 
+            # Normalise any percent-expressed columns to fraction (0-1)
+            for k in list(extracted_cols.keys()):
+                if units_detected.get(k) == 'percent':
+                    extracted_cols[k] = [
+                        round(v / 100.0, 6) if v is not None else None
+                        for v in extracted_cols[k]
+                    ]
+                    units_detected[k] = 'fraction (normalised from percent)'
+
             clean_extracted = {k: v for k, v in extracted_cols.items() if any(val is not None for val in v)}
             if clean_extracted:
+                clean_extracted['units_detected'] = units_detected
                 results[sheet] = clean_extracted
 
         self.extracted = {'type': 'KR', 'samples': results}
@@ -719,6 +747,19 @@ def build_prompt_for_ai(processed: dict) -> str:
             "Please check the file and re-upload."
         )
 
+    if data_type in ('PDF', 'DOCX'):
+        raw_text = extracted.get('raw_text', '')
+        return (
+            f"The engineer has uploaded a {data_type} document for petrophysical analysis.\n"
+            f"SOURCE: {processed.get('well_name', 'PROVISIONAL WELL')}\n\n"
+            f"DOCUMENT CONTENT:\n{raw_text}\n\n"
+            f"Instructions:\n"
+            f"1. Identify all SCAL measurements, parameters, and petrophysical data present.\n"
+            f"2. State every value with its units explicitly as written in the document.\n"
+            f"3. If tables or curves are described, reproduce the key values in structured form.\n"
+            f"4. Do NOT fabricate data not present in the document."
+        )
+
     # FIX 2 + FIX 4 — MICP gets a dedicated, guardrailed prompt
     if data_type == 'MICP':
         return _build_micp_prompt(extracted, processed.get('well_name', 'PROVISIONAL WELL'))
@@ -738,6 +779,8 @@ Extracted data (each top-level key is the Excel sheet name the data came from):
 Instructions:
 1. Plot the appropriate curve for {data_type} data using the extracted values above.
 2. Use the correct axis scales and labels as per petroleum engineering standards.
+   If a 'units_detected' field is present, state the original units in chart axis labels
+   and note if values were normalised from percent to fraction.
 3. After the chart, give 3-5 bullet points of key observations.
 4. Do NOT generate or invent any data. Use only what is provided above.
 5. All data comes from the same well. Do not fabricate geological differences
@@ -1008,7 +1051,51 @@ def robust_extract_scal(filepath):
     return result
 
 
+def _extract_pdf(file_bytes: bytes) -> str:
+    """Extract all text from PDF for Gemini to analyze directly."""
+    import pdfplumber
+    with pdfplumber.open(io.BytesIO(file_bytes)) as pdf:
+        return "\n".join(page.extract_text() or "" for page in pdf.pages)
+
+
+def _extract_docx(file_bytes: bytes) -> str:
+    """Extract all text from Word document."""
+    from docx import Document
+    doc = Document(io.BytesIO(file_bytes))
+    return "\n".join(para.text for para in doc.paragraphs if para.text.strip())
+
+
 def extract_file_data(filepath):
+    ext = Path(filepath).suffix.lower()
+
+    if ext == '.pdf':
+        try:
+            with open(filepath, 'rb') as f:
+                text = _extract_pdf(f.read())
+            return {
+                "data_type": "PDF", "sheet_names": [], "row_count": len(text),
+                "extracted": {"raw_text": text}, "status": "success",
+            }
+        except Exception as e:
+            return {
+                "status": "parsing_failed", "data_type": "UNKNOWN",
+                "sheet_names": [], "row_count": 0, "extracted": {}, "errors": [str(e)],
+            }
+
+    if ext in ('.docx', '.doc'):
+        try:
+            with open(filepath, 'rb') as f:
+                text = _extract_docx(f.read())
+            return {
+                "data_type": "DOCX", "sheet_names": [], "row_count": len(text),
+                "extracted": {"raw_text": text}, "status": "success",
+            }
+        except Exception as e:
+            return {
+                "status": "parsing_failed", "data_type": "UNKNOWN",
+                "sheet_names": [], "row_count": 0, "extracted": {}, "errors": [str(e)],
+            }
+
     try:
         handler = SCALFileHandler(filepath)
         result = handler.process()

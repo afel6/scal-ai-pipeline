@@ -25,6 +25,7 @@ xlrd>=2.0.1                  # Required for legacy .xls files
 reportlab>=4.2.0
 
 # ── PDF & HTML parsing ────────────────────────────────────────────────────────
+pdfplumber>=0.10.0             # PDF text extraction for SCAL file uploads
 # PyPDF2 removed — not imported in any core module; scal_ingestion uses pandas directly
 # beautifulsoup4 removed — no HTML scraping in production paths
 # lxml removed — was only a transitive dep of beautifulsoup4
