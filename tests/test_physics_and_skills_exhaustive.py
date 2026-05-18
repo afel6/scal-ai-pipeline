@@ -351,6 +351,125 @@ class TestPhysicsGuardArchie:
 
 
 # ══════════════════════════════════════════════════════════════════════════════
+# PHYSICS GUARD — validate_archie_parameters
+# ══════════════════════════════════════════════════════════════════════════════
+
+class TestArchieParameterValidation:
+    """Validates that fitted Archie scalars (a, m, b, n) are within physical bounds."""
+
+    # ── valid parameters ──────────────────────────────────────────────────────
+
+    def test_valid_params_score_100(self):
+        g = PhysicsGuard()
+        g.validate_archie_parameters(a=1.0, m=2.0, b=1.0, n=2.0)
+        r = g.generate_health_score()
+        assert r["score"] == 100
+        assert r["violations"] == []
+
+    def test_rules_checked_count(self):
+        g = PhysicsGuard()
+        g.validate_archie_parameters(a=1.0, m=2.0, b=1.0, n=2.0)
+        assert g.generate_health_score()["rules_checked"] == 4
+
+    def test_boundary_values_pass(self):
+        """Exact boundary values must be accepted (inclusive bounds)."""
+        for a, m, b, n in [(0.5, 1.3, 0.5, 1.5), (1.5, 2.5, 1.5, 2.5)]:
+            g = PhysicsGuard()
+            g.validate_archie_parameters(a=a, m=m, b=b, n=n)
+            r = g.generate_health_score()
+            assert r["score"] == 100, f"Boundary failed a={a} m={m} b={b} n={n}: {r['violations']}"
+
+    # ── cementation exponent (m) ──────────────────────────────────────────────
+
+    def test_m_below_minimum_flagged(self):
+        """m=0.3 is sub-physical — ARCHIE_M_RANGE must fire."""
+        g = PhysicsGuard()
+        g.validate_archie_parameters(a=1.0, m=0.3, b=1.0, n=2.0)
+        rules = [v["rule"] for v in g.generate_health_score()["violations"]]
+        assert "ARCHIE_M_RANGE" in rules
+
+    def test_m_above_maximum_flagged(self):
+        g = PhysicsGuard()
+        g.validate_archie_parameters(a=1.0, m=3.8, b=1.0, n=2.0)
+        rules = [v["rule"] for v in g.generate_health_score()["violations"]]
+        assert "ARCHIE_M_RANGE" in rules
+
+    def test_m_violation_is_high_severity(self):
+        g = PhysicsGuard()
+        g.validate_archie_parameters(a=1.0, m=0.3, b=1.0, n=2.0)
+        v = {v["rule"]: v for v in g.generate_health_score()["violations"]}
+        assert v["ARCHIE_M_RANGE"]["severity"] == "HIGH"
+
+    # ── saturation exponent (n) ───────────────────────────────────────────────
+
+    def test_n_negative_flagged(self):
+        """n=-1.5 is impossible — ARCHIE_N_RANGE must fire."""
+        g = PhysicsGuard()
+        g.validate_archie_parameters(a=1.0, m=2.0, b=1.0, n=-1.5)
+        rules = [v["rule"] for v in g.generate_health_score()["violations"]]
+        assert "ARCHIE_N_RANGE" in rules
+
+    def test_n_above_maximum_flagged(self):
+        g = PhysicsGuard()
+        g.validate_archie_parameters(a=1.0, m=2.0, b=1.0, n=3.5)
+        rules = [v["rule"] for v in g.generate_health_score()["violations"]]
+        assert "ARCHIE_N_RANGE" in rules
+
+    # ── tortuosity factor (a) ─────────────────────────────────────────────────
+
+    def test_a_above_maximum_flagged(self):
+        g = PhysicsGuard()
+        g.validate_archie_parameters(a=2.5, m=2.0, b=1.0, n=2.0)
+        rules = [v["rule"] for v in g.generate_health_score()["violations"]]
+        assert "ARCHIE_A_RANGE" in rules
+
+    def test_a_below_minimum_flagged(self):
+        g = PhysicsGuard()
+        g.validate_archie_parameters(a=0.1, m=2.0, b=1.0, n=2.0)
+        rules = [v["rule"] for v in g.generate_health_score()["violations"]]
+        assert "ARCHIE_A_RANGE" in rules
+
+    # ── saturation coefficient (b) ────────────────────────────────────────────
+
+    def test_b_above_maximum_flagged(self):
+        g = PhysicsGuard()
+        g.validate_archie_parameters(a=1.0, m=2.0, b=3.0, n=2.0)
+        rules = [v["rule"] for v in g.generate_health_score()["violations"]]
+        assert "ARCHIE_B_RANGE" in rules
+
+    # ── multi-violation stacking ──────────────────────────────────────────────
+
+    def test_m_and_n_both_impossible_stack(self):
+        """m=0.3 and n=-1.5 → 2 HIGH violations → score = 100 - 30 = 70."""
+        g = PhysicsGuard()
+        g.validate_archie_parameters(a=1.0, m=0.3, b=1.0, n=-1.5)
+        r = g.generate_health_score()
+        rules = [v["rule"] for v in r["violations"]]
+        assert "ARCHIE_M_RANGE" in rules
+        assert "ARCHIE_N_RANGE" in rules
+        assert r["score"] == 70
+
+    def test_all_four_bad_score_clamps_at_0(self):
+        """4 HIGH violations = 60 pts deducted → score = 40, not below 0."""
+        g = PhysicsGuard()
+        g.validate_archie_parameters(a=5.0, m=0.1, b=9.0, n=-3.0)
+        r = g.generate_health_score()
+        assert len(r["violations"]) == 4
+        assert r["score"] == 100 - 4 * 15  # 40
+
+    def test_does_not_interfere_with_kr_chain(self):
+        """Chaining validate_kr + validate_archie_parameters accumulates rules correctly."""
+        sw  = np.linspace(0.2, 0.85, 10)
+        krw = np.linspace(0.0, 0.65, 10)
+        kro = np.linspace(0.9, 0.0, 10)
+        g = PhysicsGuard()
+        g.validate_kr(sw, krw, kro)
+        g.validate_archie_parameters(a=1.0, m=2.0, b=1.0, n=2.0)
+        r = g.generate_health_score()
+        assert r["rules_checked"] == 7 + 4  # 7 Kr + 4 Archie params
+
+
+# ══════════════════════════════════════════════════════════════════════════════
 # PHYSICS GUARD — validate_pc
 # ══════════════════════════════════════════════════════════════════════════════
 

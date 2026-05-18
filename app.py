@@ -49,6 +49,7 @@ from petrophysical_curves import Endpoints, KrCurveFitter
 from physics_validator import PhysicsGuard
 
 from scal_file_handler import SCALFileHandler, extract_file_data, _extract_pdf as _sfh_extract_pdf, _extract_docx as _sfh_extract_docx
+from file_reader import read_file, to_prompt_string, build_gemini_message
 
 from report_generator import PRCReportEngine
 
@@ -182,6 +183,8 @@ _PG_AVAILABLE = False
 
 _SQLITE_LOCK  = threading.Lock()
 
+_PG_POOL_LOCK = threading.Lock()  # guards pool reinit across threads
+
 
 
 if DATABASE_URL:
@@ -207,6 +210,81 @@ if not _PG_AVAILABLE:
     _logger.info("[DB] SQLite + WAL mode")
 
 
+# ── DB RETRY / RESILIENCE ──────────────────────────────────────────────────────
+
+# Delays applied BETWEEN attempts (not before the first): 500 ms → 1 s → 2 s.
+_DB_RETRY_DELAYS = (0.5, 1.0, 2.0)
+
+# Both psycopg2 and sqlite3 name their transient socket/lock errors the same way.
+# Checking __name__ avoids importing driver-specific exception classes here.
+_DB_TRANSIENT_ERROR_NAMES = frozenset({"OperationalError", "InterfaceError"})
+
+
+def _reinit_pg_pool() -> bool:
+    """Close the current PG pool and open a fresh one against DATABASE_URL.
+
+    Called automatically when a transient connection error is detected so that
+    the next retry gets a live socket instead of a dead one.  Thread-safe: only
+    one reinit runs at a time; concurrent callers block on _PG_POOL_LOCK and
+    then proceed with the already-refreshed pool.
+
+    Returns True if the new pool was created successfully, False otherwise.
+    """
+    global _PG_POOL, _PG_AVAILABLE
+    if not DATABASE_URL:
+        return False
+    with _PG_POOL_LOCK:
+        try:
+            if _PG_POOL is not None:
+                try:
+                    _PG_POOL.closeall()
+                except Exception:
+                    pass
+            from psycopg2 import pool as _pg_pool_mod
+            _PG_POOL = _pg_pool_mod.ThreadedConnectionPool(5, 50, DATABASE_URL)
+            _PG_AVAILABLE = True
+            _logger.warning("[DB] PG pool re-initialized after transient connection failure.")
+            return True
+        except Exception as _reinit_err:
+            _logger.error(f"[DB] Pool re-init failed: {_reinit_err}")
+            return False
+
+
+def with_db_retry(fn):
+    """Decorator: retry a DB-calling function up to 3 times with exponential backoff.
+
+    Retry schedule: 500 ms → 1 s → 2 s between attempts.
+    On psycopg2 OperationalError / InterfaceError the PG pool is torn down and
+    rebuilt before the next attempt so dead sockets are never reused.
+
+    Usage:
+        @with_db_retry
+        def my_query():
+            with _get_conn() as (conn, ph):
+                ...
+    """
+    import functools
+
+    @functools.wraps(fn)
+    def _wrapper(*args, **kwargs):
+        last_err = None
+        for attempt, delay in enumerate(_DB_RETRY_DELAYS):
+            try:
+                return fn(*args, **kwargs)
+            except Exception as exc:
+                last_err = exc
+                _logger.warning(
+                    f"[DB RETRY] {fn.__name__} attempt {attempt + 1}/3 "
+                    f"({type(exc).__name__}): {exc}"
+                )
+                if type(exc).__name__ in _DB_TRANSIENT_ERROR_NAMES and _PG_AVAILABLE:
+                    _reinit_pg_pool()
+                if attempt < len(_DB_RETRY_DELAYS) - 1:
+                    time.sleep(delay)
+        _logger.error(f"[DB FINAL ERROR] {fn.__name__} gave up after 3 attempts: {last_err}")
+        raise last_err
+
+    return _wrapper
 
 
 
@@ -332,7 +410,7 @@ def db(query: str, params: tuple = ()) -> list:
 
     last_err = None
 
-    for attempt in range(2):
+    for attempt, delay in enumerate(_DB_RETRY_DELAYS):
 
         try:
 
@@ -360,11 +438,20 @@ def db(query: str, params: tuple = ()) -> list:
 
             last_err = e
 
-            _logger.warning(f"[DB RETRY] Attempt {attempt+1} failed for query '{query[:50]}...': {e}")
+            _logger.warning(
+                f"[DB RETRY] Attempt {attempt + 1}/3 for '{query[:60]}' "
+                f"({type(e).__name__}): {e}"
+            )
 
-            time.sleep(0.1 * (attempt + 1))
+            if type(e).__name__ in _DB_TRANSIENT_ERROR_NAMES and _PG_AVAILABLE:
 
-    
+                _reinit_pg_pool()
+
+            if attempt < len(_DB_RETRY_DELAYS) - 1:
+
+                time.sleep(delay)
+
+
 
     _logger.error(f"[DB FINAL ERROR] Query: {query} | Error: {last_err}")
 
@@ -2245,9 +2332,9 @@ class PRCChatAssistant:
 
 
 
-            # Skip Gemini Files API for spreadsheets, PDFs, and DOCX — text already
+            # Skip Gemini Files API for spreadsheets, PDFs, DOCX, and plain text — all
             # extracted locally in chat() and injected into the prompt. Avoids 30-120s upload latency.
-            if any(x in safe_mime for x in ["spreadsheet", "excel", "csv", "sheet", "pdf", "wordprocessingml"]):
+            if any(x in safe_mime for x in ["spreadsheet", "excel", "csv", "sheet", "pdf", "wordprocessingml", "text/plain"]):
 
                 continue
 
@@ -2382,6 +2469,15 @@ class PRCChatAssistant:
 
                 try:
 
+                    # Primary: human-readable column/value summary for the LLM
+                    fr_data = read_file(tmp_path)
+                    fr_text, _ = to_prompt_string(fr_data)
+                    if fr_text:
+                        extracted_context += f"\n\n[SPREADSHEET: {fname}]\n{fr_text}\n"
+                        chunks = KnowledgeBase.chunk_text(fr_text, f"File: {fname}")
+                        _tls.pending_kb.extend(chunks)
+
+                    # Secondary: SCAL-specific structured extraction for analysis tools
                     result = extract_file_data(tmp_path)
 
                     well_name = result.get('well_name', 'PROVISIONAL WELL')
@@ -2390,8 +2486,6 @@ class PRCChatAssistant:
                     inventory = f"FILE: {fname}\nWELL: {well_name}\nSHEETS: {', '.join(result['sheet_names'])}\nIDENTIFIED TYPE: {result['data_type']}\nTOTAL ROWS: {result['row_count']}\n"
 
                     extracted_context += f"\n\n[NEW UPLOAD INVENTORY]:\n{inventory}"
-
-
 
                     if result.get('data_type') != 'UNKNOWN':
 
@@ -2406,20 +2500,6 @@ class PRCChatAssistant:
                         chunks = KnowledgeBase.chunk_text(data_json, f"File: {fname}")
 
                         _tls.pending_kb.extend(chunks)
-
-                    else:
-
-                        first_sheet = result['sheet_names'][0] if result['sheet_names'] else None
-
-                        if first_sheet and first_sheet in handler.raw_data:
-
-                            raw_df = handler.raw_data[first_sheet].iloc[:15, :10]
-
-                            raw_str = raw_df.to_string(index=False, header=False)
-
-                            extracted_context += f"[RAW DATA PREVIEW - SHEET: {first_sheet}]:\n{raw_str}\n"
-
-                            _tls.pending_kb.append((f"Raw: {fname}", raw_str))
 
                 except Exception as e:
 
@@ -2452,6 +2532,17 @@ class PRCChatAssistant:
                         _tls.pending_kb.extend(chunks)
                 except Exception as e:
                     _logger.warning(f"[DOCX Extract] {fname}: {e}")
+
+            elif "text/plain" in safe_mime:
+                # Extract TXT locally — avoids Files API upload latency
+                try:
+                    content = data_bytes.decode("utf-8", errors="ignore")
+                    if content.strip():
+                        extracted_context += f"\n\n[TEXT FILE: {fname}]\n{content[:50000]}\n"
+                        chunks = KnowledgeBase.chunk_text(content, f"File: {fname}")
+                        _tls.pending_kb.extend(chunks)
+                except Exception as e:
+                    _logger.warning(f"[TXT Extract] {fname}: {e}")
 
 
 

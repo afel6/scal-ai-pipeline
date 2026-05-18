@@ -26,7 +26,8 @@ reportlab>=4.2.0
 
 # ── PDF & HTML parsing ────────────────────────────────────────────────────────
 pdfplumber>=0.10.0             # PDF text extraction for SCAL file uploads
-# PyPDF2 removed — not imported in any core module; scal_ingestion uses pandas directly
+# PyPDF2: not a direct dep — file_reader.py uses it as a conditional fallback only if
+# pdfplumber is absent (which never happens on Render since pdfplumber is listed above)
 # beautifulsoup4 removed — no HTML scraping in production paths
 # lxml removed — was only a transitive dep of beautifulsoup4
 

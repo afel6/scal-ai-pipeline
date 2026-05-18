@@ -254,6 +254,49 @@ class PhysicsGuard:
 
         return self
 
+    def validate_archie_parameters(self, a: float, m: float, b: float, n: float) -> "PhysicsGuard":
+        """
+        Validate fitted Archie equation scalar parameters against physical bounds.
+
+        Archie equations:
+          FF = a · φ^-m   (Formation Factor)
+          RI = b · Sw^-n  (Resistivity Index)
+
+        Physical bounds for typical reservoir rock:
+          a ∈ [0.5, 1.5]  — tortuosity factor
+          m ∈ [1.3, 2.5]  — cementation exponent
+          b ∈ [0.5, 1.5]  — saturation coefficient (standard form: b ≈ 1.0)
+          n ∈ [1.5, 2.5]  — saturation exponent
+
+        All four checks are HIGH severity: out-of-range parameters are
+        impossible fits, not soft warnings.
+        """
+        self._check(
+            0.5 <= float(a) <= 1.5,
+            "ARCHIE_A_RANGE",
+            f"Tortuosity factor a = {a:.4f} outside physical bounds [0.5, 1.5]. "
+            "Values far from 1.0 suggest a poor fit or non-standard rock fabric.",
+        )
+        self._check(
+            1.3 <= float(m) <= 2.5,
+            "ARCHIE_M_RANGE",
+            f"Cementation exponent m = {m:.4f} outside physical bounds [1.3, 2.5]. "
+            "m < 1.3 is sub-physical; m > 2.5 requires independent lithological justification.",
+        )
+        self._check(
+            0.5 <= float(b) <= 1.5,
+            "ARCHIE_B_RANGE",
+            f"Saturation coefficient b = {b:.4f} outside physical bounds [0.5, 1.5]. "
+            "Standard Archie has b = 1.0; large deviation indicates fit instability.",
+        )
+        self._check(
+            1.5 <= float(n) <= 2.5,
+            "ARCHIE_N_RANGE",
+            f"Saturation exponent n = {n:.4f} outside physical bounds [1.5, 2.5]. "
+            "n < 1.5 is below observed rock range; n > 2.5 may indicate wettability alteration.",
+        )
+        return self
+
     # ── score generation ──────────────────────────────────────────────────────
 
     def generate_health_score(self) -> dict:
