@@ -231,18 +231,27 @@ class PhysicsGuard:
 
         return self
 
-    def validate_pc(self, sw, pc) -> "PhysicsGuard":
-        """Validation for general Capillary Pressure (Centrifuge/Porous Plate)."""
+    def validate_pc(self, sw, pc, cycle: str = "drainage") -> "PhysicsGuard":
+        """Validation for general Capillary Pressure (Centrifuge/Porous Plate).
+
+        cycle='drainage'   (default) — Pc must be positive; negative values flagged.
+        cycle='imbibition' — Pc is legitimately ≤ 0; PC_RANGE check is skipped.
+        """
         sw_a = np.asarray(sw, dtype=float)
         pc_a = np.asarray(pc, dtype=float)
         idx  = np.argsort(sw_a)
         sw_s, pc_s = sw_a[idx], pc_a[idx]
 
-        # Sw increases -> Pc should decrease
+        # Sw increases → Pc should decrease (applies to both drainage and imbibition)
         n_viol = int(np.sum(np.diff(pc_s) > 1e-4))
-        self._check(n_viol == 0, "PC_MONOTONICITY", f"Capillary Pressure increases at {n_viol} point(s) as water saturation increases.")
-        self._check(bool(np.all(pc_s >= -0.1)), "PC_RANGE", f"Capillary Pressure must be positive (found min={pc_s.min():.2f}).")
-        
+        self._check(n_viol == 0, "PC_MONOTONICITY",
+                    f"Capillary Pressure increases at {n_viol} point(s) as water saturation increases.")
+
+        # Sign check — imbibition Pc is negative by convention; skip for that cycle
+        if cycle.lower() != "imbibition":
+            self._check(bool(np.all(pc_s >= -0.1)), "PC_RANGE",
+                        f"Capillary Pressure must be positive (found min={pc_s.min():.2f}).")
+
         return self
 
     # ── score generation ──────────────────────────────────────────────────────

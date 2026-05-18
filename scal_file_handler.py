@@ -107,6 +107,12 @@ class SCALFileHandler:
             'routine core', 'air permeability', 'klinkenberg',
             'grain density', 'plug', 'horizontal perm', 'vertical perm'
         ],
+        # Formation-damage / sensitivity test: KL (mD) vs cumulative PV injected.
+        # 'sensitivity test' and 'kl' are scored higher to beat KR/RCAL.
+        'FDAM': [
+            'kl', 'sensitivity test', 'formation damage',
+            'fluid sensitivity', 'cum.pv.inj',
+        ],
     }
 
     def identify(self):
@@ -123,7 +129,9 @@ class SCALFileHandler:
             for data_type, keywords in self.KEYWORDS.items():
                 for kw in keywords:
                     if kw in text:
-                        weight = 10 if kw in ['rpm', 'centrifuge', 'speed', 'produced volume'] else 1
+                        weight = (10 if kw in ['rpm', 'centrifuge', 'speed', 'produced volume', 'sensitivity test']
+                                  else 5 if kw == 'kl'
+                                  else 1)
                         scores[data_type] += weight
 
         best = max(scores, key=scores.get)
@@ -150,6 +158,7 @@ class SCALFileHandler:
             'RCAL':        self._extract_rcal,
             'WETTABILITY': self._extract_wettability,
             'PC':          self._extract_pc,
+            'FDAM':        self._extract_fdam,
         }
         if self.data_type in extractors:
             extractors[self.data_type]()
@@ -208,7 +217,7 @@ class SCALFileHandler:
             # ── HARD REJECT 2: incremental headers ──
             is_header_incremental = ('incremental' in h_str or 'incr.' in h_str
                                      or 'delta' in h_str or 'Δ' in h_str)
-            is_header_cumulative  = 'cumul' in h_str or 'total' in h_str or 'cum.' in h_str
+            is_header_cumulative  = 'cumul' in h_str or 'cumm' in h_str or 'total' in h_str or 'cum.' in h_str
             if is_header_incremental and not is_header_cumulative:
                 continue
 
@@ -216,13 +225,17 @@ class SCALFileHandler:
             if df_subset is not None and j < df_subset.shape[1]:
                 # Sample the series to see if it's cumulative saturation or incremental delta
                 series = pd.to_numeric(df_subset.iloc[:, j], errors='coerce').dropna().values
-                if len(series) > 5:
-                    net_range = abs(series[-1] - series[0])
-                    total_mvmt = np.sum(np.abs(np.diff(series)))
-                    # Incremental data sums much larger than its range.
-                    # Strict threshold: 1.8x. If total movement is > 1.8x net range, it's not a cumulative saturation curve.
-                    if total_mvmt > 1.8 * net_range and net_range > 0.01:
-                        continue
+                # Reject sparse columns — a valid saturation column must have real data.
+                # This handles files where duplicate header names (e.g. 'Sat. Hg' for both
+                # Bulk-Vol% and Pore-Vol%) appear and one column is entirely NaN.
+                if len(series) < 5:
+                    continue
+                net_range = abs(series[-1] - series[0])
+                total_mvmt = np.sum(np.abs(np.diff(series)))
+                # Incremental data sums much larger than its range.
+                # Strict threshold: 1.8x. If total movement is > 1.8x net range, it's not a cumulative saturation curve.
+                if total_mvmt > 1.8 * net_range and net_range > 0.01:
+                    continue
 
             # ── POSITIVE SCORES ──
             if '%' in h_str:                                         score += 100
@@ -326,15 +339,34 @@ class SCALFileHandler:
                     or 'delta' in chosen_h
                 )
 
-                # FIX 2 — tag every result with sheet identity and type
+                # Bug 1 fix — extract threshold pressure from labeled cell
+                # e.g. " Threshold Pressure (psi)" adjacent to its value
+                threshold_p = None
+                for i_tp in range(min(20, len(df))):
+                    row_tp = df.iloc[i_tp].tolist()
+                    for j_tp, cell in enumerate(row_tp):
+                        if (isinstance(cell, str)
+                                and 'threshold' in cell.lower()
+                                and 'pressure' in cell.lower()):
+                            for k_tp in range(j_tp + 1, min(j_tp + 4, len(row_tp))):
+                                v = pd.to_numeric(row_tp[k_tp], errors='coerce')
+                                if not pd.isna(v):
+                                    threshold_p = round(float(v), 4)
+                                    break
+                            if threshold_p is not None:
+                                break
+                    if threshold_p is not None:
+                        break
+
                 results[sheet] = {
-                    'sheet_name':       sheet,
-                    'sheet_type':       sheet_type,
-                    'sat_column_used':  str(headers[sat_col]),
-                    'sat_is_percent':   sat_is_percent,
-                    'sat_is_incremental': sat_is_incremental,
-                    'drainage':         drainage,
-                    'imbibition':       imbibition,
+                    'sheet_name':              sheet,
+                    'sheet_type':              sheet_type,
+                    'sat_column_used':         str(headers[sat_col]),
+                    'sat_is_percent':          sat_is_percent,
+                    'sat_is_incremental':      sat_is_incremental,
+                    'threshold_pressure_psi':  threshold_p,
+                    'drainage':                drainage,
+                    'imbibition':              imbibition,
                 }
                 break  # found the data block in this sheet; move to next sheet
 
@@ -428,6 +460,75 @@ class SCALFileHandler:
                 results[sheet] = clean_extracted
 
         self.extracted = {'type': 'KR', 'samples': results}
+
+    # ---- FORMATION DAMAGE (Kw / Sensitivity Test) ---- #
+    def _extract_fdam(self):
+        """
+        Extract formation-damage data: KL (mD) vs Cumulative PV Injected.
+
+        File layout (one sheet per plug):
+          Header row contains exactly 'KL' and a cumulative-PV column
+          ('Cum.Pv.inj' or similar). The row immediately after the header
+          holds text units ('mD', 'cc', etc.) — those are skipped automatically
+          by the pd.to_numeric NaN-filter in the data loop.
+        """
+        results = {}
+        for sheet, df in self.raw_data.items():
+            for i in range(min(30, len(df))):
+                row_lower = [str(v).lower().strip() for v in df.iloc[i] if pd.notna(v)]
+                has_kl = any(c == 'kl' for c in row_lower)
+                has_pv = any(('pv' in c and 'cum' in c) or 'throughput' in c
+                             for c in row_lower)
+                if not (has_kl and has_pv):
+                    continue
+
+                headers = [str(v).strip() for v in df.iloc[i]]
+                data_df  = df.iloc[i + 1:].reset_index(drop=True)
+                data_df.columns = range(len(headers))
+
+                # Prefer exact-case 'KL', fall back to case-insensitive
+                kl_col = next(
+                    (j for j, h in enumerate(headers) if h == 'KL'),
+                    next((j for j, h in enumerate(headers) if h.lower() == 'kl'), None)
+                )
+                # Cumulative PV injected column
+                pv_col = next(
+                    (j for j, h in enumerate(headers)
+                     if 'pv' in h.lower() and 'cum' in h.lower()),
+                    next(
+                        (j for j, h in enumerate(headers) if 'throughput' in h.lower()),
+                        None
+                    )
+                )
+
+                if kl_col is None or pv_col is None or kl_col == pv_col:
+                    continue
+
+                kl_vals, pv_vals = [], []
+                for _, r in data_df.iterrows():
+                    kl = pd.to_numeric(r[kl_col], errors='coerce')
+                    pv = pd.to_numeric(r[pv_col], errors='coerce')
+                    if not pd.isna(kl) and not pd.isna(pv):
+                        kl_vals.append(round(float(kl), 6))
+                        pv_vals.append(round(float(pv), 6))
+
+                if kl_vals:
+                    initial_kl = kl_vals[0]
+                    final_kl   = kl_vals[-1]
+                    pct_change = (
+                        round((final_kl - initial_kl) / initial_kl * 100, 2)
+                        if initial_kl != 0 else None
+                    )
+                    results[sheet] = {
+                        'KL_mD':           kl_vals,
+                        'Cum_PV_injected': pv_vals,
+                        'initial_KL_mD':   initial_kl,
+                        'final_KL_mD':     final_kl,
+                        'KL_change_pct':   pct_change,
+                    }
+                    break
+
+        self.extracted = {'type': 'FDAM', 'samples': results}
 
     # ---- FORMATION RESISTIVITY FACTOR ---- #
     def _extract_frf(self):
@@ -603,8 +704,101 @@ class SCALFileHandler:
 
     # ---- POROUS PLATE / CENTRIFUGE Pc ---- #
     def _extract_pc(self):
+        """
+        Two extraction paths:
+
+        PRIORITY — imbibition output table (Bug 3 fix):
+          Detects a sparse row containing exactly 'Capillary' and 'Liquid'
+          followed one row later by 'pressure' and 'saturation'. This is the
+          clean signed-Pc output table (values: 0, -1, -2, ..., -120 psi).
+          Also extracts Sor Lab. and Sor T.C. labels from the same sheet (Bug 4 fix).
+
+        FALLBACK — standard Pc table or raw centrifuge RPM/Volume table.
+          Existing logic for drainage Pc and other PC file formats.
+        """
         results = {}
         for sheet, df in self.raw_data.items():
+
+            # ── PRIORITY: imbibition output table (signed Pc) ────────────────
+            imb_found = False
+            for i in range(len(df) - 3):
+                row_vals = df.iloc[i].tolist()
+                non_null = {str(v).lower().strip()
+                            for v in row_vals
+                            if pd.notna(v) and str(v).strip() != ''}
+                # Exactly 'Capillary' and 'Liquid' (+ maybe 1 stray cell)
+                if 'capillary' not in non_null or 'liquid' not in non_null:
+                    continue
+                if len(non_null) > 3:
+                    continue
+                next_non_null = {str(v).lower().strip()
+                                 for v in df.iloc[i + 1].tolist()
+                                 if pd.notna(v) and str(v).strip() != ''}
+                if 'pressure' not in next_non_null or 'saturation' not in next_non_null:
+                    continue
+
+                # Found the imbibition header block
+                cap_col = next(
+                    (j for j, v in enumerate(row_vals)
+                     if str(v).lower().strip() == 'capillary'), None
+                )
+                liq_col = next(
+                    (j for j, v in enumerate(row_vals)
+                     if str(v).lower().strip() == 'liquid'), None
+                )
+                if cap_col is None or liq_col is None:
+                    continue
+
+                # Data starts at i+3 (i+2 is the 'psi / %' units row)
+                data = df.iloc[i + 3:].reset_index(drop=True)
+                pc_vals, sat_vals = [], []
+                for _, r in data.iterrows():
+                    pc  = pd.to_numeric(r[cap_col], errors='coerce')
+                    sat = pd.to_numeric(r[liq_col], errors='coerce')
+                    if not pd.isna(pc) and not pd.isna(sat):
+                        pc_vals.append(float(pc))
+                        sat_vals.append(float(sat))
+
+                if not pc_vals:
+                    continue
+
+                # Bug 4 — scan the whole sheet for 'Sor Lab.' and 'Sor T.C.' labels
+                sor_lab, sor_tc = None, None
+                for i_s in range(len(df)):
+                    row_s = df.iloc[i_s].tolist()
+                    for j_s, cell in enumerate(row_s):
+                        if not isinstance(cell, str):
+                            continue
+                        cell_l = cell.lower().strip()
+                        if sor_lab is None and 'sor lab' in cell_l:
+                            for k in range(j_s + 1, min(j_s + 4, len(row_s))):
+                                v = pd.to_numeric(row_s[k], errors='coerce')
+                                if not pd.isna(v):
+                                    fv = float(v)
+                                    sor_lab = round(fv * 100 if fv < 1.1 else fv, 4)
+                                    break
+                        elif sor_tc is None and re.search(r'sor\s+t\.?\s*c\.', cell_l):
+                            for k in range(j_s + 1, min(j_s + 4, len(row_s))):
+                                v = pd.to_numeric(row_s[k], errors='coerce')
+                                if not pd.isna(v):
+                                    fv = float(v)
+                                    sor_tc = round(fv * 100 if fv < 1.1 else fv, 4)
+                                    break
+
+                results[sheet] = {
+                    'Liquid_Sat_pct': sat_vals,
+                    'Pc_psi':         pc_vals,
+                    'cycle':          'imbibition',
+                    'Sor_Lab_pct':    sor_lab,
+                    'Sor_TC_pct':     sor_tc,
+                }
+                imb_found = True
+                break
+
+            if imb_found:
+                continue  # already handled; skip fallback for this sheet
+
+            # ── FALLBACK: standard Pc table or raw centrifuge data ───────────
             for i in range(min(30, len(df))):
                 row = [str(v).lower() for v in df.iloc[i] if pd.notna(v)]
 
@@ -621,7 +815,7 @@ class SCALFileHandler:
                     continue
 
                 headers = list(df.iloc[i])
-                data = df.iloc[i+1:].reset_index(drop=True)
+                data = df.iloc[i + 1:].reset_index(drop=True)
                 data.columns = range(len(data.columns))
 
                 if is_standard_pc:
@@ -646,6 +840,7 @@ class SCALFileHandler:
                 if x_vals:
                     results[sheet] = {x_name: x_vals, y_name: y_vals}
                     break
+
         self.extracted = {'type': 'PC', 'samples': results}
 
     # ------------------------------------------------------------------ #
@@ -697,6 +892,57 @@ class SCALFileHandler:
 
         return "PROVISIONAL WELL"
 
+    def _extract_all_metadata(self) -> dict:
+        """
+        Bug 1 fix — extract well, company, and sample from labeled header cells.
+
+        Scans every sheet for cells whose text matches a label pattern
+        ('Well #:', 'Well No:', 'Company :', 'Sample    :', etc.) and reads
+        the adjacent cell value.  Sample sheets are processed before
+        viscosity/summary sheets so that the primary sample data wins.
+
+        Returns: {'well': str|None, 'company': str|None, 'sample': str|None}
+        """
+        meta: dict = {'well': None, 'company': None, 'sample': None}
+
+        label_re = {
+            'well':    re.compile(r'well\s*[#no.:]*\s*$', re.IGNORECASE),
+            'company': re.compile(r'company\s*[#:]*\s*$',  re.IGNORECASE),
+            'sample':  re.compile(r'sample\s*[#:]*\s*$',   re.IGNORECASE),
+        }
+
+        def _priority(name: str) -> int:
+            n = name.lower()
+            if re.search(r'\bsample\b', n):
+                return 0                                 # individual sample sheet
+            if re.search(r'viscosity|summary|all\b|composite|sheet\d', n):
+                return 2                                 # aggregate / ancillary
+            return 1
+
+        for _sheet, _df in sorted(self.raw_data.items(), key=lambda kv: _priority(kv[0])):
+            if all(v is not None for v in meta.values()):
+                break
+            for i in range(min(40, len(_df))):
+                _row = _df.iloc[i].tolist()
+                for j, cell in enumerate(_row):
+                    if not isinstance(cell, str):
+                        continue
+                    cell_s = cell.strip()
+                    for field, pat in label_re.items():
+                        if meta[field] is not None:
+                            continue
+                        if pat.search(cell_s):
+                            for k in range(j + 1, min(j + 6, len(_row))):
+                                val = str(_row[k]).strip()
+                                if val and val.lower() not in ('nan', '', '#', 'no.'):
+                                    meta[field] = val
+                                    break
+
+        if meta['well'] is None:
+            meta['well'] = self._extract_well_name()
+
+        return meta
+
     # ------------------------------------------------------------------ #
     # MAIN ENTRY POINT
     # ------------------------------------------------------------------ #
@@ -706,12 +952,15 @@ class SCALFileHandler:
         self.read()
         self.identify()
         self.extract()
+        meta = self._extract_all_metadata()
         return {
             'data_type':   self.data_type,
             'sheet_names': self.sheet_names,
             'extracted':   self.extracted,
             'row_count':   self._count_rows(self.extracted),
-            'well_name':   self._extract_well_name(),
+            'well_name':   meta.get('well') or 'PROVISIONAL WELL',
+            'company':     meta.get('company') or '',
+            'sample':      meta.get('sample') or '',
         }
 
     def _count_rows(self, data: dict) -> int:
@@ -747,11 +996,20 @@ def build_prompt_for_ai(processed: dict) -> str:
             "Please check the file and re-upload."
         )
 
+    _well    = processed.get('well_name', 'PROVISIONAL WELL')
+    _company = processed.get('company', '')
+    _sample  = processed.get('sample', '')
+    _meta_header = (
+        f"SOURCE WELL: {_well}\n"
+        + (f"COMPANY: {_company}\n" if _company else "")
+        + (f"SAMPLE: {_sample}\n"   if _sample  else "")
+    )
+
     if data_type in ('PDF', 'DOCX'):
         raw_text = extracted.get('raw_text', '')
         return (
             f"The engineer has uploaded a {data_type} document for petrophysical analysis.\n"
-            f"SOURCE: {processed.get('well_name', 'PROVISIONAL WELL')}\n\n"
+            f"{_meta_header}\n"
             f"DOCUMENT CONTENT:\n{raw_text}\n\n"
             f"Instructions:\n"
             f"1. Identify all SCAL measurements, parameters, and petrophysical data present.\n"
@@ -760,9 +1018,11 @@ def build_prompt_for_ai(processed: dict) -> str:
             f"4. Do NOT fabricate data not present in the document."
         )
 
-    # FIX 2 + FIX 4 — MICP gets a dedicated, guardrailed prompt
     if data_type == 'MICP':
-        return _build_micp_prompt(extracted, processed.get('well_name', 'PROVISIONAL WELL'))
+        return _build_micp_prompt(extracted, _well, _company)
+
+    if data_type == 'FDAM':
+        return _build_fdam_prompt(extracted, _well, _company)
 
     # Generic prompt for all other data types
     data_json = json.dumps(extracted, indent=2)
@@ -770,7 +1030,7 @@ def build_prompt_for_ai(processed: dict) -> str:
 You are a petrophysics AI assistant. The engineer has uploaded a SCAL file.
 I have already read and extracted the data for you. Do not read the file again.
 
-SOURCE WELL: {processed.get('well_name', 'PROVISIONAL WELL')}
+{_meta_header}
 Data type identified: {data_type}
 
 Extracted data (each top-level key is the Excel sheet name the data came from):
@@ -788,7 +1048,42 @@ Instructions:
 """
 
 
-def _build_micp_prompt(extracted: dict, well_name: str = "PROVISIONAL WELL") -> str:
+def _build_fdam_prompt(extracted: dict, well_name: str = "PROVISIONAL WELL",
+                       company: str = "") -> str:
+    """Prompt for Formation Damage (Sensitivity Test / Kw vs Throughput) data."""
+    data_json = json.dumps(extracted, indent=2)
+    meta_line = f"SOURCE WELL: {well_name}" + (f"\nCOMPANY: {company}" if company else "")
+    return f"""
+You are a petrophysics AI assistant. The engineer has uploaded a Formation Damage
+(Sensitivity Test / Kw vs Throughput) file. The data has been pre-extracted below.
+
+{meta_line}
+
+EXTRACTED DATA (one entry per Excel sheet = one core plug):
+{data_json}
+
+Each sample entry contains:
+  KL_mD           — list of liquid permeability (mD) values in measurement order
+  Cum_PV_injected — cumulative pore volumes injected at each measurement point
+  initial_KL_mD   — baseline permeability (first measurement)
+  final_KL_mD     — permeability after flooding (last measurement)
+  KL_change_pct   — % change = (final − initial) / initial × 100
+
+INSTRUCTIONS:
+1. For EVERY sample sheet, report initial KL, final KL, and KL change (%) to 3 d.p.
+   Use ONLY the values in initial_KL_mD and final_KL_mD — do NOT re-derive them.
+2. Plot KL (mD) on the Y-axis vs Cumulative PV Injected on the X-axis, all samples.
+3. Classify formation damage severity per sample:
+     < 0 % change       → permeability improvement (note if observed)
+     0 – 20 % reduction → minor damage
+     20 – 50 % reduction → moderate damage
+     > 50 % reduction   → severe damage
+4. Do NOT invent or interpolate values. Every number must come from the extracted data.
+"""
+
+
+def _build_micp_prompt(extracted: dict, well_name: str = "PROVISIONAL WELL",
+                       company: str = "") -> str:
     """
     Purpose-built MICP prompt that enforces:
       FIX 2 — summary vs. sample sheet disambiguation
@@ -804,11 +1099,12 @@ def _build_micp_prompt(extracted: dict, well_name: str = "PROVISIONAL WELL") -> 
 
     data_json = json.dumps(extracted, indent=2)
 
+    meta_line = f"SOURCE WELL: {well_name}" + (f"\nCOMPANY: {company}" if company else "")
     return f"""
 You are a petrophysics AI assistant performing MICP (Mercury Injection Capillary Pressure) analysis.
 The file has already been parsed. The extracted data is below. Do NOT re-read the file.
 
-SOURCE WELL: {well_name}
+{meta_line}
 ═══════════════════════════════════════════════════════════
 SHEET CLASSIFICATION (determined by sheet name)
 ═══════════════════════════════════════════════════════════
@@ -844,9 +1140,10 @@ MANDATORY ANALYSIS INSTRUCTIONS
    Report the maximum Hg saturation reached (%) for every sample.
 
 3. ENTRY (THRESHOLD) PRESSURE Pd PER SAMPLE
-   For each sample's drainage curve, identify Pd as the pressure at which
+   Each sample entry includes a 'threshold_pressure_psi' field read directly
+   from the labeled cell in the file. Use that value as Pd — do NOT re-derive it.
+   If the field is null, infer Pd from the drainage curve as the pressure at which
    Hg saturation first rises meaningfully (the "knee" of the curve).
-   Report Pd explicitly in the units present in the data (psia or MPa).
    State Pd clearly as: "Sample X (sheet: <sheet_name>): Pd = N psia"
 
 4. PORE THROAT SIZE ESTIMATE

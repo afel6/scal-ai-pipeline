@@ -379,6 +379,15 @@ class TestPhysicsGuardPc:
         rules = [v["rule"] for v in g.generate_health_score()["violations"]]
         assert "PC_RANGE" in rules
 
+    def test_imbibition_negative_pc_not_flagged(self):
+        """Negative Pc is physically correct for imbibition — PC_RANGE must not fire."""
+        sw = np.linspace(0.30, 0.58, 9)
+        pc = np.array([0.0, -1.0, -2.0, -4.0, -8.0, -15.0, -35.0, -60.0, -120.0])
+        g = PhysicsGuard()
+        g.validate_pc(sw, pc, cycle="imbibition")
+        rules = [v["rule"] for v in g.generate_health_score()["violations"]]
+        assert "PC_RANGE" not in rules
+
 
 # ══════════════════════════════════════════════════════════════════════════════
 # PHYSICS GUARD — Chaining and Deduction Math
