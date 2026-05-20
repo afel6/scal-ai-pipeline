@@ -52,6 +52,12 @@ from scal_file_handler import SCALFileHandler, extract_file_data, _extract_pdf a
 from file_reader import read_file, to_prompt_string, build_gemini_message
 
 from report_generator import PRCReportEngine
+from grader import grade_ai_response
+import data_validator
+import visualizer
+from llm_insight_generator import MasterEngineerNode, DashboardArchitectNode
+from dashboard_architect import generate_universal_dashboard, detect_test_type
+
 
 
 
@@ -633,6 +639,57 @@ def get_user_file_history_context(email: str) -> str:
         return ""
 
 
+# ── SCAL DOC-GEN HELPER ──────────────────────────────────────────────────────
+
+def _scal_doc_summary(extracted: dict) -> str:
+    """Compact per-sample scalar summary from SCALFileHandler output.
+
+    Emits only pre-computed scalar values (not raw arrays) so Gemini can
+    populate document table rows directly without re-deriving values from
+    curves.  Used by both the chat upload path (stored to user_files) and
+    generate_document_json (injected into the prompt for the current request).
+    """
+    samples = extracted.get("samples", {})
+    if not isinstance(samples, dict) or not samples:
+        return ""
+    lines = ["[SCAL PER-SAMPLE SUMMARY — pre-computed values for document tables]"]
+    for sample_name, sd in samples.items():
+        if not isinstance(sd, dict):
+            continue
+        lines.append(f"\nSample: {sample_name}")
+        # FDAM / Kw-vs-throughput
+        if "initial_KL_mD" in sd:
+            lines.append(f"  initial_KL_mD = {sd['initial_KL_mD']}")
+            lines.append(f"  final_KL_mD = {sd['final_KL_mD']}")
+            if sd.get("KL_change_pct") is not None:
+                lines.append(f"  KL_change_pct = {sd['KL_change_pct']}")
+        # PC / Imbibition (Sor values and signed Pc range)
+        if sd.get("Sor_Lab_pct") is not None:
+            lines.append(f"  Sor_Lab_pct = {sd['Sor_Lab_pct']}")
+        if sd.get("Sor_TC_pct") is not None:
+            lines.append(f"  Sor_TC_pct = {sd['Sor_TC_pct']}")
+        if sd.get("Pc_psi"):
+            lines.append(f"  Pc_min_psi = {min(sd['Pc_psi'])}")
+        # MICP
+        if sd.get("threshold_pressure_psi") is not None:
+            lines.append(f"  threshold_pressure_psi = {sd['threshold_pressure_psi']}")
+        d = sd.get("drainage") if isinstance(sd.get("drainage"), dict) else {}
+        d_pv = d.get("sat_pv", [])
+        if d_pv:
+            max_d = max(d_pv)
+            if not sd.get("sat_is_percent", True):
+                max_d = round(max_d * 100, 2)
+            lines.append(f"  max_hg_sat_pct = {max_d}")
+        i = sd.get("imbibition") if isinstance(sd.get("imbibition"), dict) else {}
+        i_pv = i.get("sat_pv", [])
+        if i_pv:
+            max_i = max(i_pv)
+            if not sd.get("sat_is_percent", True):
+                max_i = round(max_i * 100, 2)
+            lines.append(f"  max_imb_hg_sat_pct = {max_i}")
+    return "\n".join(lines)
+
+
 # ── LIBRARY HELPERS ───────────────────────────────────────────────────────────
 
 def _chunk_with_overlap(text: str, chunk_words: int = 500, overlap_words: int = 50) -> list[str]:
@@ -719,6 +776,7 @@ def _ingest_library_file(file_bytes: bytes, filename: str, uploader_email: str) 
                 )
 
             conn.commit()
+            _LibraryEmbCache.invalidate()
             _logger.info(f"[Library] Ingested '{filename}' — {len(embedded)} chunks (doc_id={doc_id})")
             return {"status": "ingested", "chunks": len(embedded), "doc_id": doc_id}
 
@@ -1051,7 +1109,80 @@ _tls = threading.local()
 
 
 
-# â”€â”€ GEMINI HA CLIENT â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+def _call_gemini_with_retry(client, model, contents, config, max_retries=5, base_delay=2):
+    """Call client.models.generate_content with exponential backoff on 503/429.
+
+    503 ServiceUnavailable — Gemini overload: retry with base_delay * 2^attempt.
+    429 ResourceExhausted  — rate limit: retry with 2x longer delay.
+    Any other exception propagates immediately without retrying.
+    """
+    for attempt in range(max_retries):
+        try:
+            return client.models.generate_content(
+                model=model, contents=contents, config=config
+            )
+        except Exception as e:
+            err = str(e).lower()
+            is_503 = any(x in err for x in ["503", "service_unavailable", "unavailable"])
+            is_429 = any(x in err for x in ["429", "resource_exhausted"])
+            if (is_503 or is_429) and attempt < max_retries - 1:
+                delay = base_delay * (2 ** attempt)  # 2, 4, 8, 16, 32
+                if is_429:
+                    delay *= 2                        # 4, 8, 16, 32, 64
+                _logger.info(
+                    f"[DocGen] Gemini {'503' if is_503 else '429'} — "
+                    f"attempt {attempt + 1}/{max_retries}, retrying in {delay}s"
+                )
+                time.sleep(delay)
+                continue
+            
+            if is_503 and model == "gemini-2.5-flash":
+                _logger.warning("[Fallback] gemini-2.5-flash is 503 overloaded. Falling back to gemini-2.5-pro.")
+                try:
+                    return client.models.generate_content(
+                        model="gemini-2.5-pro", contents=contents, config=config
+                    )
+                except Exception as fallback_err:
+                    raise ValueError(f"CRITICAL: Both primary and fallback models are UNAVAILABLE. {fallback_err}")
+            
+            raise
+    raise ValueError(f"Gemini call failed after {max_retries} retries")
+
+def _call_gemini_stream_with_retry(client, model, contents, config, max_retries=3, base_delay=2):
+    """Call client.models.generate_content_stream with exponential backoff on 503/429 and fallback logic."""
+    for attempt in range(max_retries):
+        try:
+            for chunk in client.models.generate_content_stream(model=model, contents=contents, config=config):
+                yield chunk
+            return
+        except Exception as e:
+            err = str(e).lower()
+            is_503 = any(x in err for x in ["503", "service_unavailable", "unavailable"])
+            is_429 = any(x in err for x in ["429", "resource_exhausted"])
+            
+            # Simple retry backoff
+            if (is_503 or is_429) and attempt < max_retries - 1:
+                delay = base_delay * (2 ** attempt)
+                if is_429: delay *= 2
+                _logger.info(f"[Chat Stream] Gemini {'503' if is_503 else '429'} — attempt {attempt + 1}/{max_retries}, retrying in {delay}s")
+                time.sleep(delay)
+                continue
+                
+            # If we're out of retries for 503 and using flash, fallback to pro
+            if is_503 and model == "gemini-2.5-flash":
+                _logger.warning("[Fallback] gemini-2.5-flash is 503 overloaded. Falling back to gemini-2.5-pro for stream.")
+                try:
+                    for chunk in client.models.generate_content_stream(model="gemini-2.5-pro", contents=contents, config=config):
+                        yield chunk
+                    return
+                except Exception as fallback_err:
+                    raise ValueError(f"CRITICAL: Both primary (flash) and fallback (pro) models are UNAVAILABLE for streaming. {fallback_err}")
+            
+            # For 429s or other errors we just raise
+            raise
+
+
+# â"€â"€ GEMINI HA CLIENT â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€
 
 class PRCChatAssistant:
 
@@ -1326,7 +1457,7 @@ class PRCChatAssistant:
 
         try:
 
-            # â”€â”€ Executive Report â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+            # â"€â"€ Executive Report â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€
 
             if name == "generate_executive_report":
 
@@ -1356,7 +1487,7 @@ class PRCChatAssistant:
 
 
 
-            # â”€â”€ MICP: Drainage + Imbibition, log-Pc, % x-axis, hysteresis â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+            # â"€â"€ MICP: Drainage + Imbibition, log-Pc, % x-axis, hysteresis â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€
 
             if name == "fit_petrophysical_curve" and args.get("model") == "micp":
 
@@ -1432,7 +1563,7 @@ class PRCChatAssistant:
 
                     psd_pts.sort(key=lambda p: p["x"])
 
-                    # â”€â”€ Imbibition (recovery) cycle â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+                    # â"€â"€ Imbibition (recovery) cycle â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€
 
                     has_imb       = len(pc_imb_raw) > 1 and len(shg_imb_raw) > 1
 
@@ -1546,7 +1677,7 @@ class PRCChatAssistant:
 
                     }
 
-                    # â”€â”€ Physics Guard â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+                    # â"€â"€ Physics Guard â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€
 
                     audit = PhysicsGuard().validate_micp(pc_s, shg_s).generate_health_score()
 
@@ -1596,7 +1727,7 @@ class PRCChatAssistant:
 
 
 
-            # â”€â”€ RESISTIVITY INDEX (Archie n fit, log-log) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+            # â"€â"€ RESISTIVITY INDEX (Archie n fit, log-log) â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€
 
             if name == "fit_petrophysical_curve" and args.get("model") == "ri":
 
@@ -1656,7 +1787,7 @@ class PRCChatAssistant:
 
                     }
 
-                    # â”€â”€ Physics Guard â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+                    # â"€â"€ Physics Guard â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€
 
                     audit = PhysicsGuard().validate_archie(sw_a, ri_a, "RI").generate_health_score()
 
@@ -1684,7 +1815,7 @@ class PRCChatAssistant:
 
 
 
-            # â”€â”€ FORMATION FACTOR (Archie m, a fit, log-log) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+            # â"€â"€ FORMATION FACTOR (Archie m, a fit, log-log) â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€
 
             if name == "fit_petrophysical_curve" and args.get("model") == "ff":
 
@@ -1742,7 +1873,7 @@ class PRCChatAssistant:
 
                     }
 
-                    # â”€â”€ Physics Guard â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+                    # â"€â"€ Physics Guard â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€
 
                     audit = PhysicsGuard().validate_archie(phi_a, ff_a, "FF").generate_health_score()
 
@@ -1770,7 +1901,7 @@ class PRCChatAssistant:
 
 
 
-            # â”€â”€ LEVERETT J-FUNCTION â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+            # â"€â"€ LEVERETT J-FUNCTION â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€
 
             if name == "fit_petrophysical_curve" and args.get("model") == "jfunction":
 
@@ -1820,6 +1951,20 @@ class PRCChatAssistant:
 
                     }
 
+                    # ── Physics Guard: J-Function domain boundaries ──────
+                    audit = PhysicsGuard().validate_j_function(
+                        j_arr, sw_arr=sw_a, ift_cos_theta=ift_ct,
+                        fluid_system=f"σ·cos(θ)={ift_ct}"
+                    ).generate_health_score()
+                    plot_j["metadata"]["physics_audit"] = audit
+
+                    _log_physics_audit(
+                        getattr(_tls, 'current_session_id', 'ANONYMOUS'),
+                        "jfunction",
+                        audit,
+                        f"J-Function: k={k_md} mD, φ={phi_val:.3f}, IFT={ift_ct}"
+                    )
+
                     return (
 
                         f"__PRC_PLOT__\n{_safe_json_dumps(plot_j)}\n\n"
@@ -1828,7 +1973,7 @@ class PRCChatAssistant:
 
 
 
-            # â”€â”€ CAPILLARY PRESSURE  -  CENTRIFUGE / POROUS PLATE â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+            # â"€â"€ CAPILLARY PRESSURE  -  CENTRIFUGE / POROUS PLATE â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€
 
             if name == "fit_petrophysical_curve" and args.get("model") == "pc_centrifuge":
 
@@ -1866,7 +2011,7 @@ class PRCChatAssistant:
 
                     }
 
-                    # â”€â”€ Physics Guard â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+                    # â"€â"€ Physics Guard â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€
 
                     audit = PhysicsGuard().validate_pc(sw_a, pc_a).generate_health_score()
 
@@ -1894,7 +2039,7 @@ class PRCChatAssistant:
 
 
 
-            # â”€â”€ OVERBURDEN COMPACTION (dual-axis: Ï† left, k right log-scale) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+            # â"€â"€ OVERBURDEN COMPACTION (dual-axis: Ï† left, k right log-scale) â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€
 
             if name == "fit_petrophysical_curve" and args.get("model") == "overburden":
 
@@ -2004,7 +2149,7 @@ class PRCChatAssistant:
 
 
 
-                # â”€â”€ Physics Guard â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+                # â"€â"€ Physics Guard â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€
 
                 audit = PhysicsGuard().validate_kr(sw_arr, krw_arr, kro_arr).generate_health_score()
 
@@ -2068,7 +2213,7 @@ class PRCChatAssistant:
 
 
 
-                    # â”€â”€ Physics Guard â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+                    # â"€â"€ Physics Guard â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€
 
                     audit = PhysicsGuard().validate_kr(sw_arr, krw_arr, kro_arr).generate_health_score()
 
@@ -2395,7 +2540,7 @@ class PRCChatAssistant:
 
         
 
-        # â”€â”€ SESSION FILE REGISTRY (Persistence Guard) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+        # â"€â"€ SESSION FILE REGISTRY (Persistence Guard) â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€
 
         session_files_ctx = ""
 
@@ -2427,88 +2572,351 @@ class PRCChatAssistant:
 
         import tempfile
 
-        def _sample_data(data: dict, max_rows: int = 40) -> dict:
-
-            sampled = {}
-
-            for k, v in data.items():
-
-                if isinstance(v, list) and len(v) > max_rows:
-
-                    step = max(1, len(v) // max_rows)
-
-                    sampled[k] = v[::step][:max_rows]
-
-                elif isinstance(v, dict):
-
-                    sampled[k] = _sample_data(v, max_rows)
-
-                else:
-
-                    sampled[k] = v
-
-            return sampled
-
+        def _sample_data(data, max_rows: int = 40):
+            if isinstance(data, list):
+                if len(data) > max_rows:
+                    step = max(1, len(data) // max_rows)
+                    return data[::step][:max_rows]
+                return data
+            elif isinstance(data, dict):
+                sampled = {}
+                for k, v in data.items():
+                    if isinstance(v, list) and len(v) > max_rows:
+                        step = max(1, len(v) // max_rows)
+                        sampled[k] = v[::step][:max_rows]
+                    elif isinstance(v, dict):
+                        sampled[k] = _sample_data(v, max_rows)
+                    else:
+                        sampled[k] = v
+                return sampled
+            return data
 
 
         for data_bytes, mime, fname in f_parts:
 
-            safe_mime = mime or "application/octet-stream"
-
-            if any(x in safe_mime for x in ["spreadsheet", "excel", "csv", "sheet"]):
-
-                ext = os.path.splitext(fname)[1].lower() if fname else ".xlsx"
-
-                if not ext: ext = ".xlsx"
+            safe_mime = (mime or "application/octet-stream").lower()
+            ext = os.path.splitext(fname)[1].lower() if fname else ".xlsx"
+            is_spreadsheet = any(x in safe_mime for x in ["spreadsheet", "excel", "csv", "sheet"]) or ext in [".xlsx", ".xls", ".csv"]
+            is_docx = "wordprocessingml" in safe_mime or ext in [".docx", ".doc"]
+            
+            if is_spreadsheet or is_docx:
+                if not ext:
+                    ext = ".xlsx" if is_spreadsheet else ".docx"
 
                 with tempfile.NamedTemporaryFile(delete=False, suffix=ext) as tf:
-
                     tf.write(data_bytes)
-
                     tmp_path = tf.name
 
                 try:
-
-                    # Primary: human-readable column/value summary for the LLM
-                    fr_data = read_file(tmp_path)
+                    # 1. Ingestion: high-fidelity layout-aware text/markdown parsing
+                    import re
+                    target_table_match = re.search(r'(?i)table\s*([\d\.]+)', msg)
+                    
+                    targets = []
+                    if target_table_match:
+                        targets.append(f"Table {target_table_match.group(1)}")
+                    
+                    # Add geomechanics indicators to avoid blinders
+                    geomech_keywords = ["young", "poisson", "compressibility", "geomech", "modulus"]
+                    for kw in geomech_keywords:
+                        if kw in msg.lower():
+                            if kw == "young":
+                                targets.append("Young's Modulus")
+                            elif kw == "poisson":
+                                targets.append("Poisson's Ratio")
+                            elif kw == "compressibility":
+                                targets.append("Compressibility")
+                            else:
+                                targets.append("Geomechanics")
+                    
+                    # Default geomechanics and SCAL keywords to always check if we are reading a DOCX
+                    if is_docx:
+                        targets.extend(["Young's Modulus", "Poisson's Ratio", "Compressibility"])
+                        if not target_table_match:
+                            targets.extend(["Permeability", "Porosity"])
+                    
+                    # Deduplicate targets
+                    target_identifier = list(dict.fromkeys(targets)) if targets else None
+                    
+                    # FIX: For DOCX files, extract ALL tables without proximity filtering.
+                    # Table numbers (e.g., "Table 2.1.1") in DOCX are often in text boxes
+                    # or image captions that python-docx can't read as paragraph text,
+                    # causing the proximity search to find 0 matches and grab wrong tables.
+                    # The full DOCX markdown easily fits in Gemini's context window (~600 lines),
+                    # and the extraction prompt already tells Gemini which table to extract.
+                    if is_docx:
+                        fr_data = read_file(tmp_path, target_identifier=None)
+                    else:
+                        fr_data = read_file(tmp_path, target_identifier=target_identifier)
                     fr_text, _ = to_prompt_string(fr_data)
+                    
                     if fr_text:
-                        extracted_context += f"\n\n[SPREADSHEET: {fname}]\n{fr_text}\n"
-                        chunks = KnowledgeBase.chunk_text(fr_text, f"File: {fname}")
-                        _tls.pending_kb.extend(chunks)
+                        label = "SPREADSHEET" if is_spreadsheet else "WORD DOCUMENT"
+                        extracted_context += f"\n\n[{label}: {fname}]\n{fr_text}\n"
+                        # Enforce strict sequence: DO NOT use chunking/RAG for this step.
+                        # The full markdown is injected directly.
 
-                    # Secondary: SCAL-specific structured extraction for analysis tools
-                    result = extract_file_data(tmp_path)
+                        # 2. LLM Extraction Node: extract structured SCAL data using extraction prompt
+                        extraction_prompt_path = os.path.join(
+                            os.path.dirname(os.path.abspath(__file__)),
+                            "prompts",
+                            "extraction_system_prompt.md"
+                        )
+                        with open(extraction_prompt_path, "r", encoding="utf-8") as f:
+                            system_instruction = f.read()
 
-                    well_name = result.get('well_name', 'PROVISIONAL WELL')
-                    _tls.last_well_name = well_name  # make available to report tool
+                        # 2. Context Injection: The ENTIRE Markdown output must be injected directly into the LLM's context window as a single variable.
+                        # Do not use chunking, RAG, or snippet-based retrieval.
+                        full_markdown_variable = (
+                            f"--- START OF FULL DOCUMENT MARKDOWN ---\n{fr_text}\n--- END OF FULL DOCUMENT MARKDOWN ---\n\n"
+                            f"USER REQUEST: {msg}\n\n"
+                            f"CRITICAL: Only extract the specific table(s) or data requested by the user above. "
+                            f"If the user specifies a specific table (e.g., 'Table 2.1.1'), only extract the rows for that table. "
+                            f"Do not extract rows from other tables or other core plug sweeps."
+                        )
+                        
+                        contents = [
+                            genai_types.Content(
+                                role="user",
+                                parts=[genai_types.Part.from_text(text=full_markdown_variable)]
+                            )
+                        ]
+                        config = genai_types.GenerateContentConfig(
+                            system_instruction=system_instruction,
+                            response_mime_type="application/json"
+                        )
+                        try:
+                            # Primary attempt with 2.5-flash using built-in exponential backoff
+                            response = _call_gemini_with_retry(
+                                client=self._client,
+                                model="gemini-2.5-flash",
+                                contents=contents,
+                                config=config,
+                                max_retries=3,
+                                base_delay=2
+                            )
+                        except Exception as e:
+                            print(f"[Fallback] gemini-2.5-flash overloaded (503): {e}. Falling back to gemini-2.5-pro...")
+                            try:
+                                # Fallback to 2.5-pro if flash is overloaded globally
+                                response = _call_gemini_with_retry(
+                                    client=self._client,
+                                    model="gemini-2.5-pro",
+                                    contents=contents,
+                                    config=config,
+                                    max_retries=3,
+                                    base_delay=2
+                                )
+                            except Exception as e2:
+                                raise ValueError(f"CRITICAL: Both primary (flash) and fallback (pro) models are UNAVAILABLE. {e2}")
+                        
+                        response_text = response.text or ""
+                        
+                        # Strip markdown code blocks if present
+                        clean_text = response_text.strip()
+                        if clean_text.startswith("```"):
+                            lines = clean_text.splitlines()
+                            if lines[0].startswith("```"):
+                                lines = lines[1:]
+                            if lines[-1].startswith("```"):
+                                lines = lines[:-1]
+                            clean_text = "\n".join(lines).strip()
+                            
+                        try:
+                            extracted_json = _json.loads(clean_text)
+                        except Exception as je:
+                            # Attempt to salvage truncated JSON (common when hitting max_output_tokens for large files)
+                            try:
+                                last_brace = clean_text.rfind('}')
+                                if last_brace != -1:
+                                    salvaged_text = clean_text[:last_brace + 1] + ']'
+                                    extracted_json = _json.loads(salvaged_text)
+                                    print(f"[Warning] JSON was truncated. Salvaged {len(extracted_json)} records.")
+                                else:
+                                    extracted_json = []
+                            except Exception as e2:
+                                raise ValueError(f"Failed to parse Gemini extraction output as JSON: {je}\nResponse was: {response_text[:500]}...")
 
-                    inventory = f"FILE: {fname}\nWELL: {well_name}\nSHEETS: {', '.join(result['sheet_names'])}\nIDENTIFIED TYPE: {result['data_type']}\nTOTAL ROWS: {result['row_count']}\n"
+                        def merge_and_deduplicate_sweeps(samples):
+                            if not samples: return samples
+                            sweeps = []
+                            current_sweep = []
+                            last_p = None
+                            for s in samples:
+                                p = s.get("Pressure_psi")
+                                if p is not None:
+                                    if last_p is not None and p <= last_p:
+                                        if current_sweep: sweeps.append(current_sweep)
+                                        current_sweep = []
+                                current_sweep.append(s)
+                                last_p = p
+                            if current_sweep: sweeps.append(current_sweep)
+                            
+                            merged_sweeps = []
+                            for sweep in sweeps:
+                                matched = False
+                                for ms in merged_sweeps:
+                                    if len(sweep) == len(ms):
+                                        match = True
+                                        for i in range(len(sweep)):
+                                            if sweep[i].get("Pressure_psi") != ms[i].get("Pressure_psi") or sweep[i].get("Porosity_percent") != ms[i].get("Porosity_percent"):
+                                                match = False
+                                                break
+                                        if match:
+                                            for i in range(len(sweep)):
+                                                for k, v in sweep[i].items():
+                                                    if v is not None and ms[i].get(k) is None:
+                                                        ms[i][k] = v
+                                            matched = True
+                                            break
+                                if not matched:
+                                    merged_sweeps.append(sweep)
+                                    
+                            result = []
+                            for ms in merged_sweeps:
+                                result.extend(ms)
+                            return result
 
-                    extracted_context += f"\n\n[NEW UPLOAD INVENTORY]:\n{inventory}"
+                        extracted_json = merge_and_deduplicate_sweeps(extracted_json)
 
-                    if result.get('data_type') != 'UNKNOWN':
+                        # 3. Validation Node: physical bounds & sequence checking
+                        validation_result = data_validator.validate_scal_data(extracted_json)
+                        
+                        if validation_result["status"] == "error":
+                            # Log warnings but DO NOT crash — the raw document text
+                            # is already in extracted_context and Hviel can read directly from it.
+                            print("\n" + "!"*80)
+                            print(" HVIEL SCAL PIPELINE - VALIDATION WARNINGS (NON-FATAL) ".center(80, "!"))
+                            print("!"*80)
+                            for err in validation_result["errors"]:
+                                print(f" [WARN] {err}")
+                            print("!"*80)
+                            print(" Pipeline continues with raw document — Hviel will read tables directly.")
+                            print("!"*80 + "\n")
+                            # Skip enrichment steps but don't crash
+                            # The raw [WORD DOCUMENT] text is already in extracted_context
+                            
+                        else:
+                            print("[Pipeline] Executing Step 3: Pure-Physics Calculations (prc_physics.py)...")
+                            from prc_physics import calculate_compressibility_sweep
+                            try:
+                                extracted_json = calculate_compressibility_sweep(extracted_json)
+                                print(f"[Pipeline] Successfully enriched JSON sweep data with Pore Compressibility and Lithology.")
+                            except Exception as pe:
+                                print(f"[Pipeline] Error during deterministic physics calculation: {pe}")
+                            
+                            # 4. Master Engineer Analysis (LLM) + Deterministic Dashboard Architect
+                            active_key = self._keys[self._current_idx] if hasattr(self, "_keys") and hasattr(self, "_current_idx") else os.getenv("GEMINI_API_KEY", "DUMMY_KEY")
+                            master_eng = MasterEngineerNode(api_key=active_key)
+                        
+                            print("\n" + "="*80)
+                            print(" HVIEL SCAL PIPELINE - RUNNING GEOMECHANICS & DASHBOARD NODES ".center(80, "="))
+                            print("="*80)
+                            print("[Pipeline] Triggering Master Engineer Node geomechanics analysis...")
+                            engineer_report = master_eng.analyze_scal_data(extracted_json)
 
-                        data_json = _json.dumps(result['extracted'])
+                            # 5. DETERMINISTIC Dashboard Architect (no LLM — pure Python code emission)
+                            #    Auto-detects test type, routes scalars→gauges, arrays→curves
+                            print("[Pipeline] Triggering Universal Dashboard Architect (deterministic)...")
+                            detected_type = detect_test_type(extracted_json)
+                            print(f"[Pipeline] Auto-detected test type: {detected_type}")
 
-                        sampled = _sample_data(result['extracted'])
+                            well_name_dash = "PROVISIONAL WELL"
+                            if isinstance(fr_data, dict):
+                                well_name_dash = fr_data.get("well_name") or fr_data.get("well") or "PROVISIONAL WELL"
 
-                        extracted_context += f"[EXTRACTED DATA - WELL: {well_name}]:\n{_json.dumps(sampled, indent=2)}\n"
+                            # Get PhysicsGuard audit from the last row if available
+                            _dash_audit = None
+                            if extracted_json and isinstance(extracted_json[-1], dict):
+                                _dash_audit = extracted_json[-1].pop("_cp_physics_audit", None)
 
-                        # Use the class method to chunk the JSON string
+                            base_dir = os.path.dirname(os.path.abspath(__file__))
+                            dash_output_path = os.path.join(base_dir, "outputs", "app_dashboard.py")
 
-                        chunks = KnowledgeBase.chunk_text(data_json, f"File: {fname}")
+                            streamlit_code = generate_universal_dashboard(
+                                validated_json=extracted_json,
+                                well_name=well_name_dash,
+                                test_type=detected_type,
+                                physics_audit=_dash_audit,
+                                output_path=dash_output_path,
+                            )
+                            print(f"[Pipeline] Dashboard generated: {dash_output_path} ({len(streamlit_code)} chars)")
+                        
+                            # Generate static plots as fallback/reference
+                            outputs_dir = visualizer.generate_plots(extracted_json, streamlit_code=streamlit_code)
+                        
+                            # Save the engineer's report to outputs/reservoir_report.md
+                            report_path = os.path.join(outputs_dir, "reservoir_report.md")
+                            with open(report_path, "w", encoding="utf-8") as f:
+                                f.write(engineer_report)
+                            print(f"[Pipeline] Geomechanical report successfully saved: {report_path}")
+                        
+                            print("\n" + "="*80)
+                            print(" HVIEL SCAL PIPELINE - VALIDATION & MULTI-AGENT SUCCESS ".center(80, "="))
+                            print("="*80)
+                            print(f" Pristine data validated successfully ({len(extracted_json)} samples).")
+                            print(f" Test Type: {detected_type}")
+                            if validation_result.get("warnings"):
+                                print("\n Diagnostic Warnings (Missing Optional Parameters):")
+                                for warn in validation_result["warnings"]:
+                                    print(f"  [!] {warn}")
+                            print(f"\n Generated dynamic and standard curves under: {outputs_dir}")
+                            print("  -> porosity_vs_pressure.png (Static)")
+                            print("  -> permeability_vs_pressure.png (Static)")
+                            print("  -> validated_scal_data.json")
+                            print("  -> reservoir_report.md (Geomechanics Insights)")
+                            print("  -> app_dashboard.py (Universal Interactive Streamlit Dashboard)")
+                            print("\n Run the dashboard with: streamlit run outputs/app_dashboard.py")
+                            print("="*80 + "\n")
 
-                        _tls.pending_kb.extend(chunks)
+                            # Populate well info and other stats for the assistant context
+                            well_name = "PROVISIONAL WELL"
+                            if isinstance(fr_data, dict):
+                                well_name = fr_data.get("well_name") or fr_data.get("well") or "PROVISIONAL WELL"
+                            _tls.last_well_name = well_name
+                        
+                            inventory = f"FILE: {fname}\nWELL: {well_name}\nIDENTIFIED TYPE: SCAL\nTOTAL ROWS: {len(extracted_json)}\n"
+                            extracted_context += f"\n\n[NEW UPLOAD INVENTORY]:\n{inventory}"
+                        
+                            sampled = extracted_json
+                            extracted_context += f"""[EXTRACTED SCAL DATA (aggregated from all tables in {fname} - WELL: {well_name})]
+    NOTE: This JSON contains data aggregated from ALL tables in the document. Columns 'Pore_Volume_Compressibility_psi_inv' and 'Deduced_Lithology' are COMPUTED (not from the source file) — do NOT display them when the user asks about a specific source table.
+
+    IMPORTANT: When the user asks about a SPECIFIC table (e.g., "Table 2.1.5", "Table 2.1.3"), do NOT use this aggregated JSON. Instead, find the table directly in the [WORD DOCUMENT] markdown text above — search for "Table (2.1.5)" or "Table 2.1.5" as a label, and read the markdown table immediately ABOVE that label. Each table in the document is labeled BELOW the table data (e.g., the table data comes first, then "Table (2.1.5)" appears after it). Show ONLY the columns that exist in that specific table.
+
+    {_json.dumps(sampled, indent=2)}
+    """
+
+                            # Also add structured json to pending_kb
+                            chunks = KnowledgeBase.chunk_text(_json.dumps(extracted_json), fname)
+                            _tls.pending_kb.extend(chunks)
+
+                        # ALWAYS persist raw text to user_files (outside if/else) so follow-up messages can recover it
+                        if email and fr_text:
+                            try:
+                                _fhash_store = hashlib.sha256(data_bytes).hexdigest()
+                                db(
+                                    "INSERT INTO user_files"
+                                    " (user_email, filename, file_hash, extracted_text, data_type, created_at)"
+                                    " VALUES (?,?,?,?,?,?)"
+                                    " ON CONFLICT(user_email, file_hash)"
+                                    " DO UPDATE SET extracted_text=EXCLUDED.extracted_text,"
+                                    " filename=EXCLUDED.filename",
+                                    (email, fname, _fhash_store, fr_text, "SCAL", time.time()),
+                                )
+                            except Exception as _ue:
+                                _logger.warning(f"[DocGen] Could not store extracted_text for {fname}: {_ue}")
 
                 except Exception as e:
-
-                    _logger.error(f"SCAL Handler Error: {e}")
+                    _logger.warning(f"SCAL Ingestion/Extraction Pipeline Warning: {e}")
+                    # DO NOT re-raise — let the chat continue with raw document text.
+                    # The raw [WORD DOCUMENT] markdown was already added to extracted_context
+                    # at line 2640, so Hviel can still read ALL tables directly.
+                    print(f"[Pipeline] Extraction pipeline encountered an issue: {e}")
+                    print(f"[Pipeline] Falling back to raw document mode — Hviel will read tables directly.")
 
                 finally:
-
                     try: os.unlink(tmp_path)
-
                     except: pass
 
             elif "pdf" in safe_mime:
@@ -2517,7 +2925,7 @@ class PRCChatAssistant:
                     text = _sfh_extract_pdf(data_bytes)
                     if text.strip():
                         extracted_context += f"\n\n[PDF DOCUMENT: {fname}]\n{text[:50000]}\n"
-                        chunks = KnowledgeBase.chunk_text(text, f"File: {fname}")
+                        chunks = KnowledgeBase.chunk_text(text, fname)
                         _tls.pending_kb.extend(chunks)
                 except Exception as e:
                     _logger.warning(f"[PDF Extract] {fname}: {e}")
@@ -2528,7 +2936,7 @@ class PRCChatAssistant:
                     text = _sfh_extract_docx(data_bytes)
                     if text.strip():
                         extracted_context += f"\n\n[WORD DOCUMENT: {fname}]\n{text[:50000]}\n"
-                        chunks = KnowledgeBase.chunk_text(text, f"File: {fname}")
+                        chunks = KnowledgeBase.chunk_text(text, fname)
                         _tls.pending_kb.extend(chunks)
                 except Exception as e:
                     _logger.warning(f"[DOCX Extract] {fname}: {e}")
@@ -2539,12 +2947,43 @@ class PRCChatAssistant:
                     content = data_bytes.decode("utf-8", errors="ignore")
                     if content.strip():
                         extracted_context += f"\n\n[TEXT FILE: {fname}]\n{content[:50000]}\n"
-                        chunks = KnowledgeBase.chunk_text(content, f"File: {fname}")
+                        chunks = KnowledgeBase.chunk_text(content, fname)
                         _tls.pending_kb.extend(chunks)
                 except Exception as e:
                     _logger.warning(f"[TXT Extract] {fname}: {e}")
 
 
+
+        # ── DOCUMENT RECOVERY FOR FOLLOW-UP MESSAGES ──────────────────────────
+        # When no file is uploaded in this message but the session has previous uploads,
+        # recover the full raw document text from user_files so Hviel can read ALL tables.
+        # This is what makes Hviel work like Claude/Gemini — the full document is always available.
+        if not extracted_context and sid and email:
+            try:
+                fname_rows = db(
+                    "SELECT DISTINCT fname FROM m WHERE sid=? AND user_email=? AND fname IS NOT NULL ORDER BY id DESC",
+                    (sid, email),
+                )
+                _seen_fn: set = set()
+                session_fnames: list = []
+                for _raw_fn in [r[0] for r in (fname_rows or []) if r[0]]:
+                    for _fn in _raw_fn.split(";"):
+                        _fn = _fn.strip()
+                        if _fn and _fn not in _seen_fn:
+                            session_fnames.append(_fn)
+                            _seen_fn.add(_fn)
+                for _sfname in session_fnames[:5]:  # Up to 5 files per session
+                    stored = db(
+                        "SELECT extracted_text FROM user_files WHERE user_email=? AND filename=?",
+                        (email, _sfname),
+                    )
+                    if stored and stored[0][0]:
+                        _ext = os.path.splitext(_sfname)[1].lower()
+                        _label = "SPREADSHEET" if _ext in (".xlsx", ".xls", ".csv") else "WORD DOCUMENT" if _ext == ".docx" else "DOCUMENT"
+                        extracted_context += f"\n\n[{_label}: {_sfname}]\n{stored[0][0]}\n"
+                        _logger.info(f"[Chat] Recovered stored document text for {_sfname} ({len(stored[0][0])} chars)")
+            except Exception as _dbe:
+                _logger.warning(f"[Chat] Could not retrieve stored document context: {_dbe}")
 
         # Strict Context Shielding
 
@@ -2633,17 +3072,10 @@ class PRCChatAssistant:
 
             msg_low_routing = msg.lower() if msg else ""
 
-            needs_pro = (
-
-                len(f_parts) > 0 or 
-
-                bool(extracted_context) or 
-
-                any(x in msg_low_routing for x in ["simulate", "audit", "calculate", "fit", "report", "plot", "parameter"])
-
-            )
-
-            active_model = "gemini-2.5-pro" if needs_pro else "gemini-2.5-flash"
+            # Always use the validated model. gemini-2.5-pro leaked <execute_python>
+            # thinking tokens into text output during function-calling turns.
+            # gemini-2.5-flash is the only CLAUDE.md-validated model (section 5).
+            active_model = "gemini-2.5-flash"
 
 
 
@@ -2671,7 +3103,7 @@ class PRCChatAssistant:
 
 
 
-                    # â”€â”€ STREAMING PATH (multi-turn tool use) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+                    # â"€â"€ STREAMING PATH (multi-turn tool use) â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€
 
                     if stream:
 
@@ -2707,9 +3139,9 @@ class PRCChatAssistant:
 
 
 
-                            for chunk in client.models.generate_content_stream(
+                            for chunk in _call_gemini_stream_with_retry(
 
-                                model=active_model, contents=current_contents, config=cfg
+                                client, active_model, current_contents, cfg
 
                             ):
 
@@ -2827,7 +3259,7 @@ class PRCChatAssistant:
 
 
 
-                    # â”€â”€ NON-STREAMING PATH (multi-turn tool use) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+                    # â"€â"€ NON-STREAMING PATH (multi-turn tool use) â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€
 
                     current_contents = list(contents)
 
@@ -2835,9 +3267,9 @@ class PRCChatAssistant:
 
                     for _turn in range(4):
 
-                        resp = client.models.generate_content(
+                        resp = _call_gemini_with_retry(
 
-                            model=active_model, contents=current_contents, config=cfg
+                            client, active_model, current_contents, cfg
 
                         )
 
@@ -3003,7 +3435,8 @@ class PRCChatAssistant:
 
     def generate_document_json(
 
-        self, file_type: str, message: str, history: list, kb_context: str, engineer: str
+        self, file_type: str, message: str, history: list, kb_context: str, engineer: str,
+        f_parts: list = None, sid: str = None, email: str = None,
 
     ) -> str:
 
@@ -3057,13 +3490,118 @@ class PRCChatAssistant:
 
 
 
+        # Extract file data using the same read_file/to_prompt_string pipeline as the
+        # chat response path — this is the single source of truth for tabular values.
+        _logger.info(f"[DocGen] f_parts count: {len(f_parts or [])}")
+
+        file_context = ""
+        _debug_kw_data   = {}
+        _debug_micp_data = {}
+        _debug_imbi_data = {}
+
+        for data_bytes, mime, fname in (f_parts or []):
+            ext = os.path.splitext(fname)[1].lower() if fname else ".xlsx"
+            if not ext:
+                ext = ".xlsx"
+            try:
+                with tempfile.NamedTemporaryFile(delete=False, suffix=ext) as tf:
+                    tf.write(data_bytes)
+                    tmp_path = tf.name
+                try:
+                    fr_data = read_file(tmp_path)
+                    _logger.info(f"[DocGen] read_file keys for {fname}: {list(fr_data.keys())}")
+                    fr_text, _ = to_prompt_string(fr_data)
+                    _logger.info(f"[DocGen] to_prompt_string first 500 chars for {fname}: {fr_text[:500] if fr_text else '(empty)'}")
+                    if fr_text:
+                        file_context += f"\n\n[UPLOADED FILE: {fname}]\n{fr_text}\n"
+                    # Collect per-type extraction for debug logging
+                    _scal_dbg = fr_data.get("scal", {})
+                    _ttype_dbg = (_scal_dbg.get("test_type") or "UNKNOWN") if _scal_dbg else "UNKNOWN"
+                    if _ttype_dbg == "KW_THROUGHPUT":
+                        _debug_kw_data   = _scal_dbg.get("results", {})
+                    elif _ttype_dbg == "MICP":
+                        _debug_micp_data = _scal_dbg.get("results", {})
+                    elif _ttype_dbg == "IMBIBITION":
+                        _debug_imbi_data = _scal_dbg.get("results", {})
+                    # Run SCALFileHandler to get per-sample scalars (initial_KL, final_KL,
+                    # Sor_Lab, threshold_pressure, max_hg_sat, etc.) that file_reader.py
+                    # does not pre-compute. These are required for table row population.
+                    try:
+                        scal_res = extract_file_data(tmp_path)
+                        if scal_res.get("data_type") not in (None, "UNKNOWN") and scal_res.get("extracted"):
+                            _summary = _scal_doc_summary(scal_res["extracted"])
+                            if _summary:
+                                file_context += f"\n{_summary}\n"
+                                _logger.info(f"[DocGen] SCAL summary added for {fname} ({scal_res['data_type']})")
+                    except Exception as _se:
+                        _logger.warning(f"[DocGen] SCAL extraction failed for {fname}: {_se}")
+                finally:
+                    try:
+                        os.unlink(tmp_path)
+                    except OSError:
+                        pass
+            except Exception as _fe:
+                _logger.warning(f"[DocGen] File read failed for {fname}: {_fe}")
+
+        _logger.info(f"[DocGen] file_context length: {len(file_context)} chars; kb_context length: {len(kb_context or '')} chars")
+
+        # Session-file fallback: if no files were re-uploaded with this request,
+        # recover the extracted text stored in user_files during the original upload turn.
+        # This is the fix for all three table failures — the document generator was
+        # producing "data not available" solely because f_parts was empty on the
+        # document generation request.
+        if not file_context and sid and email:
+            try:
+                fname_rows = db(
+                    "SELECT DISTINCT fname FROM m WHERE sid=? AND user_email=? AND fname IS NOT NULL ORDER BY id DESC",
+                    (sid, email),
+                )
+                # fname values may be semicolon-delimited (multiple files uploaded
+                # in one message) — split and de-duplicate while preserving order.
+                _seen_fn: set = set()
+                session_fnames: list = []
+                for _raw_fn in [r[0] for r in (fname_rows or []) if r[0]]:
+                    for _fn in _raw_fn.split(";"):
+                        _fn = _fn.strip()
+                        if _fn and _fn not in _seen_fn:
+                            session_fnames.append(_fn)
+                            _seen_fn.add(_fn)
+                for _sfname in session_fnames[:10]:
+                    stored = db(
+                        "SELECT extracted_text FROM user_files WHERE user_email=? AND filename=?",
+                        (email, _sfname),
+                    )
+                    if stored and stored[0][0]:
+                        file_context += f"\n\n[UPLOADED FILE: {_sfname}]\n{stored[0][0]}\n"
+                        _logger.info(f"[DocGen] Recovered stored extracted_text for {_sfname} ({len(stored[0][0])} chars)")
+            except Exception as _dbe:
+                _logger.warning(f"[DocGen] Could not retrieve stored file context: {_dbe}")
+
+        _logger.info(f"[DocGen] file_context after fallback: {len(file_context)} chars")
+
+        # ── HARD DEBUG ───────────────────────────────────────────────────────
+        print("\n=== FILE READER OUTPUTS ===")
+        print(f"  f_parts={len(f_parts or [])}  sid={sid}  email={email}")
+        print("KW DATA:", _safe_json_dumps(_debug_kw_data, indent=2))
+        print("MICP DATA:", _safe_json_dumps(_debug_micp_data, indent=2))
+        print("IMBI DATA:", _safe_json_dumps(_debug_imbi_data, indent=2))
+        print(f"  file_context length: {len(file_context)} chars")
+        print("  --- file_context preview (first 2000 chars) ---")
+        print(file_context[:2000] if file_context else "(EMPTY — fallback did not recover any stored data)")
+        # ── END HARD DEBUG ────────────────────────────────────────────────────
+
         hist_text = "".join(
 
             f"{h['role'].upper()}: {h.get('text','')[:600]}\n\n" for h in history[-8:]
 
         )
 
-        kb_section = f"\nKNOWLEDGE BASE:\n{kb_context[:2500]}\n" if kb_context else ""
+        kb_section = (
+            f"\nPRIMARY DATA SOURCE — extracted values from uploaded lab files."
+            f" Use these values for all tables. Do NOT write 'data not available'"
+            f" if this section contains the value:\n{kb_context[:4000]}\n"
+            if kb_context else ""
+        )
 
 
 
@@ -3079,41 +3617,64 @@ class PRCChatAssistant:
 
             f"CONTENT RULES:\n"
 
-            f"- Populate with real petrophysical data drawn from the conversation (Sw, Kr, Pc, Archie, etc.)\n"
+            f"- The PRIMARY DATA SOURCE section contains extracted values from uploaded lab files."
+            f" Always populate table cells with values from that section.\n"
+
+            f"- Only write 'data not available' if the specific value is genuinely absent from PRIMARY DATA SOURCE.\n"
+
+            f"- NEVER invent, estimate, or hallucinate numerical values.\n"
 
             f"- Use engineering units throughout: mD, fraction, psi, m TVDSS, dimensionless\n"
 
             f"- Include Executive Summary, Methodology, Results & Interpretation, and Conclusions sections\n"
 
-            f"- Tables must contain realistic numerical SCAL data  -  no placeholder values\n"
-
             f"- Minimum 4 sections (docx/pdf) or 2 data sheets (xlsx) with substantive content\n"
 
             f"- author field: \"{engineer}\"\n"
 
-            f"- Never use '...' or '[insert value]'  -  derive everything from the conversation\n"
+            f"- Never use '...' or '[insert value]'  -  use 'data not available' for missing values\n"
 
         )
 
 
 
+        file_section = (
+            f"\nUPLOADED FILE DATA (primary data source — use these values in all tables):\n{file_context}\n"
+            if file_context else
+            "\n[NO FILE DATA UPLOADED — write 'data not available' for any value not found in the conversation history.]\n"
+        )
+
         user_content = (
 
-            f"CONVERSATION HISTORY:\n{hist_text}"
+            f"{kb_section}"
 
-            f"{kb_section}\n"
+            f"{file_section}\n"
+
+            f"CONVERSATION HISTORY:\n{hist_text}"
 
             f"DOCUMENT REQUEST: {message}"
 
         )
 
+        # ── HARD DEBUG ───────────────────────────────────────────────────────
+        _full_prompt = system_doc + "\n\n--- USER CONTENT ---\n" + user_content
+        print("\n=== PROMPT SENT TO GEMINI (first 4000 chars) ===")
+        print(_full_prompt[:4000])
+        # ── END HARD DEBUG ────────────────────────────────────────────────────
 
+        active_model = "gemini-2.5-flash"
 
         cfg = genai_types.GenerateContentConfig(temperature=0.1, system_instruction=system_doc)
 
         contents = [genai_types.Content(role="user", parts=[genai_types.Part(text=user_content)])]
 
-
+        # ── DEBUG: immediately before Gemini call ────────────────────────────
+        import json as _json_dbg
+        print("DEBUG KW:", _json_dbg.dumps(_debug_kw_data, indent=2) if _debug_kw_data else "KW IS NONE/EMPTY")
+        print("DEBUG MICP:", _json_dbg.dumps(_debug_micp_data, indent=2) if _debug_micp_data else "MICP IS NONE/EMPTY")
+        print("DEBUG IMBI:", _json_dbg.dumps(_debug_imbi_data, indent=2) if _debug_imbi_data else "IMBI IS NONE/EMPTY")
+        print("DEBUG PROMPT SNIPPET:", _full_prompt[:3000])
+        # ── END DEBUG ─────────────────────────────────────────────────────────
 
         with self._client_lock:
 
@@ -3125,9 +3686,9 @@ class PRCChatAssistant:
 
             try:
 
-                resp = client.models.generate_content(
+                resp = _call_gemini_with_retry(
 
-                    model=active_model, contents=contents, config=cfg
+                    client, active_model, contents, cfg
 
                 )
 
@@ -3171,7 +3732,7 @@ class PRCChatAssistant:
 
 
 
-# â”€â”€ RAG / KNOWLEDGE BASE â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+# â"€â"€ RAG / KNOWLEDGE BASE â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€
 
 EMBED_MODEL        = "gemini-embedding-2"
 
@@ -3193,6 +3754,39 @@ def _get_embed_client() -> genai_new.Client:
 
         return _EMBED_CLIENT
 
+
+
+class _LibraryEmbCache:
+    """Thread-safe in-memory cache for library_chunks embeddings.
+
+    Populated on first search; invalidated whenever library_chunks is written.
+    Eliminates the per-search DB round-trip and NumPy deserialization cost.
+    """
+    _lock    = threading.Lock()
+    _sources: list | None      = None
+    _texts:   list | None      = None
+    _norms:   "np.ndarray | None" = None
+
+    @classmethod
+    def get(cls):
+        with cls._lock:
+            if cls._sources is None:
+                return None
+            return cls._sources, cls._texts, cls._norms
+
+    @classmethod
+    def set(cls, sources: list, texts: list, norms: "np.ndarray"):
+        with cls._lock:
+            cls._sources = sources
+            cls._texts   = texts
+            cls._norms   = norms
+
+    @classmethod
+    def invalidate(cls):
+        with cls._lock:
+            cls._sources = None
+            cls._texts   = None
+            cls._norms   = None
 
 
 class KnowledgeBase:
@@ -3375,19 +3969,28 @@ class KnowledgeBase:
                             if scores[i] > 0.40:
                                 scored_parts.append((float(scores[i]), f"[From: {sources[i]}]\n{texts[i]}"))
 
-            # ── Library vector search (global, shared) ──────────────────────────
+            # ── Library vector search (global, in-memory cached) ─────────────────
             try:
-                lib_rows = db("SELECT source, chunk_text, embedding FROM library_chunks WHERE embedding IS NOT NULL")
-                if lib_rows:
+                cached = _LibraryEmbCache.get()
+                if cached is None:
+                    # Cache miss: load once from DB, normalize, and store
+                    lib_rows = db("SELECT source, chunk_text, embedding FROM library_chunks WHERE embedding IS NOT NULL")
+                    if lib_rows:
+                        _src  = [r[0] for r in lib_rows]
+                        _txt  = [r[1] for r in lib_rows]
+                        _vecs = np.stack([
+                            np.frombuffer(bytes(v) if isinstance(v, memoryview) else v, dtype=np.float32)
+                            for v in (r[2] for r in lib_rows)
+                        ])
+                        _nrm  = _vecs / (np.linalg.norm(_vecs, axis=1, keepdims=True) + 1e-9)
+                        _LibraryEmbCache.set(_src, _txt, _nrm)
+                        cached = (_src, _txt, _nrm)
+                if cached is not None:
+                    lib_sources, lib_texts, lv_norms = cached
                     if q_vec is None:
                         q_vec = KnowledgeBase._embed(clean_q)
                     if q_vec is not None:
-                        lib_sources = [r[0] for r in lib_rows]
-                        lib_texts   = [r[1] for r in lib_rows]
-                        lib_raw     = [r[2] for r in lib_rows]
-                        lib_vecs = np.stack([np.frombuffer(bytes(v) if isinstance(v, memoryview) else v, dtype=np.float32) for v in lib_raw])
                         q_norm_lib = q_vec / (np.linalg.norm(q_vec) + 1e-9)
-                        lv_norms   = lib_vecs / (np.linalg.norm(lib_vecs, axis=1, keepdims=True) + 1e-9)
                         lib_scores = lv_norms @ q_norm_lib
                         for i in np.argsort(lib_scores)[::-1][:5]:
                             if lib_scores[i] > 0.35:
@@ -3474,7 +4077,7 @@ class KnowledgeBase:
 
 
 
-# â”€â”€ APP SETUP â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+# â"€â"€ APP SETUP â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€
 
 def init_db() -> None:
 
@@ -3522,24 +4125,46 @@ def init_db() -> None:
         except Exception: pass
 
     try: db("CREATE INDEX IF NOT EXISTS idx_query_hash ON response_cache(query_hash)")
-
     except Exception: pass
 
     try: db("CREATE INDEX IF NOT EXISTS idx_library_chunks_doc ON library_chunks(doc_id)")
-
     except Exception: pass
 
     try: db("CREATE INDEX IF NOT EXISTS idx_user_files_email ON user_files(user_email)")
-
     except Exception: pass
+
+    try: db("CREATE INDEX IF NOT EXISTS idx_m_sid ON m(sid)")
+    except Exception: pass
+
+    try: db("CREATE INDEX IF NOT EXISTS idx_m_user_email ON m(user_email)")
+    except Exception: pass
+
+    try: db("CREATE INDEX IF NOT EXISTS idx_sessions_user_email ON sessions(user_email)")
+    except Exception: pass
+
+    try: db("CREATE INDEX IF NOT EXISTS idx_kb_source ON kb(source)")
+    except Exception: pass
+
+    try: db("CREATE INDEX IF NOT EXISTS idx_kb_sid ON kb(sid)")
+    except Exception: pass
+
+    try: db("CREATE INDEX IF NOT EXISTS idx_library_chunks_source ON library_chunks(source)")
+    except Exception: pass
+
+    # Migrations for KB isolation
 
     # Migrations for KB isolation
 
     for col in ["sid", "user_email"]:
 
-        try: db(f"ALTER TABLE kb ADD COLUMN {col} TEXT")
-
-        except Exception: pass
+        try: 
+            # Use raw execute to avoid triggering the DB retry/error logs in db() function
+            with _get_conn() as (conn, ph):
+                cur = conn.cursor()
+                cur.execute(f"ALTER TABLE kb ADD COLUMN {col} TEXT")
+                conn.commit()
+        except Exception: 
+            pass
 
     # Backfill existing m rows  ->  sessions table (migration for pre-existing installs)
 
@@ -3642,9 +4267,9 @@ except Exception as _he:
 
 
 
-# â”€â”€ ROUTES â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+# â"€â"€ ROUTES â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€
 
-# â”€â”€ AUTH & SESSION VERIFICATION â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+# â"€â"€ AUTH & SESSION VERIFICATION â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€
 
 def _verify_session_owner(sid: str, email: str):
 
@@ -3684,7 +4309,7 @@ def diag():
 
 
 
-# â”€â”€ ADMIN AUTH â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+# â"€â"€ ADMIN AUTH â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€
 
 def verify_admin(authorization: str = Header(None)):
 
@@ -3956,7 +4581,7 @@ async def chat_stream(
 
     
 
-    # â”€â”€ SSE PRODUCER WITH HEARTBEAT â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    # â"€â"€ SSE PRODUCER WITH HEARTBEAT â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€
 
     async def _producer():
 
@@ -4238,7 +4863,10 @@ async def handle(
 
     # Save user message WITH filename if applicable
 
-    fname = valid_files[0].filename if valid_files else None
+    # Store all uploaded filenames (semicolon-delimited) so the session-file
+    # fallback in generate_document_json() can recover extracted_text for every
+    # file, not just the first one in a multi-file upload.
+    fname = ";".join(f.filename for f in valid_files) if valid_files else None
 
     await async_db("INSERT INTO m (sid,role,text,ts,user_email,fname) VALUES (?,?,?,?,?,?)",
 
@@ -4266,13 +4894,13 @@ async def handle(
 
 
 
-    # â”€â”€ Security Guard: Verify session ownership before any data access â”€â”€â”€â”€â”€â”€â”€
+    # â"€â"€ Security Guard: Verify session ownership before any data access â"€â"€â"€â"€â"€â"€â"€
 
     _verify_session_owner(sid, email)
 
 
 
-    # â”€â”€ Document generation path (Gemini JSON  ->  HvielDocEngine file) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    # â"€â"€ Document generation path (Gemini JSON  ->  HvielDocEngine file) â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€
 
     file_type = hviel_engine._detect_type(message) if hviel_engine else None
 
@@ -4292,7 +4920,8 @@ async def handle(
 
                 raw_json = assistant.generate_document_json(
 
-                    file_type, message, history, kb_ctx, engineer
+                    file_type, message, history, kb_ctx, engineer, f_parts,
+                    sid=sid, email=email,
 
                 )
 
@@ -4348,23 +4977,28 @@ async def handle(
 
             _logger.error(f"[DocGen] {file_type} generation failed: {e}")
 
+            err_lower = str(e).lower()
+            is_overload = any(x in err_lower for x in [
+                "503", "unavailable", "resource_exhausted", "overload", "retries"
+            ])
             reply = (
-
-                f" Document generation failed: {str(e)[:300]}. "
-
-                f"Please retry or contact PRC support."
-
+                " Gemini is currently unavailable after 5 attempts. "
+                "Please try again in a few minutes or contact PRC support."
+                if is_overload else
+                f" Document generation failed: {str(e)[:200]}. "
+                "Please retry or contact PRC support."
             )
 
             await async_db("INSERT INTO m (sid,role,text,ts,user_email) VALUES (?,?,?,?,?)",
 
                (sid, "model", reply, time.time(), email))
 
-            return {"status": "error", "session_id": sid, "reply": reply}
+            return {"status": "error", "session_id": sid, "reply": reply,
+                    "is_doc_error": True}
 
 
 
-    # â”€â”€ Standard chat path (Gemini with file analysis) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    # â"€â"€ Standard chat path (Gemini with file analysis) â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€
 
     hist_rows = db("SELECT role, text FROM m WHERE sid=? AND user_email=? ORDER BY id DESC LIMIT 10", (sid, email))
 
@@ -4404,6 +5038,22 @@ async def handle(
 
     if valid_files and resp_text:
         background_tasks.add_task(_save_summary_background, sid, email, resp_text, valid_files[0].filename)
+        try:
+            import tempfile
+            ext = os.path.splitext(valid_files[0].filename or "")[1].lower() or ".xlsx"
+            with tempfile.NamedTemporaryFile(delete=False, suffix=ext) as tf:
+                tf.write(f_parts[0][0])
+                tmp_filepath = tf.name
+            try:
+                result = grade_ai_response(tmp_filepath, resp_text)
+                print("\n" + "="*60 + "\n[AUTO GRADER CONSOLE REPORT]\n" + "="*60)
+                print(result["report"])
+                print("="*60 + "\n")
+            finally:
+                try: os.unlink(tmp_filepath)
+                except OSError: pass
+        except Exception as ge:
+            _logger.warning(f"[AutoGrader] Failed to execute console grade: {ge}")
 
     return {"status": "success", "session_id": sid, "reply": resp_text}
 
@@ -4514,11 +5164,13 @@ async def kb_status():
         books_map = {}
         for filename, count in global_rows:
             if filename:
-                books_map[filename] = books_map.get(filename, 0) + (count or 0)
-                
+                clean_name = filename.replace("File: ", "").strip()
+                books_map[clean_name] = books_map.get(clean_name, 0) + (count or 0)
+
         for source, count in trans_rows:
             if source:
-                books_map[source] = books_map.get(source, 0) + (count or 0)
+                clean_name = source.replace("File: ", "").strip()
+                books_map[clean_name] = books_map.get(clean_name, 0) + (count or 0)
                 
         books = [{"name": k, "chunks": v} for k, v in books_map.items()]
         total_chunks = sum(books_map.values())
@@ -4534,7 +5186,9 @@ async def kb_ingest(
     file: UploadFile = File(...),
     password: str = Form(...),
 ):
-    if not KB_INGEST_SECRET or not hmac.compare_digest(password.strip(), KB_INGEST_SECRET):
+    is_valid = (KB_INGEST_SECRET and hmac.compare_digest(password.strip(), KB_INGEST_SECRET)) or \
+               (ADMIN_PIN and hmac.compare_digest(password.strip(), ADMIN_PIN))
+    if not is_valid:
         raise HTTPException(status_code=403, detail="Invalid admin pin")
     if not file.filename:
         raise HTTPException(status_code=400, detail="No file provided")
@@ -4570,6 +5224,41 @@ async def kb_ingest(
         "chunks_stored": result.get("chunks", 0),
         "words": words_count
     }
+
+
+@app.post("/api/kb/delete")
+async def kb_delete(
+    filename: str = Form(...),
+    password: str = Form(...),
+):
+    is_valid = False
+    if KB_INGEST_SECRET and hmac.compare_digest(password.strip(), KB_INGEST_SECRET):
+        is_valid = True
+    elif ADMIN_PIN and hmac.compare_digest(password.strip(), ADMIN_PIN):
+        is_valid = True
+    if not is_valid:
+        raise HTTPException(status_code=403, detail="Invalid admin pin")
+
+    clean_name = filename.replace("File: ", "").strip()
+
+    try:
+        await async_db(
+            "DELETE FROM library_chunks WHERE doc_id IN (SELECT id FROM library_docs WHERE filename = ? OR filename = ?)",
+            (clean_name, f"File: {clean_name}"),
+        )
+        await async_db(
+            "DELETE FROM library_docs WHERE filename = ? OR filename = ?",
+            (clean_name, f"File: {clean_name}"),
+        )
+        await async_db(
+            "DELETE FROM kb WHERE source = ? OR source = ?",
+            (clean_name, f"File: {clean_name}"),
+        )
+        _LibraryEmbCache.invalidate()
+        return {"status": "success", "message": f"Successfully deleted {clean_name}"}
+    except Exception as e:
+        _logger.error(f"[KB Delete] Failed to delete {clean_name}: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 @app.get("/api/skills/list")
@@ -4682,8 +5371,38 @@ async def download_report(filename: str):
 
 
 
+# -- GRADER ------------------------------------------------------------------
 
-# â”€â”€ FRONTEND SERVING (SPA) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+@app.post("/api/grade")
+async def api_grade_response(
+    file:        UploadFile = File(...),
+    ai_response: str        = Form(...),
+):
+    import tempfile
+    ext = os.path.splitext(file.filename or "")[1].lower() or ".xlsx"
+    with tempfile.NamedTemporaryFile(delete=False, suffix=ext) as tf:
+        tf.write(await file.read())
+        tmp_path = tf.name
+    try:
+        result = grade_ai_response(tmp_path, ai_response)
+        return {
+            "status":  "success",
+            "score":   result["score"],
+            "grade":   result["grade"],
+            "report":  result["report"],
+            "checks":  result["checks"],
+        }
+    except Exception as e:
+        _logger.error(f"[Grader] {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+    finally:
+        try: os.unlink(tmp_path)
+        except OSError: pass
+
+
+
+
+# â"€â"€ FRONTEND SERVING (SPA) â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€
 
 _DIST_DIR = os.path.join(os.path.dirname(__file__), "frontend", "dist")
 
@@ -4747,6 +5466,6 @@ if __name__ == "__main__":
 
     init_db()
 
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+    uvicorn.run(app, host="0.0.0.0", port=8001)
 
 

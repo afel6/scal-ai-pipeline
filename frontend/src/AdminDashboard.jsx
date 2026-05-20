@@ -9,13 +9,13 @@ const API_URL = import.meta.env.VITE_API_URL || '';
 function StatCard({ icon: Icon, label, value, color, delay = 0 }) {
   return (
     <div
-      className="relative overflow-hidden rounded-none border border-white/[0.06] bg-white/[0.025] backdrop-blur-xl p-5 transition-all duration-300 hover:border-white/[0.12] hover:bg-white/[0.04] group"
+      className="relative overflow-hidden rounded-2xl border border-white/[0.06] bg-white/[0.025] backdrop-blur-xl p-5 transition-all duration-300 hover:border-white/[0.12] hover:bg-white/[0.04] group shadow-lg"
       style={{ animationDelay: `${delay}ms` }}
     >
       {/* Glow accent */}
-      <div className={`absolute -top-8 -right-8 w-24 h-24 rounded-none opacity-[0.07] blur-2xl group-hover:opacity-[0.14] transition-opacity duration-500`} style={{ background: color }} />
+      <div className={`absolute -top-8 -right-8 w-24 h-24 rounded-full opacity-[0.07] blur-2xl group-hover:opacity-[0.14] transition-opacity duration-500`} style={{ background: color }} />
       <div className="flex items-center gap-3 mb-3">
-        <div className="p-2 rounded-none" style={{ background: `${color}15`, border: `1px solid ${color}25` }}>
+        <div className="p-2 rounded-xl" style={{ background: `${color}15`, border: `1px solid ${color}25` }}>
           <Icon className="w-4 h-4" style={{ color }} />
         </div>
         <span className="text-[10px] font-bold tracking-[0.2em] text-slate-500 uppercase">{label}</span>
@@ -41,18 +41,18 @@ function TimelineEvent({ event, idx }) {
 
   return (
     <div className="flex items-start gap-3 py-3 border-b border-white/[0.04] last:border-0 animate-fade-in" style={{ animationDelay: `${idx * 50}ms` }}>
-      <div className="mt-1 w-2 h-2 rounded-none flex-shrink-0" style={{ background: color, boxShadow: `0 0 8px ${color}60` }} />
+      <div className="mt-1.5 w-2 h-2 rounded-full flex-shrink-0" style={{ background: color, boxShadow: `0 0 8px ${color}60` }} />
       <div className="flex-1 min-w-0">
         <div className="flex items-center gap-2">
-          <span className="text-[10px] font-black tracking-[0.15em] uppercase px-2 py-0.5 rounded-none" style={{ color, background: `${color}12`, border: `1px solid ${color}20` }}>
+          <span className="text-[10px] font-black tracking-[0.15em] uppercase px-2 py-0.5 rounded-full" style={{ color, background: `${color}12`, border: `1px solid ${color}20` }}>
             {event.type}
           </span>
-          <span className="text-[10px] text-slate-600 font-mono truncate">{event.email || 'anonymous'}</span>
+          <span className="text-[10px] text-slate-500 font-mono truncate">{event.email || 'anonymous'}</span>
         </div>
         {event.data && <p className="text-xs text-slate-400 mt-1 truncate">{event.data}</p>}
       </div>
-      <span className="text-[10px] text-slate-600 font-mono flex-shrink-0 flex items-center gap-1">
-        <Clock className="w-3 h-3" /> {ts}
+      <span className="text-[10px] text-slate-500 font-mono flex-shrink-0 flex items-center gap-1">
+        <Clock className="w-3 h-3 text-slate-600" /> {ts}
       </span>
     </div>
   );
@@ -62,13 +62,13 @@ function TimelineEvent({ event, idx }) {
 function FeedbackCard({ item, idx }) {
   const ts = item.ts ? new Date(item.ts * 1000).toLocaleString() : '—';
   return (
-    <div className="p-4 rounded-none border border-red-900/20 bg-red-950/10 animate-fade-in" style={{ animationDelay: `${idx * 80}ms` }}>
+    <div className="p-4 rounded-2xl border border-red-500/10 bg-red-950/10 animate-fade-in" style={{ animationDelay: `${idx * 80}ms` }}>
       <div className="flex items-center justify-between mb-2">
         <div className="flex items-center gap-2">
           <Mail className="w-3 h-3 text-red-400" />
           <span className="text-xs text-red-300 font-mono">{item.email || 'anonymous'}</span>
         </div>
-        <span className="text-[10px] text-slate-600 font-mono">{ts}</span>
+        <span className="text-[10px] text-slate-500 font-mono">{ts}</span>
       </div>
       <p className="text-sm text-slate-300 leading-relaxed">{item.report}</p>
     </div>
@@ -132,11 +132,9 @@ export default function AdminDashboard({ adminToken, onBack, onLogout }) {
       console.error('Admin fetch error:', e);
       if (e.response?.status === 401) onLogoutRef.current?.();
     } finally {
-      // fix 2a: setLoading inside finally so it runs before onBack unmounts,
-      // guarded by isMountedRef so it never fires on a dead component.
       if (isMountedRef.current) setLoading(false);
     }
-  }, [adminToken]); // onBack removed from deps — read via ref (fix 2b)
+  }, [adminToken]);
 
   useEffect(() => { fetchAll(); }, [fetchAll]);
 
@@ -148,12 +146,12 @@ export default function AdminDashboard({ adminToken, onBack, onLogout }) {
   ];
 
   return (
-    <div className="h-screen flex flex-col bg-[#050505] overflow-hidden">
+    <div className="h-screen flex flex-col bg-[#050507] overflow-hidden">
       {/* ── Header ─────────────────────────────────────────────────────── */}
-      <header className="flex-shrink-0 border-b border-white/[0.06] bg-white/[0.015] backdrop-blur-xl">
-        <div className="max-w-7xl mx-auto px-6 py-4 flex items-center justify-between">
+      <header className="flex-shrink-0 border-b border-white/[0.06] bg-[#0a0a0c]/80 backdrop-blur-xl">
+        <div className="max-w-7xl mx-auto px-6 py-5 flex items-center justify-between">
           <div className="flex items-center gap-4">
-            <button onClick={onBack} className="p-2 rounded-none border border-white/[0.06] bg-white/[0.03] hover:bg-white/[0.06] transition-colors">
+            <button onClick={onBack} className="p-2.5 rounded-xl border border-white/[0.06] bg-white/[0.03] hover:bg-white/[0.08] transition-all hover:scale-105 active:scale-95">
               <ArrowLeft className="w-4 h-4 text-slate-400" />
             </button>
             <div>
@@ -161,52 +159,52 @@ export default function AdminDashboard({ adminToken, onBack, onLogout }) {
                 <BarChart3 className="w-5 h-5 text-amber-400" />
                 Admin Dashboard
               </h1>
-              <p className="text-[10px] text-slate-600 font-mono tracking-[0.15em] uppercase mt-0.5">
+              <p className="text-[10px] text-slate-500 font-mono tracking-[0.15em] uppercase mt-0.5">
                 PRC SCAL AI Pipeline — Command Center
               </p>
             </div>
           </div>
-          <div className="flex items-center gap-4">
+          <div className="flex items-center gap-3">
             {summary?.storage_type && (
-              <div className={`px-3 py-1 rounded-none text-[10px] font-bold tracking-tighter uppercase border ${
+              <div className={`px-3 py-1 rounded-full text-[10px] font-bold tracking-wider uppercase border ${
                 summary.storage_type.includes('PostgreSQL') 
-                  ? 'bg-emerald-500/10 text-emerald-400 border-emerald-500/20' 
-                  : 'bg-amber-500/10 text-amber-400 border-amber-500/20'
+                  ? 'bg-emerald-500/10 text-emerald-400 border-emerald-500/20 shadow-[0_0_10px_rgba(16,185,129,0.1)]' 
+                  : 'bg-amber-500/10 text-amber-400 border-amber-500/20 shadow-[0_0_10px_rgba(245,158,11,0.1)]'
               }`}>
                 {summary.storage_type}
               </div>
             )}
-          <button
-            onClick={fetchAll}
-            disabled={loading}
-            className="flex items-center gap-2 px-4 py-2 rounded-none border border-amber-900/30 bg-amber-950/20 text-amber-400 text-xs font-bold tracking-wider uppercase hover:bg-amber-950/40 transition-colors disabled:opacity-50"
-          >
-            <RefreshCw className={`w-3.5 h-3.5 ${loading ? 'animate-spin' : ''}`} />
-            Refresh
-          </button>
-          
-          <div className="h-6 w-px bg-white/[0.06]" />
+            <button
+              onClick={fetchAll}
+              disabled={loading}
+              className="flex items-center gap-2 px-4 py-2 rounded-full border border-amber-500/20 bg-amber-500/10 hover:bg-amber-500/20 text-amber-400 text-xs font-bold tracking-wider uppercase transition-all hover:scale-105 active:scale-95 disabled:opacity-50"
+            >
+              <RefreshCw className={`w-3.5 h-3.5 ${loading ? 'animate-spin' : ''}`} />
+              Refresh
+            </button>
+            
+            <div className="h-6 w-px bg-white/[0.06] mx-1" />
 
-          <button
-            onClick={onLogout}
-            className="flex items-center gap-2 px-4 py-2 rounded-none border border-red-900/30 bg-red-950/20 text-red-400 text-xs font-bold tracking-wider uppercase hover:bg-red-950/40 transition-colors"
-          >
-            <LogOut className="w-3.5 h-3.5" />
-            Logout
-          </button>
+            <button
+              onClick={onLogout}
+              className="flex items-center gap-2 px-4 py-2 rounded-full border border-red-500/20 bg-red-500/10 hover:bg-red-500/20 text-red-400 text-xs font-bold tracking-wider uppercase transition-all hover:scale-105 active:scale-95"
+            >
+              <LogOut className="w-3.5 h-3.5" />
+              Logout
+            </button>
+          </div>
         </div>
-      </div>
 
         {/* ── Tab Nav ─────────────────────────────────────────────────── */}
-        <div className="max-w-7xl mx-auto px-6 flex gap-1">
+        <div className="max-w-7xl mx-auto px-6 pb-3 flex gap-2">
           {tabs.map(tab => (
             <button
               key={tab.id}
               onClick={() => setActiveTab(tab.id)}
-              className={`flex items-center gap-2 px-4 py-2.5 text-xs font-bold tracking-wider uppercase rounded-none transition-all duration-200 ${
+              className={`flex items-center gap-2 px-5 py-2.5 text-xs font-black tracking-widest uppercase rounded-full transition-all duration-300 ${
                 activeTab === tab.id
-                  ? 'bg-white/[0.05] text-amber-400 border-b-2 border-amber-400'
-                  : 'text-slate-600 hover:text-slate-400 hover:bg-white/[0.02]'
+                  ? 'bg-amber-400/15 text-amber-400 border border-amber-400/30 shadow-[0_0_15px_rgba(251,191,36,0.15)]'
+                  : 'text-slate-500 hover:text-slate-300 hover:bg-white/[0.04] border border-transparent'
               }`}
             >
               <tab.icon className="w-3.5 h-3.5" />
@@ -234,25 +232,25 @@ export default function AdminDashboard({ adminToken, onBack, onLogout }) {
 
               {/* Recent Activity Preview */}
               <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
-                <div className="rounded-none border border-white/[0.06] bg-white/[0.02] overflow-hidden">
-                  <div className="px-5 py-3 border-b border-white/[0.06] flex items-center justify-between">
+                <div className="rounded-[2rem] border border-white/[0.06] bg-[#0c0c12]/50 backdrop-blur-xl shadow-xl overflow-hidden">
+                  <div className="px-6 py-4 border-b border-white/[0.06] flex items-center justify-between bg-white/[0.01]">
                     <span className="text-[10px] font-black tracking-[0.2em] text-slate-500 uppercase">Recent Activity</span>
-                    <button onClick={() => setActiveTab('activity')} className="text-[10px] text-amber-500 hover:text-amber-400 font-bold uppercase tracking-wider">View All →</button>
+                    <button onClick={() => setActiveTab('activity')} className="text-[10px] text-amber-500 hover:text-amber-400 font-bold uppercase tracking-wider transition-colors">View All →</button>
                   </div>
-                  <div className="px-5 py-2 max-h-64 overflow-y-auto">
+                  <div className="px-6 py-3 max-h-64 overflow-y-auto">
                     {events.slice(0, 5).map((e, i) => <TimelineEvent key={i} event={e} idx={i} />)}
-                    {events.length === 0 && <p className="text-sm text-slate-700 py-6 text-center italic">No events recorded yet</p>}
+                    {events.length === 0 && <p className="text-sm text-slate-655 py-6 text-center italic">No events recorded yet</p>}
                   </div>
                 </div>
 
-                <div className="rounded-none border border-white/[0.06] bg-white/[0.02] overflow-hidden">
-                  <div className="px-5 py-3 border-b border-white/[0.06] flex items-center justify-between">
+                <div className="rounded-[2rem] border border-white/[0.06] bg-[#0c0c12]/50 backdrop-blur-xl shadow-xl overflow-hidden">
+                  <div className="px-6 py-4 border-b border-white/[0.06] flex items-center justify-between bg-white/[0.01]">
                     <span className="text-[10px] font-black tracking-[0.2em] text-slate-500 uppercase">Recent Feedback</span>
-                    <button onClick={() => setActiveTab('feedback')} className="text-[10px] text-amber-500 hover:text-amber-400 font-bold uppercase tracking-wider">View All →</button>
+                    <button onClick={() => setActiveTab('feedback')} className="text-[10px] text-amber-500 hover:text-amber-400 font-bold uppercase tracking-wider transition-colors">View All →</button>
                   </div>
-                  <div className="px-5 py-3 max-h-64 overflow-y-auto space-y-3">
+                  <div className="px-6 py-4 max-h-64 overflow-y-auto space-y-3">
                     {feedback.slice(0, 3).map((f, i) => <FeedbackCard key={i} item={f} idx={i} />)}
-                    {feedback.length === 0 && <p className="text-sm text-slate-700 py-6 text-center italic">No feedback received yet</p>}
+                    {feedback.length === 0 && <p className="text-sm text-slate-655 py-6 text-center italic">No feedback received yet</p>}
                   </div>
                 </div>
               </div>
@@ -261,13 +259,13 @@ export default function AdminDashboard({ adminToken, onBack, onLogout }) {
 
           {/* ── ACTIVITY TAB ──────────────────────────────────────────── */}
           {activeTab === 'activity' && (
-            <div className="rounded-none border border-white/[0.06] bg-white/[0.02] overflow-hidden animate-fade-in">
-              <div className="px-5 py-3 border-b border-white/[0.06]">
+            <div className="rounded-[2rem] border border-white/[0.06] bg-[#0c0c12]/50 backdrop-blur-xl shadow-xl overflow-hidden animate-fade-in">
+              <div className="px-6 py-4 border-b border-white/[0.06] bg-white/[0.01]">
                 <span className="text-[10px] font-black tracking-[0.2em] text-slate-500 uppercase">All Activity Events ({events.length})</span>
               </div>
-              <div className="px-5 py-2 max-h-[calc(100vh-260px)] overflow-y-auto">
+              <div className="px-6 py-3 max-h-[calc(100vh-260px)] overflow-y-auto">
                 {events.map((e, i) => <TimelineEvent key={i} event={e} idx={i} />)}
-                {events.length === 0 && <p className="text-sm text-slate-700 py-12 text-center italic">No events recorded yet</p>}
+                {events.length === 0 && <p className="text-sm text-slate-655 py-12 text-center italic">No events recorded yet</p>}
               </div>
             </div>
           )}
@@ -275,13 +273,13 @@ export default function AdminDashboard({ adminToken, onBack, onLogout }) {
           {/* ── FEEDBACK TAB ──────────────────────────────────────────── */}
           {activeTab === 'feedback' && (
             <div className="space-y-4 animate-fade-in">
-              <div className="text-[10px] font-black tracking-[0.2em] text-slate-500 uppercase">
+              <div className="text-[10px] font-black tracking-[0.2em] text-slate-500 uppercase px-1">
                 All Feedback Reports ({feedback.length})
               </div>
               <div className="max-h-[calc(100vh-220px)] overflow-y-auto space-y-3">
                 {feedback.map((f, i) => <FeedbackCard key={i} item={f} idx={i} />)}
                 {feedback.length === 0 && (
-                  <div className="rounded-none border border-white/[0.06] bg-white/[0.02] p-12 text-center">
+                  <div className="rounded-[2rem] border border-white/[0.06] bg-[#0c0c12]/50 backdrop-blur-xl p-12 text-center shadow-xl">
                     <Bug className="w-8 h-8 text-slate-800 mx-auto mb-3" />
                     <p className="text-sm text-slate-700 italic">No feedback reports submitted yet</p>
                   </div>
@@ -292,17 +290,17 @@ export default function AdminDashboard({ adminToken, onBack, onLogout }) {
 
           {/* ── USERS TAB ─────────────────────────────────────────────── */}
           {activeTab === 'users' && (
-            <div className="rounded-none border border-white/[0.06] bg-white/[0.02] overflow-hidden animate-fade-in">
-              <div className="px-5 py-3 border-b border-white/[0.06]">
+            <div className="rounded-[2rem] border border-white/[0.06] bg-[#0c0c12]/50 backdrop-blur-xl shadow-xl overflow-hidden animate-fade-in">
+              <div className="px-6 py-4 border-b border-white/[0.06] bg-white/[0.01]">
                 <span className="text-[10px] font-black tracking-[0.2em] text-slate-500 uppercase">Registered Users ({users.length})</span>
               </div>
               <div className="overflow-x-auto max-h-[calc(100vh-260px)] overflow-y-auto">
                 <table className="w-full text-left">
                   <thead>
                     <tr className="border-b border-white/[0.06]">
-                      <th className="px-4 py-3 text-[10px] font-bold text-slate-600 uppercase tracking-widest">Email</th>
-                      <th className="px-4 py-3 text-[10px] font-bold text-slate-600 uppercase tracking-widest">Name</th>
-                      <th className="px-4 py-3 text-[10px] font-bold text-slate-600 uppercase tracking-widest">Registered</th>
+                      <th className="px-6 py-4 text-[10px] font-bold text-slate-500 uppercase tracking-widest">Email</th>
+                      <th className="px-6 py-4 text-[10px] font-bold text-slate-500 uppercase tracking-widest">Name</th>
+                      <th className="px-6 py-4 text-[10px] font-bold text-slate-500 uppercase tracking-widest">Registered</th>
                     </tr>
                   </thead>
                   <tbody>

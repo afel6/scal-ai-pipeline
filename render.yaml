@@ -15,7 +15,7 @@ services:
       sizeGb: 1
     envVars:
       - key: PYTHON_VERSION
-        value: "3.13.0"
+        value: "3.11.0"
       - key: DATABASE_URL
         sync: false
       - key: GEMINI_API_KEY

@@ -10,8 +10,8 @@ import KrCurvePlot from './KrCurvePlot';
 
 const SectionHeader = ({ text }) => {
   return (
-    <h3 className="font-bold text-lg text-blue-400 mt-6 mb-3 flex items-center gap-2">
-      <div className="w-2 h-2 rounded-full bg-blue-500" />
+    <h3 className="font-bold text-lg text-yellow-500 mt-6 mb-3 flex items-center gap-2">
+      <div className="w-2 h-2 rounded-full bg-yellow-500 shadow-[0_0_8px_rgba(251,191,36,0.5)]" />
       {text.replace(/###\s*/, '')}
     </h3>
   );
@@ -25,9 +25,17 @@ const KnowledgeCard = ({ title, content }) => {
         <ReactMarkdown 
           remarkPlugins={[remarkGfm]}
           components={{
-            table: ({node, ...props}) => <div className="overflow-x-auto my-4"><table className="w-full text-sm text-left border-collapse border border-slate-700/50" {...props} /></div>,
-            th: ({node, ...props}) => <th className="px-4 py-2 bg-slate-800/80 border border-slate-700/50 font-bold text-slate-200" {...props} />,
-            td: ({node, ...props}) => <td className="px-4 py-2 border border-slate-700/50 text-slate-300 bg-slate-900/30" {...props} />,
+            table: ({node, ...props}) => (
+              <div className="my-6 overflow-hidden rounded-2xl border border-yellow-500/10 bg-[#0c0c12]/60 backdrop-blur-md shadow-xl max-w-full overflow-x-auto">
+                <table className="w-full text-left border-collapse text-xs md:text-sm font-mono min-w-[400px]" {...props} />
+              </div>
+            ),
+            th: ({node, ...props}) => (
+              <th className="px-5 py-3.5 bg-yellow-950/20 border-b border-white/5 text-[10px] font-black text-yellow-500 uppercase tracking-widest" {...props} />
+            ),
+            td: ({node, ...props}) => (
+              <td className="px-5 py-3.5 border-b border-white/[0.03] text-slate-300 transition-colors" {...props} />
+            ),
             a: ({node, ...props}) => <a className="text-yellow-400 hover:text-yellow-300 underline underline-offset-2" {...props} />,
             p: ({node, ...props}) => <p className="mb-4 whitespace-pre-wrap" {...props} />
           }}
@@ -259,7 +267,7 @@ export function renderMessageContent(text) {
       </div>
     );
     if (part.type === 'dashboard') return (
-      <div key={i} className="my-10 rounded-xl-[2rem] border border-white/10 bg-[#050508] overflow-hidden shadow-2xl animate-fade-in h-[500px]">
+      <div key={i} className="my-10 rounded-[2rem] border border-white/10 bg-[#050508] overflow-hidden shadow-2xl animate-fade-in h-[500px]">
         <iframe
           srcDoc={`<html><head><script src="https://cdn.jsdelivr.net/npm/chart.js"></script><style>body{background:#050508;color:white;margin:0;padding:20px;font-family:sans-serif;overflow:hidden}canvas{max-height:450px!important}</style></head><body>${part.content}</body></html>`}
           className="w-full h-full border-0"
@@ -304,9 +312,17 @@ export function renderMessageContent(text) {
           <ReactMarkdown
             remarkPlugins={[remarkGfm]}
             components={{
-              table: ({node, ...props}) => <div className="overflow-x-auto my-4"><table className="w-full text-sm text-left border-collapse border border-slate-700/50" {...props} /></div>,
-              th: ({node, ...props}) => <th className="px-4 py-2 bg-slate-800/80 border border-slate-700/50 font-bold text-slate-200" {...props} />,
-              td: ({node, ...props}) => <td className="px-4 py-2 border border-slate-700/50 text-slate-300 bg-slate-900/30" {...props} />,
+              table: ({node, ...props}) => (
+                <div className="my-6 overflow-hidden rounded-2xl border border-yellow-500/10 bg-[#0c0c12]/60 backdrop-blur-md shadow-xl max-w-full overflow-x-auto">
+                  <table className="w-full text-left border-collapse text-xs md:text-sm font-mono min-w-[400px]" {...props} />
+                </div>
+              ),
+              th: ({node, ...props}) => (
+                <th className="px-5 py-3.5 bg-yellow-950/20 border-b border-white/5 text-[10px] font-black text-yellow-500 uppercase tracking-widest" {...props} />
+              ),
+              td: ({node, ...props}) => (
+                <td className="px-5 py-3.5 border-b border-white/[0.03] text-slate-300 transition-colors" {...props} />
+              ),
               a: ({node, ...props}) => <a className="text-yellow-400 hover:text-yellow-300 underline underline-offset-2" {...props} />,
               p: ({node, ...props}) => <p className="mb-4 whitespace-pre-wrap" {...props} />
             }}

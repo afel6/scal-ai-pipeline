@@ -68,7 +68,7 @@ const SimulationHeatmap = ({ content }) => {
 
   if (error) {
     return (
-      <div className="p-4 bg-red-950/30 border border-red-900/50 rounded-none text-red-400 text-sm font-mono">
+      <div className="p-4 bg-red-950/20 border border-red-900/30 rounded-2xl text-red-400 text-sm font-mono my-4">
         {error}
       </div>
     );
@@ -96,28 +96,31 @@ const SimulationHeatmap = ({ content }) => {
   };
 
   return (
-    <div className="my-6 bg-[#0c0c10] border border-yellow-900/30 rounded-none overflow-hidden shadow-2xl">
+    <div className="my-8 bg-[#0c0c12]/90 backdrop-blur-xl border border-yellow-500/20 rounded-[2rem] overflow-hidden shadow-[0_24px_60px_-15px_rgba(0,0,0,0.8),inset_0_1px_1px_rgba(255,255,255,0.05)] animate-fade-in">
       {/* Header */}
-      <div className="bg-gradient-to-r from-yellow-950/40 to-slate-900/40 px-4 py-3 flex items-center justify-between border-b border-yellow-900/30">
-        <div className="flex items-center gap-2">
-          <Activity className="w-4 h-4 text-yellow-500" />
-          <h3 className="text-yellow-400 font-bold tracking-widest text-[11px] uppercase">
-            2D Numerical Saturation Front
+      <div className="bg-gradient-to-r from-yellow-950/30 to-transparent px-6 py-4 flex items-center justify-between border-b border-white/5">
+        <div className="flex items-center gap-2.5">
+          <div className="relative flex items-center justify-center">
+            <span className="absolute w-2 h-2 rounded-full bg-yellow-500 animate-ping opacity-75" />
+            <span className="relative w-2.5 h-2.5 rounded-full bg-yellow-500" />
+          </div>
+          <h3 className="text-yellow-400 font-black tracking-[0.2em] text-[11px] uppercase">
+            2D Saturation Front Simulator
           </h3>
         </div>
-        <div className="text-slate-400 text-[10px] font-mono">
-          GRID: {nx}x{ny} | MODEL: {params.model?.toUpperCase()}
+        <div className="text-slate-400 text-[10px] font-mono bg-white/5 border border-white/5 px-2.5 py-1 rounded-full">
+          GRID: <span className="text-yellow-400 font-bold">{nx}x{ny}</span> &nbsp;|&nbsp; MODEL: <span className="text-white font-bold">{params.model?.toUpperCase()}</span>
         </div>
       </div>
 
       {/* Main Heatmap Area */}
-      <div className="p-6 flex flex-col items-center bg-[#050505]">
+      <div className="p-8 flex flex-col items-center bg-black/40">
         <div 
-          className="grid gap-[1px] bg-slate-800 p-[1px] border border-slate-700/50 rounded-none shadow-lg"
+          className="grid gap-[1px] bg-slate-800/80 p-1 border border-white/10 rounded-2xl shadow-2xl overflow-hidden"
           style={{ 
             gridTemplateColumns: `repeat(${ny}, minmax(0, 1fr))`,
             width: '100%',
-            maxWidth: '400px',
+            maxWidth: '380px',
             aspectRatio: `${ny} / ${nx}`
           }}
         >
@@ -135,23 +138,23 @@ const SimulationHeatmap = ({ content }) => {
       </div>
 
       {/* Controls */}
-      <div className="bg-[#111116] p-4 border-t border-slate-800/60">
-        <div className="flex items-center gap-4 mb-3">
+      <div className="bg-[#111116]/80 p-6 border-t border-white/5">
+        <div className="flex items-center gap-5 mb-4">
           <button 
             onClick={() => {
               if (currentStep >= history.length - 1) setCurrentStep(0);
               setIsPlaying(!isPlaying);
             }}
-            className="w-10 h-10 rounded-none bg-yellow-600 hover:bg-yellow-500 text-black flex items-center justify-center transition-transform active:scale-95 shadow-lg shrink-0"
+            className="w-12 h-12 rounded-full bg-gradient-to-br from-yellow-400 to-amber-600 hover:from-yellow-300 hover:to-amber-500 text-black flex items-center justify-center transition-all duration-300 active:scale-95 hover:scale-105 hover:shadow-[0_0_20px_rgba(251,191,36,0.4)] shadow-lg shrink-0"
           >
-            {isPlaying ? <Pause className="w-4 h-4" /> : <Play className="w-4 h-4 ml-0.5" />}
+            {isPlaying ? <Pause className="w-5 h-5 fill-current" /> : <Play className="w-5 h-5 fill-current ml-1" />}
           </button>
           
-          <div className="flex-1 flex flex-col gap-1">
+          <div className="flex-1 flex flex-col gap-2">
             <div className="flex justify-between text-[10px] font-mono text-slate-500">
-              <span>Time: 0</span>
-              <span className="text-yellow-500 font-bold">Step {currentStep}</span>
-              <span>End</span>
+              <span className="uppercase tracking-wider">Start</span>
+              <span className="text-yellow-400 font-bold bg-yellow-500/10 px-2 py-0.5 rounded-full border border-yellow-500/20">Step {currentStep} / {Math.max(history.length - 1, 0)}</span>
+              <span className="uppercase tracking-wider">End</span>
             </div>
             <input 
               type="range" 
@@ -162,29 +165,29 @@ const SimulationHeatmap = ({ content }) => {
                 setCurrentStep(parseInt(e.target.value));
                 setIsPlaying(false);
               }}
-              className="w-full h-1.5 bg-slate-800 rounded-none appearance-none cursor-pointer accent-yellow-500"
+              className="w-full h-2 bg-slate-800 rounded-full appearance-none cursor-pointer accent-yellow-500 focus:outline-none"
             />
           </div>
           
           <button 
             onClick={() => setCurrentStep(history.length - 1)}
-            className="w-8 h-8 rounded-none bg-slate-800 hover:bg-slate-700 text-slate-400 flex items-center justify-center transition-colors shrink-0"
+            className="w-10 h-10 rounded-full bg-white/5 border border-white/10 hover:bg-white/10 hover:border-white/20 text-slate-300 hover:text-white flex items-center justify-center transition-all shrink-0 active:scale-95"
             title="Skip to end"
           >
-            <FastForward className="w-3.5 h-3.5" />
+            <FastForward className="w-4 h-4 fill-current" />
           </button>
         </div>
         
         {/* Legend */}
-        <div className="flex items-center justify-between text-[10px] font-mono uppercase text-slate-500 px-2 mt-4 border-t border-slate-800/40 pt-3">
+        <div className="flex items-center justify-between text-[10px] font-mono uppercase text-slate-400 px-1 mt-4 border-t border-white/5 pt-4">
           <div className="flex items-center gap-2">
-            <div className="w-3 h-3 rounded-none border border-slate-700" style={{ backgroundColor: getColor(params.swr || 0.2) }} />
-            <span>Residual Water</span>
+            <div className="w-3.5 h-3.5 rounded-full border border-white/20" style={{ backgroundColor: getColor(params.swr || 0.2) }} />
+            <span className="text-slate-500 tracking-wider">Residual Water</span>
           </div>
-          <div className="flex-1 h-1.5 mx-4 rounded-none" style={{ background: `linear-gradient(to right, ${getColor(0.2)}, ${getColor(0.8)})` }} />
+          <div className="flex-1 h-2 mx-5 rounded-full shadow-inner" style={{ background: `linear-gradient(to right, ${getColor(0.2)}, ${getColor(0.8)})` }} />
           <div className="flex items-center gap-2">
-            <span>Water Front</span>
-            <div className="w-3 h-3 rounded-none border border-slate-700" style={{ backgroundColor: getColor(1 - (params.snr || 0.2)) }} />
+            <span className="text-slate-500 tracking-wider">Water Front</span>
+            <div className="w-3.5 h-3.5 rounded-full border border-white/20" style={{ backgroundColor: getColor(1 - (params.snr || 0.2)) }} />
           </div>
         </div>
       </div>

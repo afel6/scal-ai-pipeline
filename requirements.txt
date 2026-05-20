@@ -15,6 +15,7 @@ scipy>=1.14.0
 
 # ── Visualisation ─────────────────────────────────────────────────────────────
 matplotlib>=3.9.0
+streamlit>=1.35.0
 # seaborn removed — not imported anywhere; matplotlib used directly with PRC palette
 
 # ── Document generation ───────────────────────────────────────────────────────

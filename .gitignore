@@ -41,3 +41,10 @@ my_venv/
 venv_313/
 *.venv/
 
+
+# Scratch/debug files
+scratch/
+outputs/
+startup_*.txt
+hermes_skills_library/
+test_centrifuge.xlsx

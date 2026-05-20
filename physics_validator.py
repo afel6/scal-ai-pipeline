@@ -297,6 +297,158 @@ class PhysicsGuard:
         )
         return self
 
+    def validate_j_function(self, j_arr, sw_arr=None, ift_cos_theta: float = 26.5,
+                            fluid_system: str = "Air-Mercury") -> "PhysicsGuard":
+        """
+        Validates Leverett J-Function values against physical domain boundaries.
+
+        Physical bounds:
+          - J at entry pressure should be < 0.5 for a correctly matched IFT.
+            J > 0.5 at entry usually means the wrong σ·cos(θ) was used.
+          - J > 2.0 at ANY saturation is physically impossible for consolidated rock.
+          - J must be non-negative (negative Pc in drainage is non-physical).
+
+        This catches the classic IFT mismatch hallucination (e.g., J = 1.272
+        when the AI used air-mercury IFT of 26.5 dyn/cm for an air-brine system
+        that should use ~72 dyn/cm).
+        """
+        j_a = np.asarray(j_arr, dtype=float)
+
+        # 1 — J must be non-negative (drainage cycle)
+        n_neg = int(np.sum(j_a < -1e-6))
+        self._check(
+            n_neg == 0,
+            "J_NEGATIVE",
+            f"{n_neg} J-Function value(s) are negative — non-physical for "
+            "drainage capillary pressure.",
+        )
+
+        # 2 — J at entry pressure (first J where Sw < 0.95)
+        if sw_arr is not None:
+            sw_a = np.asarray(sw_arr, dtype=float)
+            entry_mask = sw_a < 0.95
+            if entry_mask.any():
+                j_entry = float(j_a[entry_mask][0])
+                self._check(
+                    j_entry <= 0.5,
+                    "J_ENTRY_IFT_MISMATCH",
+                    f"Critical Physics Violation: J-Function at entry = {j_entry:.4f} "
+                    f"(should be < 0.5). This usually means the wrong Interfacial "
+                    f"Tension (IFT) was used for the {fluid_system} system. "
+                    f"Current σ·cos(θ) = {ift_cos_theta} dyn/cm — verify against "
+                    f"the actual fluid pair.",
+                )
+
+        # 3 — Maximum J cannot exceed 2.0 for consolidated reservoir rock
+        j_max = float(j_a.max())
+        self._check(
+            j_max <= 2.0,
+            "J_MAX_IMPOSSIBLE",
+            f"J-Function max = {j_max:.4f} exceeds 2.0 — physically impossible "
+            "for consolidated reservoir rock. Check IFT, permeability, or porosity inputs.",
+        )
+
+        # 4 — J > 5.0 is absolutely impossible under any conditions
+        self._check(
+            j_max <= 5.0,
+            "J_CATASTROPHIC",
+            f"CATASTROPHIC: J-Function max = {j_max:.4f}. Values > 5.0 indicate "
+            "a unit conversion error or completely wrong input parameters.",
+        )
+
+        return self
+
+    def validate_compressibility(self, cp_values, pressures=None) -> "PhysicsGuard":
+        """
+        Validates Pore Volume Compressibility (Cp) against physical domain boundaries.
+
+        Physical bounds (psi⁻¹):
+          - Cp must be non-negative (pore volume cannot expand under compression).
+          - Cp < 3.0e-6:  Tight carbonate / cemented sandstone (normal).
+          - Cp 3–10e-6:   Typical consolidated sandstone.
+          - Cp 10–30e-6:  Unconsolidated / friable sand (plausible).
+          - Cp 30–50e-6:  Very weak chalk, diatomite (rare but physical).
+          - Cp > 50e-6:   Physically implausible — likely a calculation error.
+        """
+        cp_a = np.asarray(cp_values, dtype=float)
+        # Filter out null/zero baseline values
+        cp_valid = cp_a[np.isfinite(cp_a) & (cp_a != 0.0)]
+
+        if len(cp_valid) == 0:
+            return self
+
+        # 1 — Cp must be non-negative
+        n_neg = int(np.sum(cp_valid < -1e-10))
+        self._check(
+            n_neg == 0,
+            "CP_NEGATIVE",
+            f"{n_neg} Cp value(s) are negative — pore volume cannot expand "
+            "under increasing confining pressure (check calculation sign).",
+        )
+
+        # 2 — Cp cannot exceed 50e-6 psi⁻¹ (even for unconsolidated chalk)
+        cp_max = float(cp_valid.max())
+        self._check(
+            cp_max <= 50.0e-6,
+            "CP_MAX_IMPOSSIBLE",
+            f"Cp max = {cp_max:.2e} psi⁻¹ exceeds 50×10⁻⁶ — physically "
+            "implausible. Only unconsolidated chalk/diatomite reaches 30–50×10⁻⁶. "
+            "Check porosity units or pressure delta calculation.",
+        )
+
+        # 3 — Cp > 100e-6 is a catastrophic calculation error
+        self._check(
+            cp_max <= 100.0e-6,
+            "CP_CATASTROPHIC",
+            f"CATASTROPHIC: Cp max = {cp_max:.2e} psi⁻¹ — this exceeds any "
+            "known reservoir rock. Likely a unit error (porosity in fraction vs percent?).",
+        )
+
+        return self
+
+    def validate_saturation_endpoints(self, swi: float, sor: float,
+                                       sample: str = "") -> "PhysicsGuard":
+        """
+        Validates Swi (irreducible water saturation) and Sor (residual oil saturation)
+        endpoint values for physical consistency.
+
+        Physical bounds:
+          - Swi + Sor must be < 1.0 (mass conservation: there must be mobile fluid).
+          - Swi typically 0.05–0.60 for reservoir rock.
+          - Sor typically 0.05–0.45 for waterflooded sandstone.
+          - Swi > 0.80 or Sor > 0.50 are extreme outliers requiring justification.
+        """
+        prefix = f"[{sample}] " if sample else ""
+
+        # 1 — Mass conservation: Swi + Sor < 1.0
+        total = float(swi) + float(sor)
+        self._check(
+            total < 1.0,
+            "SAT_MASS_CONSERVATION",
+            f"{prefix}Swi ({swi:.4f}) + Sor ({sor:.4f}) = {total:.4f} ≥ 1.0 — "
+            "violates mass conservation. No mobile fluid phase exists.",
+        )
+
+        # 2 — Swi plausibility
+        self._check(
+            0.0 <= float(swi) <= 0.80,
+            "SWI_RANGE",
+            f"{prefix}Swi = {swi:.4f} outside plausible range [0, 0.80]. "
+            "Swi > 0.80 means >80% of pore space is immobile water — "
+            "extremely rare, verify lab data.",
+            severity="MEDIUM",
+        )
+
+        # 3 — Sor plausibility
+        self._check(
+            0.0 <= float(sor) <= 0.50,
+            "SOR_RANGE",
+            f"{prefix}Sor = {sor:.4f} outside plausible range [0, 0.50]. "
+            "Sor > 0.50 means >50% of pore space is trapped oil — "
+            "verify wettability and flood efficiency.",
+            severity="MEDIUM",
+        )
+
     # ── score generation ──────────────────────────────────────────────────────
 
     def generate_health_score(self) -> dict:

@@ -84,9 +84,12 @@ export default function App() {
   const [simProgress,    setSimProgress]    = useState(null); // { val, text }
   const [cognitiveMode,  setCognitiveMode]  = useState('');
 
+  const [docRetrying,    setDocRetrying]    = useState(false);
+
   const messagesEndRef    = useRef(null);
   const inputRef          = useRef(null);
   const initialLoadGuard  = useRef(false);  // prevents session race condition
+  const docRetryTimerRef  = useRef(null);
 
   // ── auto-scroll ────────────────────────────────────────────────────────────
   useEffect(() => {
@@ -143,7 +146,7 @@ export default function App() {
   useEffect(() => {
     const wake = async () => {
       try {
-        await axios.get(`${API_URL}/`, { timeout: 180_000 });
+        await axios.get(`${API_URL}/api/diag`, { timeout: 180_000 });
         setServerStatus('online');
       } catch {
         setServerStatus('offline');
@@ -384,7 +387,7 @@ export default function App() {
         es.close();
         setMessages(prev => [...prev, {
           role: 'model',
-          text: `[!] PRC Hub connection failed. This may be due to a server timeout or network issue. Please check your connection and retry.`,
+          text: `[!] Cannot connect to the PRC Hub backend. Port 8001 may not be running — start the backend server and retry.`,
           isError: true,
         }]);
         setLoading(false);
@@ -406,6 +409,9 @@ export default function App() {
     msgFiles.forEach(f => formData.append('files', f));
 
     setUploadStatus(msgFiles.length > 0 ? 'uploading' : 'thinking');
+    // After 6s on a doc generation request, switch to the high-demand retrying indicator.
+    // The backend retries Gemini up to 5 times (total ~62s) before failing.
+    docRetryTimerRef.current = setTimeout(() => setDocRetrying(true), 6000);
 
     try {
       const response = await axios.post(`${API_URL}/api/chat`, formData, {
@@ -425,21 +431,32 @@ export default function App() {
         }]);
       } else {
         setMessages(prev => [...prev, {
-          role: 'model', text: ` ${response.data.reply}`, isError: true,
+          role: 'model',
+          text: ` ${response.data.reply}`,
+          isError: true,
+          isDocEngineError: !!response.data.is_doc_error,
         }]);
       }
       await refreshSessions();
     } catch (err) {
+      const isNoBackend = !err.response || err.response.status === 502 || err.response.status === 504;
       const msg = err.code === 'ECONNABORTED'
         ? ' Generation timed out. Deep analysis can take up to 4 minutes. Please try again or submit a smaller dataset.'
         : err.response?.status === 503
-        ? ' The PRC Hub is temporarily at capacity. Please retry in a moment.'
+        ? ' Gemini is currently unavailable after 5 attempts. Please try again in a few minutes or contact PRC support.'
         : err.response?.status === 401
         ? ' Session authentication failed. Please log out and log back in.'
+        : isNoBackend
+        ? ' Cannot connect to the PRC Hub backend (port 8001 is not responding). Please start the backend server and retry.'
         : ' Unable to reach the PRC Hub. Please check your connection and retry.';
-      setMessages(prev => [...prev, { role: 'model', text: msg, isError: true }]);
+      setMessages(prev => [...prev, {
+        role: 'model', text: msg, isError: true,
+        isDocEngineError: err.response?.status === 503,
+      }]);
       setServerStatus('offline');
     } finally {
+      clearTimeout(docRetryTimerRef.current);
+      setDocRetrying(false);
       setLoading(false);
       setUploadStatus('');
       if (retryObj) setRetryCooldown(15);
@@ -547,7 +564,7 @@ export default function App() {
       <div className="flex-1 flex flex-col min-w-0 h-full">
 
         {/* Header */}
-        <header className="bg-black/40 backdrop-blur-md border-b border-white/5 px-3 md:px-4 py-3 flex items-center justify-between shrink-0 gap-2 z-10">
+        <header className="bg-gloss border-b border-white/5 px-3 md:px-4 py-3 flex items-center justify-between shrink-0 gap-2 z-10 !border-x-0 !border-t-0 !rounded-none">
           <div className="flex items-center gap-2 min-w-0">
             <button
               onClick={() => setSidebarOpen(p => !p)}
@@ -642,10 +659,10 @@ export default function App() {
                   </div>
 
                   {/* Bubble */}
-                  <div className={`px-4 py-3 rounded-xl text-sm md:text-[15px] leading-relaxed shadow-lg max-w-[85%]
+                  <div className={`px-4 py-3.5 text-sm md:text-[15px] leading-relaxed shadow-xl max-w-[85%] transition-all
                     ${msg.role === 'user'
-                      ? 'bg-slate-800 text-slate-200 rounded-2xl rounded-tr-sm border border-slate-700/50'
-                      : 'bg-[#111116] text-yellow-50/90 rounded-2xl rounded-tr-sm border border-yellow-900/30'}`}
+                      ? 'bg-slate-800/85 backdrop-blur-sm text-slate-200 rounded-2xl rounded-tr-none border border-slate-700/40 shadow-black/40'
+                      : 'bg-[#0e0e12]/95 backdrop-blur-sm text-yellow-50/95 rounded-2xl rounded-tl-none border border-yellow-900/20 shadow-black/60 shadow-[inset_0_1px_0_rgba(255,255,255,0.02)]'}`}
                   >
                     {msg.fileName && (
                       <div className="flex items-center gap-2 mb-2 bg-black/40 p-2 rounded-xl border border-slate-700/50 w-fit">
@@ -752,6 +769,14 @@ export default function App() {
                         <Upload className="w-4 h-4 text-yellow-500 animate-bounce shrink-0" />
                         <span className="text-[11px] text-yellow-300 font-mono tracking-widest uppercase font-bold">Transferring Data Packets</span>
                       </div>
+                    ) : docRetrying ? (
+                      <div className="flex flex-col gap-2 py-1">
+                        <div className="flex items-center gap-2">
+                          <Loader className="w-3.5 h-3.5 text-amber-400 animate-spin shrink-0" />
+                          <span className="text-[10px] text-amber-300 font-mono tracking-widest uppercase font-bold">Gemini Under High Demand — Retrying Automatically...</span>
+                        </div>
+                        <span className="text-[9px] text-slate-400 font-mono italic">Up to 5 attempts. Please do not close this tab.</span>
+                      </div>
                     ) : (
                       <div className="flex flex-col gap-3 py-1">
                         {cognitiveMode && (
@@ -783,7 +808,7 @@ export default function App() {
               {files.length > 0 && (
                 <div className="mb-3 flex flex-wrap gap-2 animate-in fade-in slide-in-from-bottom-2">
                   {files.map((f, i) => (
-                    <div key={i} className="flex items-center gap-2 bg-yellow-950/20 border border-yellow-500/20 rounded-xl px-3 py-2 shadow-inner">
+                    <div key={i} className="flex items-center gap-2 bg-yellow-950/20 border border-yellow-500/20 rounded-full px-3 py-2 shadow-inner">
                       <FileText className="w-3.5 h-3.5 text-yellow-500 shrink-0" />
                       <span className="text-[10px] font-black text-yellow-200 uppercase tracking-wider truncate max-w-[140px]">
                         {f.name}
@@ -800,9 +825,9 @@ export default function App() {
               )}
 
               <div className="relative group">
-                <div className="absolute -inset-1 bg-gradient-to-r from-yellow-500/20 to-amber-500/20 rounded-[22px] blur opacity-0 group-focus-within:opacity-100 transition-opacity duration-500" />
-                <div className="relative flex items-center gap-3 bg-[#0a0a0c] border border-slate-800 rounded-xl p-2 pl-4 group-focus-within:border-yellow-500/50 transition-all shadow-2xl">
-                  <label className="cursor-pointer shrink-0 p-2 hover:bg-yellow-500/10 rounded-xl transition-all hover:scale-110 active:scale-95 group">
+                <div className="absolute -inset-1 bg-gradient-to-r from-yellow-500/20 to-amber-500/20 rounded-[2.1rem] blur opacity-0 group-focus-within:opacity-100 transition-all duration-700" />
+                <div className="relative flex items-center gap-3 bg-[#07070a]/90 backdrop-blur-md border border-slate-800 rounded-[2rem] p-2 pl-4 group-focus-within:border-yellow-500/50 transition-all shadow-2xl">
+                  <label className="cursor-pointer shrink-0 p-2 hover:bg-yellow-500/10 rounded-full transition-all hover:scale-110 active:scale-95 group">
                     <input
                       type="file"
                       multiple
@@ -843,7 +868,7 @@ export default function App() {
                   <button
                     onClick={() => handleSend()}
                     disabled={loading || serverStatus === 'waking' || (!input.trim() && files.length === 0)}
-                    className={`bg-gradient-to-br from-yellow-500 to-amber-600 hover:from-yellow-400 hover:to-amber-500 text-black p-3 rounded-xl shrink-0 transition-all active:scale-90 disabled:opacity-30 disabled:cursor-not-allowed shadow-[0_0_20px_rgba(234,179,8,0.3)] hover:shadow-[0_0_25px_rgba(234,179,8,0.5)] ${loading ? 'btn-streaming' : ''}`}
+                    className={`bg-gradient-to-br from-yellow-500 to-amber-600 hover:from-yellow-400 hover:to-amber-500 text-black p-3.5 rounded-full shrink-0 transition-all active:scale-90 disabled:opacity-30 disabled:cursor-not-allowed shadow-[0_0_20px_rgba(234,179,8,0.3)] hover:shadow-[0_0_25px_rgba(234,179,8,0.5)] ${loading ? 'btn-streaming' : ''}`}
                   >
                     {loading ? <Loader className="w-5 h-5 animate-spin" /> : <Send className="w-5 h-5" />}
                   </button>
@@ -860,11 +885,27 @@ export default function App() {
         ) : activeTab === 'audit' ? (
           <VisualAudit />
         ) : (
-          <div className="flex-1 flex flex-col items-center justify-center bg-[#0c0c10] text-slate-600">
-            <BookOpen className="w-12 h-12 mb-4 opacity-20" />
-            <p className="text-sm font-mono tracking-widest uppercase opacity-40">
-              Library Mode — Use Sidebar to Manage Data
-            </p>
+          <div className="flex-1 flex flex-col items-center justify-center bg-mesh text-slate-500 p-8 text-center relative overflow-hidden">
+            <div className="absolute inset-0 bg-gradient-to-br from-yellow-500/5 to-transparent pointer-events-none" />
+            <div className="p-10 rounded-[2.5rem] bg-gloss border border-white/5 max-w-md space-y-6 shadow-2xl relative z-10 hover:scale-[1.01] transition-all duration-500">
+              <div className="w-16 h-16 rounded-[1.25rem] bg-yellow-500/10 border border-yellow-500/20 flex items-center justify-center text-yellow-500 mx-auto shadow-[0_0_30px_rgba(234,179,8,0.15)] animate-pulse-slow">
+                <BookOpen className="w-8 h-8" />
+              </div>
+              <div className="space-y-2">
+                <h3 className="text-sm font-black text-white uppercase tracking-[0.25em] italic">Knowledge Reference Portal</h3>
+                <p className="text-[11px] text-slate-400 font-mono uppercase tracking-widest leading-relaxed">
+                  Use the Sidebar Library Tab to ingest, manage, and audit proprietary geological database shards.
+                </p>
+              </div>
+              <div className="w-full h-px bg-slate-800/80" />
+              <div className="flex items-center justify-center gap-6 text-[9px] text-slate-600 font-mono uppercase tracking-widest">
+                <span>PDF Ingestion</span>
+                <span>•</span>
+                <span>DOCX Extraction</span>
+                <span>•</span>
+                <span>Structured DB</span>
+              </div>
+            </div>
           </div>
         )}
       </div>
