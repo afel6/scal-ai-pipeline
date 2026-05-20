@@ -7,15 +7,17 @@ services:
     startCommand: "uvicorn app:app --host 0.0.0.0 --port $PORT"
     healthCheckPath: /health
     # Persistent disk keeps chat_history.db across deploys and restarts.
-    # Render's CWD for Python services is /opt/render/project/src — mount there
-    # so the SQLite file at its default path survives every redeploy.
+    # Mount to /data (NOT /opt/render/project/src which is the source dir).
+    # app.py uses DB_DIR env var to locate the database file.
     disk:
       name: chat-db
-      mountPath: /opt/render/project/src
-      sizeGb: 1
+      mountPath: /data
+      sizeGB: 1
     envVars:
       - key: PYTHON_VERSION
         value: "3.11.0"
+      - key: DB_DIR
+        value: "/data"
       - key: DATABASE_URL
         sync: false
       - key: GEMINI_API_KEY

@@ -145,7 +145,7 @@ _ADMIN_TOKEN_TTL: int              = 900  # 15 min
 
 DATABASE_URL  = os.getenv("DATABASE_URL", "").strip()
 
-DB_PATH       = "chat_history.db"
+DB_PATH       = os.path.join(os.getenv("DB_DIR", "."), "chat_history.db")
 
 
 
