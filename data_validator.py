@@ -62,13 +62,8 @@ def validate_scal_data(json_data: List[Dict[str, Any]]) -> dict:
                 errors.append(f"{prefix}: Pressure_psi must be a number.")
             else:
                 if previous_pressure is not None and pressure <= previous_pressure:
-                    if pressure < previous_pressure:
-                        # New sweep detected (pressure decreased) - reset previous_pressure
-                        previous_pressure = pressure
-                    else:
-                        errors.append(f"{prefix}: Pressure_psi must be strictly increasing (previous={previous_pressure}, current={pressure}).")
-                else:
-                    previous_pressure = pressure
+                    errors.append(f"{prefix}: Pressure_psi must be strictly increasing (previous={previous_pressure}, current={pressure}).")
+                previous_pressure = pressure
 
     if errors:
         return {
