@@ -640,11 +640,11 @@ export default function App() {
               </div>
             )}
 
-            <main className="flex-1 overflow-y-auto px-3 py-4 md:px-6 md:py-6 space-y-4">
+            <main className="flex-1 min-w-0 overflow-y-auto overflow-x-hidden px-3 py-4 md:px-6 md:py-6 space-y-4">
               {messages.map((msg, idx) => (
                 <div
                   key={idx}
-                  className={`flex gap-3 ${msg.role === 'user' ? 'flex-row-reverse' : ''} max-w-5xl ${msg.role === 'user' ? 'ml-auto' : 'mr-auto'} w-full msg-bubble`}
+                  className={`flex gap-3 ${msg.role === 'user' ? 'flex-row-reverse' : ''} max-w-5xl ${msg.role === 'user' ? 'ml-auto' : 'mr-auto'} w-full msg-bubble min-w-0`}
                   style={{ animationDelay: `${Math.min(idx, 5) * 0.1}s` }}
                 >
                   {/* Avatar */}
@@ -659,7 +659,7 @@ export default function App() {
                   </div>
 
                   {/* Bubble */}
-                  <div className={`px-4 py-3.5 text-sm md:text-[15px] leading-relaxed shadow-xl max-w-[85%] transition-all
+                  <div className={`px-4 py-3.5 text-sm md:text-[15px] leading-relaxed shadow-xl w-full max-w-[85%] min-w-0 break-words transition-all
                     ${msg.role === 'user'
                       ? 'bg-slate-800/85 backdrop-blur-sm text-slate-200 rounded-2xl rounded-tr-none border border-slate-700/40 shadow-black/40'
                       : 'bg-[#0e0e12]/95 backdrop-blur-sm text-yellow-50/95 rounded-2xl rounded-tl-none border border-yellow-900/20 shadow-black/60 shadow-[inset_0_1px_0_rgba(255,255,255,0.02)]'}`}

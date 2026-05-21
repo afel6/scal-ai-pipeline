@@ -92,37 +92,378 @@ class HvielDocEngine:
         self.output_dir = output_dir
         os.makedirs(output_dir, exist_ok=True)
 
-    def _draw_chart_for_doc(self, data: dict) -> io.BytesIO | None:
-        """Creates a chart image buffer suitable for injection into DOC/PPT/PDF."""
+    def _extract_json_payload(self, text: str) -> tuple[dict, str]:
+        """
+        Extracts the JSON payload from a __PRC_PLOT__ tag using a bracket-counting parser,
+        and returns a tuple of (parsed_dict, trailing_text).
+        """
+        if '__PRC_PLOT__' not in text:
+            return {}, text
+            
+        parts = text.split('__PRC_PLOT__', 1)
+        leading_text = parts[0].strip()
+        rest = parts[1].strip()
+        
+        # Clean potential markdown block prefix
+        if rest.startswith('```json'):
+            rest = rest[7:].strip()
+        elif rest.startswith('```'):
+            rest = rest[3:].strip()
+            
+        # Find the starting brace
+        start_idx = rest.find('{')
+        if start_idx == -1:
+            return {}, text
+            
+        brace_count = 0
+        in_string = False
+        escape_next = False
+        end_idx = -1
+        
+        for i in range(start_idx, len(rest)):
+            char = rest[i]
+            
+            if escape_next:
+                escape_next = False
+                continue
+                
+            if char == '\\':
+                escape_next = True
+                continue
+                
+            if char == '"':
+                in_string = not in_string
+                continue
+                
+            if not in_string:
+                if char == '{':
+                    brace_count += 1
+                elif char == '}':
+                    brace_count -= 1
+                    if brace_count == 0:
+                        end_idx = i
+                        break
+                        
+        if end_idx == -1:
+            try:
+                return json.loads(rest), ""
+            except Exception:
+                return {}, text
+                
+        json_str = rest[start_idx:end_idx+1]
+        trailing_text = rest[end_idx+1:].strip()
+        
+        if trailing_text.startswith('```'):
+            trailing_text = trailing_text[3:].strip()
+            
         try:
-            fig, ax = plt.subplots(figsize=(7, 4.5), dpi=150)
-            plt.style.use('bmh')
-            # Use professional white background for reports
-            fig.patch.set_facecolor('white')
-            ax.set_facecolor('#fdfdfd')
-            
+            plot_data = json.loads(json_str)
+            return plot_data, trailing_text
+        except Exception as e:
+            _logger.warning("JSON parse failed in bracket counting: %s", e)
+            return {}, text
+
+    def _draw_chart_for_doc(self, data: dict) -> io.BytesIO | None:
+        """Creates a premium, physics-aware chart image buffer suitable for injection into DOCX."""
+        import numpy as np
+        try:
             title  = data.get('title', 'PRC Analysis')
-            xlabel = data.get('x_label', 'X')
-            ylabel = data.get('y_label', 'Y')
-
-            curves = data.get('curves')
-            if curves and isinstance(curves, list):
-                for i, curve in enumerate(curves):
-                    ax.plot(curve.get('x', []), curve.get('y', []),
-                            marker='o', linestyle='-', linewidth=2.5, markersize=7,
-                            color=_PRC_COLORS[i % len(_PRC_COLORS)], label=curve.get('label', f'Series {i+1}'))
-                ax.legend(fontsize=9, framealpha=0.85)
-            else:
-                ax.plot(data.get('x', []), data.get('y', []),
-                        marker='o', linestyle='-', color='#1e3a8a', linewidth=2.5, markersize=8)
-
-            ax.set_title(title, fontsize=15, fontweight='bold', color='#1B3A5C')
-            ax.set_xlabel(xlabel, fontsize=11, fontweight='bold')
-            ax.set_ylabel(ylabel, fontsize=11, fontweight='bold')
-            ax.grid(True, linestyle='--', alpha=0.4)
+            xAxis_cfg = data.get('xAxis') or {}
+            yAxis_cfg = data.get('yAxis') or {}
+            yAxis2_cfg = data.get('yAxis2') or {}
             
+            xlabel = xAxis_cfg.get('label') or data.get('x_label') or 'X'
+            ylabel = yAxis_cfg.get('label') or data.get('y_label') or 'Y'
+            ylabel2 = yAxis2_cfg.get('label') or data.get('y_label2') or ''
+            
+            # 1. Detect if axes are logarithmic
+            x_is_log = False
+            y_is_log = False
+            y2_is_log = False
+            
+            if data.get('xAxisLog') or xAxis_cfg.get('log'):
+                x_is_log = True
+            if data.get('yAxisLog') or yAxis_cfg.get('log'):
+                y_is_log = True
+            if data.get('yAxisRightLog') or yAxis2_cfg.get('log'):
+                y2_is_log = True
+                
+            def check_log_label(lbl):
+                if not lbl:
+                    return False
+                l_str = str(lbl).lower()
+                if "relative permeability" in l_str or " kr" in l_str or "kr " in l_str or l_str.startswith("kr"):
+                    return False
+                keywords = ["permeability", "pc (", "capillary pressure", "resistivity index", "formation factor", "fzi", "rqi"]
+                return any(kw in l_str for kw in keywords)
+                
+            if check_log_label(xlabel):
+                x_is_log = True
+            if check_log_label(ylabel):
+                y_is_log = True
+            if ylabel2 and check_log_label(ylabel2):
+                y2_is_log = True
+
+            # Extract and build curves
+            curves = []
+            if 'curves' in data and isinstance(data['curves'], list):
+                for c in data['curves']:
+                    x_data = c.get('x') or [p.get('x') for p in c.get('data', [])]
+                    y_data = c.get('y') or [p.get('y') for p in c.get('data', [])]
+                    curves.append({
+                        'name': c.get('name') or c.get('label') or 'Series',
+                        'x': x_data,
+                        'y': y_data,
+                        'showLine': c.get('showLine', True),
+                        'showPoints': c.get('showPoints', True),
+                        'color': c.get('color'),
+                        'yId': c.get('yId', 'left')
+                    })
+            elif 'samples' in data and isinstance(data['samples'], dict):
+                for s_name, s_data in data['samples'].items():
+                    drainage = s_data.get('drainage', {})
+                    x_data = drainage.get('sat_pv') or drainage.get('x', [])
+                    y_data = drainage.get('pressure') or drainage.get('y', [])
+                    if x_data and y_data:
+                        curves.append({
+                            'name': s_name,
+                            'x': x_data,
+                            'y': y_data,
+                            'showLine': True,
+                            'showPoints': True,
+                            'color': None,
+                            'yId': 'left'
+                        })
+            elif 'x' in data and 'y' in data:
+                curves.append({
+                    'name': data.get('title', 'Series'),
+                    'x': data['x'],
+                    'y': data['y'],
+                    'showLine': True,
+                    'showPoints': True,
+                    'color': None,
+                    'yId': 'left'
+                })
+
+            if not curves:
+                return None
+
+            # Filter out invalid and non-positive points for log scales
+            all_left_x, all_left_y = [], []
+            all_right_x, all_right_y = [], []
+            
+            has_right_axis = data.get('dualAxis', False) or any(c.get('yId') == 'right' for c in curves) or bool(ylabel2)
+            
+            for curve in curves:
+                filtered_x = []
+                filtered_y = []
+                cur_y_is_log = y2_is_log if (curve['yId'] == 'right' and has_right_axis) else y_is_log
+                
+                for xi, yi in zip(curve['x'], curve['y']):
+                    try:
+                        if xi is None or yi is None:
+                            continue
+                        xf = float(xi)
+                        yf = float(yi)
+                        if x_is_log and xf <= 0:
+                            continue
+                        if cur_y_is_log and yf <= 0:
+                            continue
+                        filtered_x.append(xf)
+                        filtered_y.append(yf)
+                    except (ValueError, TypeError):
+                        continue
+                curve['x_filtered'] = filtered_x
+                curve['y_filtered'] = filtered_y
+                
+                if curve['yId'] == 'right' and has_right_axis:
+                    all_right_x.extend(filtered_x)
+                    all_right_y.extend(filtered_y)
+                else:
+                    all_left_x.extend(filtered_x)
+                    all_left_y.extend(filtered_y)
+
+            # Plot setup
+            fig, ax1 = plt.subplots(figsize=(7, 4.5), dpi=150)
+            plt.style.use('bmh')
+            fig.patch.set_facecolor('white')
+            ax1.set_facecolor('#ffffff')
+            
+            ax2 = None
+            if has_right_axis:
+                ax2 = ax1.twinx()
+                ax2.set_facecolor('none')
+
+            # Color Palette
+            _PRC_COLORS = ['#1B3A5C', '#C0392B', '#2E7D32', '#E65100', '#6A1B9A', '#00838F']
+            
+            # Plot curves
+            for i, curve in enumerate(curves):
+                x = curve['x_filtered']
+                y = curve['y_filtered']
+                if not x or not y:
+                    continue
+                    
+                label = curve['name']
+                color = curve['color'] or _PRC_COLORS[i % len(_PRC_COLORS)]
+                show_line = curve['showLine']
+                show_points = curve['showPoints']
+                
+                target_ax = ax2 if (curve['yId'] == 'right' and ax2) else ax1
+                
+                # Determine line style and markers
+                if not show_line:
+                    # Core sample routine - scatter plot with transparency and no line
+                    target_ax.scatter(x, y, color=color, label=label, alpha=0.6, s=40, edgecolors='none', zorder=3)
+                elif show_line and show_points:
+                    target_ax.plot(x, y, marker='o', linestyle='-', linewidth=2.0, markersize=5, color=color, label=label, alpha=0.9, zorder=4)
+                else:
+                    target_ax.plot(x, y, linestyle='-', linewidth=2.0, color=color, label=label, alpha=0.9, zorder=4)
+
+            # Apply logarithmic scale if needed
+            if x_is_log:
+                ax1.set_xscale('log')
+            if y_is_log:
+                ax1.set_yscale('log')
+            if y2_is_log and ax2:
+                ax2.set_yscale('log')
+
+            # X-axis limits and 5% padding
+            is_sat_x = "saturation" in xlabel.lower() or "sw" in xlabel.lower() or "fraction" in xlabel.lower()
+            x_min_lim, x_max_lim = None, None
+            
+            if xAxis_cfg.get('domain') and isinstance(xAxis_cfg['domain'], list) and len(xAxis_cfg['domain']) == 2:
+                try:
+                    x_min_lim = float(xAxis_cfg['domain'][0])
+                    x_max_lim = float(xAxis_cfg['domain'][1])
+                except (ValueError, TypeError):
+                    pass
+                    
+            if x_min_lim is None or x_max_lim is None:
+                combined_x = all_left_x + all_right_x
+                if combined_x:
+                    if x_is_log:
+                        combined_x = [v for v in combined_x if v > 0]
+                        if combined_x:
+                            vmin, vmax = min(combined_x), max(combined_x)
+                            if vmin == vmax:
+                                x_min_lim, x_max_lim = vmin * 0.1, vmax * 10.0
+                            else:
+                                lmin, lmax = np.log10(vmin), np.log10(vmax)
+                                diff = lmax - lmin
+                                x_min_lim = 10 ** (lmin - 0.05 * diff)
+                                x_max_lim = 10 ** (lmax + 0.05 * diff)
+                    else:
+                        vmin, vmax = min(combined_x), max(combined_x)
+                        if is_sat_x and vmin >= 0 and vmax <= 1.05:
+                            x_min_lim, x_max_lim = -0.02, 1.02
+                        else:
+                            if vmin == vmax:
+                                x_min_lim, x_max_lim = vmin - 1.0, vmax + 1.0
+                            else:
+                                diff = vmax - vmin
+                                x_min_lim = vmin - 0.05 * diff
+                                x_max_lim = vmax + 0.05 * diff
+
+            if x_min_lim is not None and x_max_lim is not None:
+                ax1.set_xlim(x_min_lim, x_max_lim)
+
+            # Primary Y-axis limits
+            is_sat_y = "saturation" in ylabel.lower() or "sw" in ylabel.lower() or "fraction" in ylabel.lower()
+            y_min_lim, y_max_lim = None, None
+            
+            if yAxis_cfg.get('domain') and isinstance(yAxis_cfg['domain'], list) and len(yAxis_cfg['domain']) == 2:
+                try:
+                    y_min_lim = float(yAxis_cfg['domain'][0])
+                    y_max_lim = float(yAxis_cfg['domain'][1])
+                except (ValueError, TypeError):
+                    pass
+                    
+            if y_min_lim is None or y_max_lim is None:
+                if all_left_y:
+                    if y_is_log:
+                        all_left_y = [v for v in all_left_y if v > 0]
+                        if all_left_y:
+                            vmin, vmax = min(all_left_y), max(all_left_y)
+                            if vmin == vmax:
+                                y_min_lim, y_max_lim = vmin * 0.1, vmax * 10.0
+                            else:
+                                lmin, lmax = np.log10(vmin), np.log10(vmax)
+                                diff = lmax - lmin
+                                y_min_lim = 10 ** (lmin - 0.05 * diff)
+                                y_max_lim = 10 ** (lmax + 0.05 * diff)
+                    else:
+                        vmin, vmax = min(all_left_y), max(all_left_y)
+                        if is_sat_y and vmin >= 0 and vmax <= 1.05:
+                            y_min_lim, y_max_lim = -0.02, 1.02
+                        else:
+                            if vmin == vmax:
+                                y_min_lim, y_max_lim = vmin - 1.0, vmax + 1.0
+                            else:
+                                diff = vmax - vmin
+                                y_min_lim = vmin - 0.05 * diff
+                                y_max_lim = vmax + 0.05 * diff
+                                
+            if y_min_lim is not None and y_max_lim is not None:
+                ax1.set_ylim(y_min_lim, y_max_lim)
+
+            # Secondary Y-axis limits
+            if ax2 and all_right_y:
+                y2_min_lim, y2_max_lim = None, None
+                if yAxis2_cfg.get('domain') and isinstance(yAxis2_cfg['domain'], list) and len(yAxis2_cfg['domain']) == 2:
+                    try:
+                        y2_min_lim = float(yAxis2_cfg['domain'][0])
+                        y2_max_lim = float(yAxis2_cfg['domain'][1])
+                    except (ValueError, TypeError):
+                        pass
+                if y2_min_lim is None or y2_max_lim is None:
+                    if y2_is_log:
+                        all_right_y = [v for v in all_right_y if v > 0]
+                        if all_right_y:
+                            vmin, vmax = min(all_right_y), max(all_right_y)
+                            if vmin == vmax:
+                                y2_min_lim, y2_max_lim = vmin * 0.1, vmax * 10.0
+                            else:
+                                lmin, lmax = np.log10(vmin), np.log10(vmax)
+                                diff = lmax - lmin
+                                y2_min_lim = 10 ** (lmin - 0.05 * diff)
+                                y2_max_lim = 10 ** (lmax + 0.05 * diff)
+                    else:
+                        vmin, vmax = min(all_right_y), max(all_right_y)
+                        if vmin == vmax:
+                            y2_min_lim, y2_max_lim = vmin - 1.0, vmax + 1.0
+                        else:
+                            diff = vmax - vmin
+                            y2_min_lim = vmin - 0.05 * diff
+                            y2_max_lim = vmax + 0.05 * diff
+                if y2_min_lim is not None and y2_max_lim is not None:
+                    ax2.set_ylim(y2_min_lim, y2_max_lim)
+
+            # Titles and labels
+            ax1.set_title(title, fontsize=13, fontweight='bold', color='#1B3A5C', pad=15)
+            ax1.set_xlabel(xlabel, fontsize=10, fontweight='bold', color='#333333')
+            ax1.set_ylabel(ylabel, fontsize=10, fontweight='bold', color='#333333')
+            if ax2 and ylabel2:
+                ax2.set_ylabel(ylabel2, fontsize=10, fontweight='bold', color='#333333')
+
+            # Grids and styling
+            ax1.grid(True, which='both', linestyle='--', color='#E0E0E0', linewidth=0.5, alpha=0.8)
+            if ax2:
+                ax2.grid(False)
+
+            # Combine legends
+            h1, l1 = ax1.get_legend_handles_labels()
+            h2, l2 = ax2.get_legend_handles_labels() if ax2 else ([], [])
+            if h1 + h2:
+                ax1.legend(h1 + h2, l1 + l2, loc='best', framealpha=0.9, fontsize=8.5, facecolor='white', edgecolor='#CCCCCC')
+
+            # Remove extra spines
+            for ax in [ax1, ax2] if ax2 else [ax1]:
+                ax.spines['top'].set_visible(False)
+                ax.tick_params(axis='both', which='both', labelsize=9)
+
             buf = io.BytesIO()
-            fig.savefig(buf, format='png', bbox_inches='tight')
+            fig.savefig(buf, format='png', bbox_inches='tight', dpi=150)
             plt.close(fig)
             buf.seek(0)
             return buf
@@ -469,23 +810,29 @@ class HvielDocEngine:
                 # Plot detection — triggers chart injection
                 if '__PRC_PLOT__' in para_str:
                     try:
-                        # Extract the JSON payload for the plot
-                        plot_json_str = para_str.split('__PRC_PLOT__', 1)[1].strip()
-                        # Clean potential markdown fences
-                        plot_json_str = plot_json_str.replace('```json', '').replace('```', '').strip()
-                        chart_data = json.loads(plot_json_str)
-                        
-                        buf = self._draw_chart_for_doc(chart_data)
-                        if buf:
-                            p = doc.add_paragraph()
-                            p.alignment = WD_ALIGN_PARAGRAPH.CENTER
-                            p.add_run().add_picture(buf, width=Inches(6.0))
-                            # Add a professional caption
-                            cp = doc.add_paragraph()
-                            cp.alignment = WD_ALIGN_PARAGRAPH.CENTER
-                            cr = cp.add_run(f"Figure: {chart_data.get('title', 'Petrophysical Analysis')}")
-                            cr.italic = True; cr.font.size = Pt(9); cr.font.color.rgb = GRAY_RGB
-                            continue # Skip adding the raw JSON as a paragraph
+                        # Extract the JSON payload and trailing text
+                        chart_data, trailing_text = self._extract_json_payload(para_str)
+                        if chart_data:
+                            buf = self._draw_chart_for_doc(chart_data)
+                            if buf:
+                                p = doc.add_paragraph()
+                                p.alignment = WD_ALIGN_PARAGRAPH.CENTER
+                                p.add_run().add_picture(buf, width=Inches(6.0))
+                                # Add a professional caption
+                                cp = doc.add_paragraph()
+                                cp.alignment = WD_ALIGN_PARAGRAPH.CENTER
+                                cr = cp.add_run(f"Figure: {chart_data.get('title', 'Petrophysical Analysis')}")
+                                cr.italic = True; cr.font.size = Pt(9); cr.font.color.rgb = GRAY_RGB
+                                
+                                # If there is trailing commentary text, add it as a separate italicized paragraph
+                                if trailing_text:
+                                    tp = doc.add_paragraph()
+                                    tp.paragraph_format.space_after = Pt(12)
+                                    tp.paragraph_format.line_spacing = 1.15
+                                    tr = tp.add_run(trailing_text)
+                                    tr.font.name = 'Arial'; tr.font.size = Pt(10.5); tr.font.color.rgb = GRAY_RGB
+                                    tr.italic = True
+                                continue # Skip adding the raw JSON as a paragraph
                     except Exception as pe:
                         _logger.warning("Skipping plot injection: %s", pe)
 

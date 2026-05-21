@@ -290,3 +290,25 @@ body {
   100% { box-shadow: 0 0 0 0   rgba(251, 191, 36, 0);   }
 }
 .btn-streaming { animation: send-pulse 1.5s infinite; }
+
+/* ── Markdown Wrap & Overflow Fixes ─────────────────────────────────────── */
+.prc-markdown {
+  word-break: break-word !important;
+  overflow-wrap: break-word !important;
+  white-space: pre-wrap !important;
+  min-width: 0 !important;
+  max-width: 100% !important;
+}
+
+.prc-markdown p {
+  word-break: break-word !important;
+  overflow-wrap: break-word !important;
+  white-space: pre-wrap !important;
+}
+
+.prc-markdown table {
+  max-width: 100% !important;
+  overflow-x: auto !important;
+  display: block !important;
+}
+

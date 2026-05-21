@@ -3,7 +3,7 @@
 // Industrial-grade SCAL curve renderer.
 // Supports Kr, MICP Pc/PSD, RI (log-log), FF (log-log), J-Function, Pc-centrifuge, Overburden.
 
-import React, { useMemo, useState } from 'react';
+import React, { useMemo, useState, useEffect } from 'react';
 import {
   ComposedChart, Line, Scatter,
   XAxis, YAxis, CartesianGrid, Tooltip,
@@ -252,6 +252,12 @@ const ParamPanel = ({ fit_params, endpoints, archie, jfunction }) => {
 // ── MAIN COMPONENT ─────────────────────────────────────────────────────────────
 export default function KrCurvePlot({ plotData }) {
   const [hiddenCurves, setHiddenCurves] = useState(new Set());
+  const [isMounted, setIsMounted] = useState(false);
+
+  useEffect(() => {
+    const id = requestAnimationFrame(() => setIsMounted(true));
+    return () => cancelAnimationFrame(id);
+  }, []);
 
   const data = useMemo(() => {
     try { return typeof plotData === 'string' ? JSON.parse(plotData) : plotData; }
@@ -260,29 +266,27 @@ export default function KrCurvePlot({ plotData }) {
 
   const { lineChartData, lineSeries } = useMemo(() => {
     if (!data?.curves) return { lineChartData: [], lineSeries: [] };
-    const lines = data.curves.filter(c => c.showLine !== false);
     const xMap = {};
-    lines.forEach((curve) => {
+    data.curves.forEach((curve) => {
       const gIdx = data.curves.indexOf(curve);
-      curve.data.forEach(pt => {
-        const key = pt.x.toFixed(6);
-        if (!xMap[key]) xMap[key] = { x: pt.x };
-        xMap[key][`line_${gIdx}`] = pt.y;
-      });
+      if (curve.data) {
+        curve.data.forEach(pt => {
+          const key = pt.x.toFixed(6);
+          if (!xMap[key]) xMap[key] = { x: pt.x };
+          if (curve.showLine !== false) {
+            xMap[key][`line_${gIdx}`] = pt.y;
+          }
+        });
+      }
     });
     return {
       lineChartData: Object.values(xMap).sort((a, b) => a.x - b.x),
-      lineSeries:    lines,
+      lineSeries:    data.curves.filter(c => c.showLine !== false),
     };
   }, [data]);
 
   if (!data?.curves) {
-    return (
-      <div className="p-10 bg-red-950/10 border border-red-900/30 rounded-2xl text-red-400 text-xs font-mono flex flex-col items-center gap-4">
-        <Activity className="w-10 h-10 opacity-40" />
-        <span className="uppercase tracking-widest font-black text-center">PRC Curve Engine — Parse Failure</span>
-      </div>
-    );
+    return null;
   }
 
   const meta        = data.metadata || {};
@@ -305,6 +309,94 @@ export default function KrCurvePlot({ plotData }) {
 
   const xLabel = data.xAxis?.label || 'x';
 
+  // Dynamic log scale bounds clamps
+  const computedXDomain = useMemo(() => {
+    const d = data.xAxis?.domain;
+    if (d) {
+      if (!xLog) return d;
+      const minVal = parseFloat(d[0]);
+      const maxVal = parseFloat(d[1]);
+      if (!isNaN(minVal) && minVal > 0 && !isNaN(maxVal) && maxVal > 0) {
+        return d;
+      }
+    }
+    if (!xLog) return [0, 'auto'];
+    
+    let minVal = Infinity;
+    let maxVal = -Infinity;
+    data.curves.forEach(curve => {
+      if (curve.data) {
+        curve.data.forEach(pt => {
+          const x = parseFloat(pt.x);
+          if (!isNaN(x) && x > 0) {
+            if (x < minVal) minVal = x;
+            if (x > maxVal) maxVal = x;
+          }
+        });
+      }
+    });
+    if (minVal === Infinity || maxVal === -Infinity) return [0.001, 100];
+    return [minVal * 0.9, maxVal * 1.1];
+  }, [data, xLog]);
+
+  const computedYDomain = useMemo(() => {
+    const d = data.yAxis?.domain;
+    if (d) {
+      if (!yLog) return d;
+      const minVal = parseFloat(d[0]);
+      const maxVal = parseFloat(d[1]);
+      if (!isNaN(minVal) && minVal > 0 && !isNaN(maxVal) && maxVal > 0) {
+        return d;
+      }
+    }
+    if (!yLog) return [0, 'auto'];
+
+    let minVal = Infinity;
+    let maxVal = -Infinity;
+    data.curves.forEach(curve => {
+      if (curve.yId !== 'right' && curve.data) {
+        curve.data.forEach(pt => {
+          const y = parseFloat(pt.y);
+          if (!isNaN(y) && y > 0) {
+            if (y < minVal) minVal = y;
+            if (y > maxVal) maxVal = y;
+          }
+        });
+      }
+    });
+    if (minVal === Infinity || maxVal === -Infinity) return [0.001, 100];
+    return [minVal * 0.9, maxVal * 1.1];
+  }, [data, yLog]);
+
+  const computedY2Domain = useMemo(() => {
+    const d = data.yAxis2?.domain;
+    if (d) {
+      if (!yRightLog) return d;
+      const minVal = parseFloat(d[0]);
+      const maxVal = parseFloat(d[1]);
+      if (!isNaN(minVal) && minVal > 0 && !isNaN(maxVal) && maxVal > 0) {
+        return d;
+      }
+    }
+    if (!yRightLog) return [0, 'auto'];
+
+    let minVal = Infinity;
+    let maxVal = -Infinity;
+    data.curves.forEach(curve => {
+      if (curve.yId === 'right' && curve.data) {
+        curve.data.forEach(pt => {
+          const y = parseFloat(pt.y);
+          if (!isNaN(y) && y > 0) {
+            if (y < minVal) minVal = y;
+            if (y > maxVal) maxVal = y;
+          }
+        });
+      }
+    });
+    if (minVal === Infinity || maxVal === -Infinity) return [0.001, 100];
+    return [minVal * 0.9, maxVal * 1.1];
+  }, [data, yRightLog]);
+
   const toggleCurve = name => {
     setHiddenCurves(prev => {
       const next = new Set(prev);
@@ -314,7 +406,7 @@ export default function KrCurvePlot({ plotData }) {
   };
 
   return (
-    <div className="my-10 rounded-[2.5rem] border border-white/5 bg-[#04040a] shadow-[0_40px_80px_-20px_rgba(0,0,0,0.95)] overflow-hidden">
+    <div className="my-10 rounded-[2.5rem] border border-white/5 bg-[#04040a] shadow-[0_40px_80px_-20px_rgba(0,0,0,0.95)] overflow-hidden w-full max-w-full min-w-0">
       <div className="px-8 pt-8 pb-6 border-b border-white/5 bg-gradient-to-b from-white/[0.025] to-transparent">
         <div className="flex flex-wrap items-start justify-between gap-4">
           <div>
@@ -354,17 +446,18 @@ export default function KrCurvePlot({ plotData }) {
         )}
       </div>
 
-      <div className="px-6 py-8 relative">
+      <div className="px-6 py-8 relative w-full h-[450px] min-h-[450px] overflow-hidden">
         <div className="absolute inset-0 opacity-[0.018] pointer-events-none" style={{ backgroundImage: 'radial-gradient(circle, #fff 1px, transparent 1px)', backgroundSize: '28px 28px' }} />
-        <ResponsiveContainer width="100%" height={420}>
+        {isMounted ? (
+          <ResponsiveContainer width="100%" height="100%">
           <ComposedChart data={lineChartData} margin={{ top: 10, right: 60, bottom: 48, left: 10 }}>
             <CartesianGrid strokeDasharray="2 4" stroke="#ffffff06" vertical={false} />
             <XAxis
               dataKey="x"
               type="number"
               scale={xLog ? 'log' : 'linear'}
-              domain={xLog ? ['auto', 'auto'] : [0, 'auto']}
-              allowDataOverflow={xLog}
+              domain={computedXDomain}
+              allowDataOverflow={xLog || !!data.xAxis?.domain}
               stroke="#ffffff10"
               tick={{ fontSize: 10, fill: '#475569', fontFamily: 'monospace' }}
               tickFormatter={xTickFmt}
@@ -373,8 +466,8 @@ export default function KrCurvePlot({ plotData }) {
             <YAxis
               yAxisId="left"
               scale={yLog ? 'log' : 'linear'}
-              domain={yLog ? ['auto', 'auto'] : [0, 'auto']}
-              allowDataOverflow={yLog}
+              domain={computedYDomain}
+              allowDataOverflow={yLog || !!data.yAxis?.domain}
               stroke="#38bdf830"
               tick={{ fontSize: 10, fill: '#38bdf8', fontFamily: 'monospace' }}
               tickFormatter={yTickFmt}
@@ -385,8 +478,8 @@ export default function KrCurvePlot({ plotData }) {
                 yAxisId="right"
                 orientation="right"
                 scale={yRightLog ? 'log' : 'linear'}
-                domain={yRightLog ? ['auto', 'auto'] : [0, 'auto']}
-                allowDataOverflow={yRightLog}
+                domain={computedY2Domain}
+                allowDataOverflow={yRightLog || !!data.yAxis2?.domain}
                 stroke="#fb923c30"
                 tick={{ fontSize: 10, fill: '#fb923c', fontFamily: 'monospace' }}
                 tickFormatter={yRTickFmt}
@@ -429,15 +522,20 @@ export default function KrCurvePlot({ plotData }) {
                   data={curve.data}
                   dataKey="y"
                   fill={curve.color}
-                  fillOpacity={opacity}
+                  fillOpacity={opacity * 0.85}
                   stroke="#04040a"
-                  strokeWidth={1.5}
-                  r={5}
+                  strokeWidth={1}
+                  r={curve.data && curve.data.length > 20 ? 3 : 4}
                 />
               );
             })}
           </ComposedChart>
         </ResponsiveContainer>
+        ) : (
+          <div className="w-full h-full flex items-center justify-center text-slate-500 font-mono text-xs animate-pulse">
+            Initializing chart engine...
+          </div>
+        )}
       </div>
 
       {/* ── INTERACTIVE LEGEND ─────────────────────────────────────────────────── */}

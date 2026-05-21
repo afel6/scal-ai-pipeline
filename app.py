@@ -853,7 +853,7 @@ _HVIEL_TOOLS = [
 
                         "script": {"type": "STRING", "description": "One of: petrophysics.py, micp_skill.py, centrifuge_skill.py"},
 
-                        "model":  {"type": "STRING", "description": "For petrophysics.py: regress_archie_m_a, regress_archie_n, rqi_fzi. For centrifuge: pc_only, full, hassler_brunner"},
+                        "model":  {"type": "STRING", "description": "For petrophysics.py: regress_archie_m_a, regress_archie_n, rqi_fzi. For centrifuge: pc_only, full, hassler_brunner. rqi_fzi params: {phi: [fractions 0-1], perm: [mD], depth: [optional array]}. Returns full per-sample table with HU classification."},
 
                         "params": {"type": "OBJECT", "description": "Parameters required for the selected script and model."}
 
@@ -961,6 +961,10 @@ _HVIEL_TOOLS = [
 
                     "  model='overburden'  ->  Compaction curves (pass pressure=[psia], porosity=[...], perm=[mD]). Dual-axis.\n"
 
+                    "  model='poroperm'  ->  Porosity vs Permeability cross-plot with log-linear fit (pass porosity=[...], perm=[mD]).\n"
+
+                    "  model='poroperm_depth'  ->  Porosity & Permeability vs Depth (pass depth=[...], porosity=[...], perm=[mD]). Dual-axis.\n"
+
                     "Pass sample_name='Core-1' to label multi-sample charts."
 
                 ),
@@ -996,6 +1000,8 @@ _HVIEL_TOOLS = [
                         "perm":          {"type": "ARRAY", "items": {"type": "NUMBER"}},
 
                         "pressure":      {"type": "ARRAY", "items": {"type": "NUMBER"}},
+
+                        "depth":         {"type": "ARRAY", "items": {"type": "NUMBER"}},
 
                         "k_md":          {"type": "NUMBER"},
 
@@ -1358,7 +1364,7 @@ class PRCChatAssistant:
 
             model = args.get("model", "")
 
-            if model in ("micp", "ri", "ff", "jfunction", "pc_centrifuge", "overburden"):
+            if model in ("micp", "ri", "ff", "jfunction", "pc_centrifuge", "overburden", "poroperm", "poroperm_depth"):
 
                 # All analytic models: computation fully handled by _format_tool_response using args
 
@@ -2039,7 +2045,7 @@ class PRCChatAssistant:
 
 
 
-            # â"€â"€ OVERBURDEN COMPACTION (dual-axis: Ï† left, k right log-scale) â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€
+            # ── OVERBURDEN COMPACTION (dual-axis: φ left, k right log-scale) ──────────
 
             if name == "fit_petrophysical_curve" and args.get("model") == "overburden":
 
@@ -2065,7 +2071,7 @@ class PRCChatAssistant:
 
                         curves.append({
 
-                            "name": f"Porosity Ï† ({sample})", "showLine": True, "showPoints": True,
+                            "name": f"Porosity φ ({sample})", "showLine": True, "showPoints": True,
 
                             "color": "#38bdf8", "yId": "left",
 
@@ -2089,13 +2095,13 @@ class PRCChatAssistant:
 
                     plot_ob = {
 
-                        "title":         f"Overburden Compaction  -  Ï† & k vs Net Stress ({sample})",
+                        "title":         f"Overburden Compaction  -  φ & k vs Net Stress ({sample})",
 
-                        "xAxis":         {"label": "Net Confining Pressure (psia)"},
+                        "xAxis":         {"label": "Net Confining Pressure (psia)", "domain": ["auto", "auto"]},
 
-                        "yAxis":         {"label": "Porosity Ï† (fraction)"},
+                        "yAxis":         {"label": "Porosity φ (fraction)", "domain": ["auto", "auto"]},
 
-                        "yAxis2":        {"label": "Permeability k (mD)"},
+                        "yAxis2":        {"label": "Permeability k (mD)", "domain": ["auto", "auto"]},
 
                         "dualAxis":      True,
 
@@ -2105,9 +2111,205 @@ class PRCChatAssistant:
 
                     }
 
-                    summary = (f"Pressure range: {float(pres_a.min()):.0f} â€“ {float(pres_a.max()):.0f} psia")
+                    summary = (f"Pressure range: {float(pres_a.min()):.0f} – {float(pres_a.max()):.0f} psia")
 
                     return (f"__PRC_PLOT__\n{_safe_json_dumps(plot_ob)}\n\n")
+
+                else:
+                    if len(phi_raw) > 1 and len(perm_raw) > 1:
+                        is_depth_like = any(p > 100 for p in pres_raw) if pres_raw else False
+                        if is_depth_like:
+                            args["model"] = "poroperm_depth"
+                            if len(pres_raw) == 1:
+                                try:
+                                    start_depth = float(pres_raw[0])
+                                except ValueError:
+                                    start_depth = 1000.0
+                                args["depth"] = [start_depth + i for i in range(len(phi_raw))]
+                            else:
+                                args["depth"] = pres_raw
+                        else:
+                            args["model"] = "poroperm"
+
+
+            # ── POROSITY-PERMEABILITY CROSS-PLOT ──────────────────────────────────────
+
+            if name == "fit_petrophysical_curve" and args.get("model") == "poroperm":
+
+                phi_raw  = args.get("porosity", [])
+
+                perm_raw = args.get("perm",     [])
+
+                sample   = args.get("sample_name", "Core")
+
+                if len(phi_raw) > 1 and len(perm_raw) > 1:
+
+                    phi_a  = np.array(phi_raw, dtype=float)
+
+                    perm_a = np.array(perm_raw, dtype=float)
+
+                    mask   = (phi_a > 0) & (perm_a > 0)
+
+                    if np.sum(mask) > 1:
+
+                        phi_filtered  = phi_a[mask]
+
+                        perm_filtered = perm_a[mask]
+
+                        coeffs = np.polyfit(phi_filtered, np.log10(perm_filtered), 1)
+
+                        A, B   = float(coeffs[0]), float(coeffs[1])
+
+                        phi_fit  = np.linspace(float(phi_filtered.min()), float(phi_filtered.max()), 100)
+
+                        perm_fit = 10 ** (A * phi_fit + B)
+
+                        phi_max    = float(np.max(phi_filtered))
+
+                        is_percent = phi_max > 1.0
+
+                        x_label    = "Porosity φ (%)" if is_percent else "Porosity φ (fraction)"
+
+                        curves = [
+
+                            {
+
+                                "name":       f"Samples ({sample})",
+
+                                "showLine":   False,
+
+                                "showPoints": True,
+
+                                "color":      "#38bdf8",
+
+                                "data":       [{"x": float(p), "y": float(k)} for p, k in zip(phi_filtered, perm_filtered)],
+
+                            },
+
+                            {
+
+                                "name":       f"Fit: log10(k) = {A:.4f}*φ + {B:.4f}",
+
+                                "showLine":   True,
+
+                                "showPoints": False,
+
+                                "dashed":     True,
+
+                                "color":      "#fb923c",
+
+                                "data":       [{"x": float(p), "y": float(k)} for p, k in zip(phi_fit, perm_fit)],
+
+                            }
+
+                        ]
+
+                        plot_poroperm = {
+
+                            "title":    f"Porosity vs Permeability Cross-Plot ({sample})",
+
+                            "xAxis":    {"label": x_label, "domain": ["auto", "auto"]},
+
+                            "yAxis":    {"label": "Permeability k (mD)", "domain": ["auto", "auto"]},
+
+                            "yAxisLog": True,
+
+                            "curves":   curves,
+
+                        }
+
+                        return (f"__PRC_PLOT__\n{_safe_json_dumps(plot_poroperm)}\n\n")
+
+
+            # ── POROSITY & PERMEABILITY VS DEPTH ──────────────────────────────────────
+
+            if name == "fit_petrophysical_curve" and args.get("model") == "poroperm_depth":
+
+                depth_raw = args.get("depth",    [])
+
+                phi_raw   = args.get("porosity", [])
+
+                perm_raw  = args.get("perm",     [])
+
+                sample    = args.get("sample_name", "Core")
+
+                if len(depth_raw) > 1 and len(phi_raw) > 1 and len(perm_raw) > 1:
+
+                    depth_a = np.array(depth_raw, dtype=float)
+
+                    phi_a   = np.array(phi_raw,  dtype=float)
+
+                    perm_a  = np.array(perm_raw,  dtype=float)
+
+                    idx          = np.argsort(depth_a)
+
+                    depth_sorted = depth_a[idx]
+
+                    phi_sorted   = phi_a[idx]
+
+                    perm_sorted  = perm_a[idx]
+
+                    phi_max    = float(np.max(phi_sorted))
+
+                    is_percent = phi_max > 1.0
+
+                    y1_label   = "Porosity φ (%)" if is_percent else "Porosity φ (fraction)"
+
+                    curves = [
+
+                        {
+
+                            "name":       f"Porosity φ ({sample})",
+
+                            "showLine":   True,
+
+                            "showPoints": True,
+
+                            "color":      "#38bdf8",
+
+                            "yId":        "left",
+
+                            "data":       [{"x": float(d), "y": float(p)} for d, p in zip(depth_sorted, phi_sorted)],
+
+                        },
+
+                        {
+
+                            "name":       f"Permeability k ({sample})",
+
+                            "showLine":   True,
+
+                            "showPoints": True,
+
+                            "color":      "#fb923c",
+
+                            "yId":        "right",
+
+                            "data":       [{"x": float(d), "y": float(k)} for d, k in zip(depth_sorted, perm_sorted)],
+
+                        }
+
+                    ]
+
+                    plot_depth = {
+
+                        "title":         f"Porosity & Permeability vs Depth ({sample})",
+
+                        "xAxis":         {"label": "Depth (m)" if np.max(depth_sorted) > 1000 else "Depth (ft)", "domain": ["auto", "auto"]},
+
+                        "yAxis":         {"label": y1_label, "domain": ["auto", "auto"]},
+
+                        "yAxis2":        {"label": "Permeability k (mD)", "domain": ["auto", "auto"]},
+
+                        "dualAxis":      True,
+
+                        "yAxisRightLog": True,
+
+                        "curves":        curves,
+
+                    }
+
+                    return (f"__PRC_PLOT__\n{_safe_json_dumps(plot_depth)}\n\n")
 
 
 
@@ -2118,6 +2320,36 @@ class PRCChatAssistant:
             except Exception:
 
                 tr = {}
+
+            # ── RQI/FZI Black Box Fix ─────────────────────────────────────────
+            # The petrophysics.py rqi_fzi model returns a full structured payload
+            # with per-sample rows and HU summary. Format it as a visible markdown
+            # table so the LLM can present results conversationally.
+            if name == "calculate_petrophysics_properties" and tr.get("status") == "success" and tr.get("samples"):
+                lines = []
+                lines.append(f"\n\n**RQI / FZI Calculation — {tr.get('total_samples', '?')} Samples, 3 Hydraulic Units**\n")
+                lines.append("| # | Depth | Porosity (%) | Perm (mD) | phi_z | RQI (um) | FZI (um) | HU | Quality |")
+                lines.append("|---|-------|-------------|-----------|-------|----------|----------|----|---------|")
+                for s in tr["samples"]:
+                    lines.append(
+                        f"| {s['sample']} | {s['depth']:.2f} | {s['phi_pct']:.4f} | {s['perm_md']:.4f} "
+                        f"| {s['phi_z']:.6f} | {s['rqi']:.4f} | {s['fzi']:.4f} | {s['hu']} | {s['hu_quality']} |"
+                    )
+                lines.append("")
+                lines.append("**Hydraulic Unit Summary**\n")
+                lines.append("| HU | Quality | Count | Avg Phi (%) | Avg K (mD) | Avg FZI (um) | FZI Range |")
+                lines.append("|----|---------|-------|-------------|------------|--------------|-----------|")
+                for h in tr.get("summary", []):
+                    lines.append(
+                        f"| {h['hu']} | {h['quality']} | {h['count']} | {h['avg_phi_pct']:.2f} | {h['avg_k_md']:.2f} "
+                        f"| {h['avg_fzi']:.4f} | {h['fzi_min']:.4f} - {h['fzi_max']:.4f} |"
+                    )
+                thresh = tr.get("thresholds", {})
+                if thresh:
+                    lines.append("")
+                    lines.append(f"**Partition Thresholds:** HU1/HU2 = {thresh.get('hu1_hu2', 'N/A')} FZI | HU2/HU3 = {thresh.get('hu2_hu3', 'N/A')} FZI")
+                lines.append("")
+                return "\n".join(lines)
 
             if name == "agentic_history_matching" and tr.get("success"):
 

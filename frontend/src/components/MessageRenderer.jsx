@@ -103,6 +103,85 @@ function _tryParseChartJson(raw) {
   }
 }
 
+// Dynamic adapter function to convert Plotly-style JSON (with "data" and "layout") into custom "curves" format.
+function _adaptPlotData(parsed) {
+  if (!parsed) return null;
+  if (parsed.curves) {
+    return parsed; // Already conforms to custom curves format
+  }
+  
+  if (parsed.data && Array.isArray(parsed.data)) {
+    const defaultColors = [
+      '#38bdf8', // sky-400
+      '#fb923c', // orange-400
+      '#34d399', // emerald-400
+      '#a78bfa', // purple-400
+      '#facc15', // yellow-400
+      '#f43f5e', // rose-500
+      '#22d3ee', // cyan-400
+    ];
+
+    const title = parsed.layout?.title?.text || parsed.layout?.title || 'SCAL Analysis Curves';
+    
+    // x and y axis labels
+    const xLabel = parsed.layout?.xaxis?.title?.text || parsed.layout?.xaxis?.title || 'x';
+    const yLabel = parsed.layout?.yaxis?.title?.text || parsed.layout?.yaxis?.title || 'y';
+    
+    // Check if scales are log
+    const xLog = parsed.layout?.xaxis?.type === 'log';
+    const yLog = parsed.layout?.yaxis?.type === 'log';
+    
+    // Let's see if we have dual axis
+    const dualAxis = !!parsed.layout?.yaxis2 || parsed.data.some(trace => trace.yaxis === 'y2');
+    const yLabel2 = parsed.layout?.yaxis2?.title?.text || parsed.layout?.yaxis2?.title || 'y2';
+    const yLog2 = parsed.layout?.yaxis2?.type === 'log';
+
+    // Map Plotly traces into curves format
+    const curves = parsed.data.map((trace, index) => {
+      const showLine = trace.mode ? trace.mode.includes('lines') : true;
+      const showPoints = trace.mode ? trace.mode.includes('markers') : (trace.type === 'scatter');
+      const yId = (trace.yaxis === 'y2') ? 'right' : 'left';
+
+      // Zip x and y arrays into an array of objects { x, y }
+      const dataPoints = [];
+      const xs = trace.x || [];
+      const ys = trace.y || [];
+      const len = Math.min(xs.length, ys.length);
+      for (let i = 0; i < len; i++) {
+        const xVal = parseFloat(xs[i]);
+        const yVal = parseFloat(ys[i]);
+        if (!isNaN(xVal) && !isNaN(yVal)) {
+          dataPoints.push({ x: xVal, y: yVal });
+        }
+      }
+
+      return {
+        name: trace.name || `Curve ${index + 1}`,
+        color: trace.line?.color || trace.marker?.color || defaultColors[index % defaultColors.length],
+        showLine: showLine,
+        showPoints: showPoints,
+        dashed: trace.line?.dash === 'dash' || trace.line?.dash === 'dot',
+        yId: yId,
+        data: dataPoints
+      };
+    });
+
+    return {
+      title,
+      xAxis: { label: xLabel },
+      yAxis: { label: yLabel },
+      xAxisLog: xLog,
+      yAxisLog: yLog,
+      dualAxis: dualAxis,
+      yAxis2: dualAxis ? { label: yLabel2 } : undefined,
+      yAxisRightLog: dualAxis ? yLog2 : undefined,
+      curves
+    };
+  }
+
+  return null;
+}
+
 export function renderMessageContent(text) {
   if (!text) return null;
 
@@ -111,6 +190,9 @@ export function renderMessageContent(text) {
     .replace(/\r/g, '')
     .replace(/__INTERNAL_DATA_START__[\s\S]*?__INTERNAL_DATA_END__/g, '')
     .trim();
+
+  // Clean up markdown code block fences enclosing __PRC_PLOT__
+  cleanText = cleanText.replace(/```+__PRC_PLOT__/g, '__PRC_PLOT__');
 
   // ── __REPORT_DL__ download button injection ──────────────────────────────────
   if (cleanText.includes('__REPORT_DL__')) {
@@ -134,24 +216,47 @@ export function renderMessageContent(text) {
       const seg = segs[i];
       const bi = seg.indexOf('{');
 
-      if (bi === -1) continue;
+      if (bi === -1) {
+        // No JSON start found, clean up backticks from the segment
+        let tail = seg.replace(/^\s*```*\s*/, '');
+        if (tail) afterPlot.push({ type: 'text', content: tail });
+        continue;
+      }
 
       const jsonStr = _extractFirstJsonObject(seg.slice(bi));
 
-      if (!jsonStr) continue;
+      if (!jsonStr) {
+        let tail = seg.replace(/^\s*```*\s*/, '');
+        if (tail) afterPlot.push({ type: 'text', content: tail });
+        continue;
+      }
 
       const parsed = _tryParseChartJson(jsonStr);
 
       if (!parsed) {
         // _tryParseChartJson already logged the error with the raw JSON
         afterPlot.push({ type: 'plot_error', raw: jsonStr.slice(0, 400) });
-        const tail = seg.slice(bi + jsonStr.length).replace(/^\s*\n?/, '');
+        let tail = seg.slice(bi + jsonStr.length);
+        tail = tail.replace(/^\s*```*\s*/, '');
         if (tail) afterPlot.push({ type: 'text', content: tail });
         continue;
       }
 
-      afterPlot.push({ type: 'plot', content: jsonStr });
-      const tail = seg.slice(bi + jsonStr.length).replace(/^\s*\n?/, '');
+      // Adapt the Plotly-style JSON to standard curves format
+      const adapted = _adaptPlotData(parsed);
+
+      if (!adapted || !adapted.curves) {
+        // Not a curve plot, skip plot node completely
+        let tail = seg.slice(bi + jsonStr.length);
+        tail = tail.replace(/^\s*```*\s*/, '');
+        if (tail) afterPlot.push({ type: 'text', content: tail });
+        continue;
+      }
+
+      afterPlot.push({ type: 'plot', content: adapted });
+      let tail = seg.slice(bi + jsonStr.length);
+      // Clean up markdown code block fences
+      tail = tail.replace(/^\s*```*\s*/, '');
       if (tail) afterPlot.push({ type: 'text', content: tail });
     }
   }
