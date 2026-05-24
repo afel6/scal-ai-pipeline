@@ -306,22 +306,28 @@ class SCALFileHandler:
                     (j for j, h in enumerate(headers) if 'cycle' in str(h).lower()), None
                 )
 
-                drainage    = {'pressure': [], 'sat_pv': []}
-                imbibition  = {'pressure': [], 'sat_pv': []}
+                drainage    = {'pressure': [], 'sat_pv': [], 'calculated_pore_radius_microns': []}
+                imbibition  = {'pressure': [], 'sat_pv': [], 'calculated_pore_radius_microns': []}
 
+                from prc_physics import calculate_washburn_radius
                 for _, r in data.iterrows():
                     p = pd.to_numeric(r[press_col], errors='coerce')
                     s = pd.to_numeric(r[sat_col],   errors='coerce')
                     if pd.isna(p) or pd.isna(s):
                         continue
 
+                    p_val = float(p)
+                    r_val = calculate_washburn_radius(p_val)
+
                     cycle = str(r[cycle_col]).strip().upper() if cycle_col is not None else 'D'
                     if cycle.startswith('I'):
-                        imbibition['pressure'].append(round(float(p), 3))
+                        imbibition['pressure'].append(round(p_val, 3))
                         imbibition['sat_pv'].append(round(float(s), 4))
+                        imbibition['calculated_pore_radius_microns'].append(r_val)
                     else:
-                        drainage['pressure'].append(round(float(p), 3))
+                        drainage['pressure'].append(round(p_val, 3))
                         drainage['sat_pv'].append(round(float(s), 4))
+                        drainage['calculated_pore_radius_microns'].append(r_val)
 
                 if not (drainage['pressure'] or imbibition['pressure']):
                     continue

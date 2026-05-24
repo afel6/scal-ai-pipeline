@@ -4,6 +4,7 @@ PRC Standalone Physics Engine - Special Core Analysis (SCAL) Calculations
 This module provides deterministic, unit-safe petrophysical calculations to prevent LLM mathematical hallucinations.
 """
 
+import math
 from typing import List, Dict, Any
 
 def calculate_pore_compressibility(initial_porosity: float, final_porosity: float, pressure_delta: float) -> float:
@@ -158,3 +159,38 @@ def calculate_compressibility_sweep(json_data: List[Dict[str, Any]]) -> List[Dic
         pass  # PhysicsGuard not available — skip validation
 
     return json_data
+
+def calculate_washburn_radius(pressure_psia: float, contact_angle_deg: float = 140.0, interfacial_tension: float = 480.0) -> float:
+    """
+    Converts capillary pressure to pore throat radius using the Washburn Equation.
+    r = (2 * gamma * |cos(theta)|) / Pc
+    
+    Inputs:
+        pressure_psia (float): Capillary pressure in psia.
+        contact_angle_deg (float): Contact angle in degrees (default: 140).
+        interfacial_tension (float): Interfacial tension in dynes/cm (default: 480).
+        
+    Returns:
+        float: Pore throat radius in microns, rounded to 4 decimal places.
+    """
+    if pressure_psia < 0:
+        raise ValueError("Capillary pressure cannot be negative.")
+    
+    # Avoid division by zero
+    safe_pressure = max(pressure_psia, 1e-9)
+    
+    # Constants
+    # 1 psi = 68947.6 dynes/cm2
+    conversion_factor = 68947.6
+    pc_dynes = safe_pressure * conversion_factor
+    
+    theta_rad = math.radians(contact_angle_deg)
+    
+    # Washburn
+    # r is in cm
+    radius_cm = (2.0 * interfacial_tension * abs(math.cos(theta_rad))) / pc_dynes
+    
+    # Convert cm to microns (1 cm = 10,000 microns)
+    radius_microns = radius_cm * 10000.0
+    
+    return round(radius_microns, 4)
