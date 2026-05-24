@@ -23,8 +23,12 @@ def calculate_pore_compressibility(initial_porosity: float, final_porosity: floa
     Returns:
         float: Pore volume compressibility in psi^-1.
     """
-    if initial_porosity <= 0:
-        raise ValueError("Initial porosity must be strictly greater than zero.")
+    if initial_porosity <= 0 or initial_porosity > 100:
+        raise ValueError("Initial porosity must be strictly greater than zero and less than or equal to 100.")
+    if final_porosity <= 0 or final_porosity > 100:
+        raise ValueError("Final porosity must be strictly greater than zero and less than or equal to 100.")
+    if final_porosity > initial_porosity:
+        raise ValueError("Final porosity under elevated pressure cannot exceed initial porosity.")
     if pressure_delta <= 0:
         raise ValueError("Pressure delta must be strictly greater than zero.")
 
@@ -175,6 +179,10 @@ def calculate_washburn_radius(pressure_psia: float, contact_angle_deg: float = 1
     """
     if pressure_psia < 0:
         raise ValueError("Capillary pressure cannot be negative.")
+    if contact_angle_deg < 0 or contact_angle_deg > 180:
+        raise ValueError("Contact angle must be between 0 and 180 degrees.")
+    if interfacial_tension <= 0:
+        raise ValueError("Interfacial tension must be strictly greater than zero.")
     
     # Avoid division by zero
     safe_pressure = max(pressure_psia, 1e-9)

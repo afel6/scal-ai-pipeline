@@ -58,6 +58,10 @@ import visualizer
 from llm_insight_generator import MasterEngineerNode, DashboardArchitectNode
 from dashboard_architect import generate_universal_dashboard, detect_test_type
 
+import defusedxml
+defusedxml.defuse_stdlib()
+
+
 
 
 
@@ -4999,19 +5003,64 @@ async def chat_stream(
                 yield f"data: {_json.dumps({'type': 'done'})}\n\n"
             except Exception:
                 pass
-
-
-
     return StreamingResponse(
-
-        _producer(), 
-
+        _producer(),
         media_type="text/event-stream",
-
         headers={"X-Accel-Buffering": "no", "Cache-Control": "no-cache"}
-
     )
 
+
+
+def sanitize_filename(filename: str) -> str:
+    """Sanitizes filename to protect against path traversal (CWE-22) and invalid characters."""
+    if not filename:
+        return "unnamed_file"
+    # Take only the base name (no directory components)
+    basename = os.path.basename(filename)
+    basename = basename.replace('\\', '/').split('/')[-1] # enforce base name regardless of OS separator
+    # Remove directory traversal sequences (e.g. "../" or "..\\")
+    basename = re.sub(r'\.\.+', '.', basename)
+    # Filter characters: allow letters, numbers, spaces, dots, dashes, underscores
+    name, ext = os.path.splitext(basename)
+    name = re.sub(r'[^\w\s\.-]', '', name)
+    ext = re.sub(r'[^\w\.-]', '', ext)
+    sanitized = f"{name}{ext}".strip()
+    return sanitized if sanitized else "unnamed_file"
+
+
+def verify_file_signature(file_bytes: bytes, filename: str) -> bool:
+    """
+    Verifies that the magic bytes of file_bytes match the declared filename extension.
+    This prevents extension-spoofing attacks (e.g., renaming a .exe to .xlsx).
+    """
+    if not file_bytes:
+        return True
+    
+    ext = os.path.splitext(filename.lower())[1]
+    
+    if ext in ('.xlsx', '.xlsm', '.docx'):
+        # ZIP magic bytes: 'PK\x03\x04'
+        return file_bytes.startswith(b'PK\x03\x04')
+        
+    elif ext in ('.xls', '.doc'):
+        # OLE magic bytes: d0 cf 11 e0 a1 b1 1a e1
+        return file_bytes.startswith(b'\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1')
+        
+    elif ext == '.pdf':
+        # PDF magic bytes: '%PDF-'
+        return file_bytes.startswith(b'%PDF-')
+        
+    elif ext in ('.csv', '.txt'):
+        # Must not contain dangerous binary executable signatures
+        if file_bytes.startswith(b'MZ') or file_bytes.startswith(b'\x7fELF'):
+            return False
+        # Avoid files with null bytes (binary indicators) in the first kilobyte
+        chunk = file_bytes[:1024]
+        if b'\x00' in chunk:
+            return False
+        return True
+
+    return True
 
 
 @app.post("/api/chat")
@@ -5042,7 +5091,12 @@ async def handle(
 
     valid_files = [f for f in files if getattr(f, "filename", "")]
 
-    
+    for f in valid_files:
+        f.filename = sanitize_filename(f.filename)
+        sig_bytes = await f.read(1024)
+        await f.seek(0)
+        if not verify_file_signature(sig_bytes, f.filename):
+            raise HTTPException(status_code=400, detail=f"File signature mismatch or invalid format for extension: {f.filename}")
 
     f_parts = []
 
@@ -5303,12 +5357,12 @@ async def library_ingest(
 ):
     if not KB_INGEST_SECRET or not hmac.compare_digest(x_ingest_secret.strip(), KB_INGEST_SECRET):
         raise HTTPException(status_code=403, detail="Invalid ingest secret")
-    if not file.filename:
-        raise HTTPException(status_code=400, detail="No file provided")
-
+    file.filename = sanitize_filename(file.filename)
     file_bytes = await file.read()
     if not file_bytes:
         raise HTTPException(status_code=400, detail="Empty file")
+    if not verify_file_signature(file_bytes, file.filename):
+        raise HTTPException(status_code=400, detail=f"File signature mismatch or invalid format for extension: {file.filename}")
 
     loop = asyncio.get_running_loop()
     result = await loop.run_in_executor(
@@ -5422,12 +5476,12 @@ async def kb_ingest(
                (ADMIN_PIN and hmac.compare_digest(password.strip(), ADMIN_PIN))
     if not is_valid:
         raise HTTPException(status_code=403, detail="Invalid admin pin")
-    if not file.filename:
-        raise HTTPException(status_code=400, detail="No file provided")
-
+    file.filename = sanitize_filename(file.filename)
     file_bytes = await file.read()
     if not file_bytes:
         raise HTTPException(status_code=400, detail="Empty file")
+    if not verify_file_signature(file_bytes, file.filename):
+        raise HTTPException(status_code=400, detail=f"File signature mismatch or invalid format for extension: {file.filename}")
 
     loop = asyncio.get_running_loop()
     result = await loop.run_in_executor(
@@ -5611,9 +5665,13 @@ async def api_grade_response(
     ai_response: str        = Form(...),
 ):
     import tempfile
-    ext = os.path.splitext(file.filename or "")[1].lower() or ".xlsx"
+    file.filename = sanitize_filename(file.filename)
+    file_bytes = await file.read()
+    if not verify_file_signature(file_bytes, file.filename):
+        raise HTTPException(status_code=400, detail=f"File signature mismatch or invalid format for extension: {file.filename}")
+    ext = os.path.splitext(file.filename)[1].lower() or ".xlsx"
     with tempfile.NamedTemporaryFile(delete=False, suffix=ext) as tf:
-        tf.write(await file.read())
+        tf.write(file_bytes)
         tmp_path = tf.name
     try:
         result = grade_ai_response(tmp_path, ai_response)
