@@ -199,7 +199,7 @@ class SCALFileHandler:
 
         for _sheet, _df in self.raw_data.items():
             # Scan top 15 rows of each sheet
-            for i in range(min(15, len(_df))):
+            for i in range(min(50, len(_df))):
                 _row = _df.iloc[i].tolist()
                 for j, _cell in enumerate(_row):
                     if isinstance(_cell, str):
@@ -518,6 +518,63 @@ MANDATORY ANALYSIS INSTRUCTIONS
 # ROBUST FALLBACK EXTRACTOR (unchanged — do not modify)
 # ------------------------------------------------------------------ #
 
+# ── Unicode and composite-label normalisation ─────────────────────────────────
+
+_UNICODE_TRANS = str.maketrans({
+    'φ': 'phi', 'Φ': 'Phi',   # φ / Φ  (porosity)
+    'ρ': 'rho',                     # ρ  (density)
+    '²': '2',                       # ²  (squared)
+    'µ': 'u',                       # μ  (micro)
+    '°': 'deg',                     # °
+})
+
+_HDR_NORMS = [
+    # Composite tokens that appear in multi-row / merged-cell headers
+    (re.compile(r'\(\s*%\s*\)'),                                    'pct'),
+    (re.compile(r'cementation\s+(?:factor|exp(?:onent)?)',re.I),    'cementation_m'),
+    (re.compile(r'formation\s+(?:resistivity\s+)?factor',  re.I),  'ff'),
+    (re.compile(r'exponent\s*["\']?\s*m\s*["\']?',         re.I),  'exp_m'),
+    (re.compile(r'confin(?:ing)?\s*(?:pres(?:sure)?)?',    re.I),  'confining_psi'),
+    (re.compile(r'over\s*burden',                          re.I),  'obp_psi'),
+]
+
+
+def _normalize_header_cell(label: str) -> str:
+    """Translate Unicode code-points and normalize composite SCAL column labels."""
+    label = label.translate(_UNICODE_TRANS)
+    for pat, replacement in _HDR_NORMS:
+        label = pat.sub(replacement, label)
+    return re.sub(r'\s+', ' ', label).strip()
+
+
+def _merge_header_rows(df_raw, header_row: int, data_start: int) -> list:
+    """Build a column-label list by merging rows [header_row, data_start).
+
+    For each column, the first non-empty string value across those rows wins.
+    Subsequent non-empty strings in later rows are appended only when they add
+    new information (avoids duplicating merged-cell content read by xlrd/openpyxl).
+    All labels are Unicode-normalized via _normalize_header_cell.
+    """
+    n_cols = df_raw.shape[1]
+    merged = [f"col_{c}" for c in range(n_cols)]
+
+    for row_idx in range(header_row, data_start):
+        row = df_raw.iloc[row_idx].tolist()
+        for c, val in enumerate(row):
+            if c >= n_cols:
+                break
+            if not (isinstance(val, str) and val.strip()):
+                continue
+            norm = _normalize_header_cell(val.strip())
+            if merged[c] == f"col_{c}":
+                merged[c] = norm
+            elif norm.lower() not in merged[c].lower():
+                # Append context from a second header row (e.g. "(mD)" after "Perm")
+                merged[c] = f"{merged[c]} {norm}"
+
+    return merged
+
+
 def _detect_data_block(df_raw):
     n_rows, n_cols = df_raw.shape
     if n_rows < 2 or n_cols < 2:
@@ -539,7 +596,26 @@ def _detect_data_block(df_raw):
                 else:
                     if data_end - data_start >= 2:
                         break
+
+            # Scan backward up to 5 rows for the last text-rich header row.
+            # "Text-rich" = has ≥2 string values and more strings than bare numbers —
+            # this skips single-cell annotations like "R² =" or "slope =" that often
+            # sit between the real column labels and the data block in lab spreadsheets.
             header_row = max(0, data_start - 1)
+            for back in range(1, min(data_start + 1, 6)):
+                candidate = data_start - back
+                if candidate < 0:
+                    break
+                row_vals = df_raw.iloc[candidate].tolist()
+                str_count = sum(1 for v in row_vals
+                                if isinstance(v, str) and v.strip())
+                num_count = sum(1 for v in row_vals
+                                if pd.notna(v) and isinstance(v, (int, float))
+                                and not isinstance(v, bool))
+                if str_count >= 2 and str_count >= num_count:
+                    header_row = candidate
+                    break
+
             return header_row, data_start, data_end
     return None, None, None
 
@@ -557,7 +633,7 @@ def _extract_metadata(df_raw, data_start_idx):
         "pressure":   re.compile(r"\bpressure\b|overburden", re.IGNORECASE),
         "temperature":re.compile(r"\btemp(?:erature)?\b", re.IGNORECASE),
     }
-    scan_rows = min(data_start_idx, 10)
+    scan_rows = min(data_start_idx, 50)
     for i in range(scan_rows):
         row = df_raw.iloc[i].tolist()
         for j, cell in enumerate(row):
@@ -575,10 +651,18 @@ def _extract_metadata(df_raw, data_start_idx):
 def _classify_track(headers, data):
     header_str = " ".join(str(h).lower() for h in headers if pd.notna(h))
 
+    # FF checked before RI: "porosity" contains "ri" as a substring, which would
+    # cause a false-positive RI match for Formation Factor sheets.
+    # Post-normalization, "Formation factor" → "ff" and "Cementation factor" → "cementation_m".
+    if ("formation factor" in header_str or "cementation" in header_str
+            or "cementation_m" in header_str
+            or re.search(r'\bff\b', header_str)):
+        return "FF"
+    # Abbreviated composite labels: "factor" + "exponent / exp_m" → FF summary table
+    if "factor" in header_str and any(k in header_str for k in ["exponent", "exp_m"]):
+        return "FF"
     if any(k in header_str for k in ["ri", "resistivity index", "sw", "rt", "ro"]) and "i" in header_str:
         return "RI"
-    if "formation factor" in header_str or " ff " in header_str or "cementation" in header_str:
-        return "FF"
     if any(k in header_str for k in ["s_hg", "mercury", "hg sat", "pc (psia)", "psia"]) and any(k in header_str for k in ["hg", "mercury", "saturation"]):
         return "MICP"
     if "krw" in header_str and "kro" in header_str:
@@ -655,7 +739,9 @@ def robust_extract_scal(filepath):
 
         sheet_info["metadata"] = _extract_metadata(df_raw, data_start)
 
-        headers = df_raw.iloc[header_row].tolist() if header_row >= 0 else [f"col_{i}" for i in range(df_raw.shape[1])]
+        headers = (_merge_header_rows(df_raw, header_row, data_start)
+                   if header_row >= 0
+                   else [f"col_{i}" for i in range(df_raw.shape[1])])
         data_rows = df_raw.iloc[data_start:data_end+1].values.tolist()
         clean_rows = []
         for row in data_rows:

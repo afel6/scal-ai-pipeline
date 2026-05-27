@@ -48,3 +48,5 @@ outputs/
 startup_*.txt
 hermes_skills_library/
 test_centrifuge.xlsx
+pytest_temp/
+

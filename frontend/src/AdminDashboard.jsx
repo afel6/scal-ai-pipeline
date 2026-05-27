@@ -1,6 +1,6 @@
 /* eslint-disable no-unused-vars, react-hooks/set-state-in-effect */
 import React, { useState, useEffect, useCallback, useMemo, useRef } from 'react';
-import { Users, MessageSquare, BarChart3, Bug, Database, Activity, ArrowLeft, RefreshCw, Clock, Mail, ChevronDown, ChevronUp, LogOut } from 'lucide-react';
+import { Users, MessageSquare, BarChart3, Bug, Database, Activity, ArrowLeft, RefreshCw, Clock, Mail, ChevronDown, ChevronUp, LogOut, Cpu, DollarSign } from 'lucide-react';
 import axios from 'axios';
 
 const API_URL = import.meta.env.VITE_API_URL || '';
@@ -221,13 +221,97 @@ export default function AdminDashboard({ adminToken, onBack, onLogout }) {
           {/* ── OVERVIEW TAB ─────────────────────────────────────────── */}
           {activeTab === 'overview' && (
             <div className="space-y-6 animate-fade-in">
-              <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-4">
-                <StatCard icon={Users}        label="Users"        value={summary?.total_users ?? null}      color="#a855f7" delay={0} />
-                <StatCard icon={MessageSquare} label="Messages"    value={summary?.total_messages ?? null}   color="#3b82f6" delay={60} />
-                <StatCard icon={Activity}      label="Sessions"    value={summary?.total_sessions ?? null}   color="#22c55e" delay={120} />
-                <StatCard icon={BarChart3}     label="Events"      value={summary?.total_events ?? null}     color="#f59e0b" delay={180} />
-                <StatCard icon={Bug}           label="Feedback"    value={summary?.total_feedback ?? null}   color="#ef4444" delay={240} />
-                <StatCard icon={Database}      label="KB Chunks"   value={summary?.total_kb_chunks ?? null}  color="#06b6d4" delay={300} />
+              <div className="grid grid-cols-2 md:grid-cols-4 lg:grid-cols-8 gap-4">
+                <StatCard icon={Users}         label="Users"        value={summary?.total_users ?? null}      color="#a855f7" delay={0} />
+                <StatCard icon={MessageSquare}  label="Messages"     value={summary?.total_messages ?? null}   color="#3b82f6" delay={40} />
+                <StatCard icon={Activity}       label="Sessions"     value={summary?.total_sessions ?? null}   color="#22c55e" delay={80} />
+                <StatCard icon={Database}       label="KB Chunks"    value={summary?.total_kb_chunks ?? null}  color="#38bdf8" delay={120} />
+                <StatCard icon={Bug}            label="Feedback"     value={summary?.total_feedback ?? null}   color="#ef4444" delay={160} />
+                <StatCard icon={Cpu}            label="AI Tokens"    value={summary?.total_tokens ?? null} color="#06b6d4" delay={200} />
+                <StatCard icon={DollarSign}     label="AI API Cost"  value={summary?.total_cost_usd != null ? "$" + summary.total_cost_usd.toFixed(2) : null} color="#10b981" delay={240} />
+                <StatCard icon={Users}          label="AI Engineers" value={summary?.total_engineers ?? null}  color="#f59e0b" delay={280} />
+              </div>
+
+              {/* API Usage & Token Analytics Row */}
+              <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
+                
+                {/* AI Token Breakdown by Engineer */}
+                <div className="lg:col-span-2 rounded-[2rem] border border-white/[0.06] bg-[#0c0c12]/50 backdrop-blur-xl shadow-xl overflow-hidden">
+                  <div className="px-6 py-4 border-b border-white/[0.06] flex items-center justify-between bg-white/[0.01]">
+                    <span className="text-[10px] font-black tracking-[0.2em] text-slate-500 uppercase flex items-center gap-2">
+                      <Users className="w-4 h-4 text-purple-400" />
+                      AI Engineer Token Consumption
+                    </span>
+                  </div>
+                  <div className="overflow-x-auto max-h-80 overflow-y-auto">
+                    <table className="w-full text-left">
+                      <thead>
+                        <tr className="border-b border-white/[0.04]">
+                          <th className="px-6 py-3 text-[10px] font-bold text-slate-500 uppercase tracking-widest">Engineer</th>
+                          <th className="px-6 py-3 text-[10px] font-bold text-slate-500 uppercase tracking-widest text-right">Sessions</th>
+                          <th className="px-6 py-3 text-[10px] font-bold text-slate-500 uppercase tracking-widest text-right">Tokens Consumed</th>
+                          <th className="px-6 py-3 text-[10px] font-bold text-slate-500 uppercase tracking-widest text-right">Estimated Cost</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {summary?.engineer_breakdown?.map((eng, idx) => (
+                          <tr key={idx} className="border-b border-white/[0.02] hover:bg-white/[0.01] transition-colors">
+                            <td className="px-6 py-3.5 text-xs font-mono text-slate-300">{eng.email}</td>
+                            <td className="px-6 py-3.5 text-xs text-right text-slate-400 tabular-nums">{eng.sessions}</td>
+                            <td className="px-6 py-3.5 text-xs font-bold text-right text-cyan-400 tabular-nums">{eng.tokens?.toLocaleString()}</td>
+                            <td className="px-6 py-3.5 text-xs font-bold text-right text-emerald-400 tabular-nums">${eng.cost?.toFixed(4)}</td>
+                          </tr>
+                        ))}
+                        {(!summary?.engineer_breakdown || summary.engineer_breakdown.length === 0) && (
+                          <tr>
+                            <td colSpan={4} className="px-6 py-12 text-center text-slate-600 italic text-sm">
+                              No engineer AI usage recorded yet
+                            </td>
+                          </tr>
+                        )}
+                      </tbody>
+                    </table>
+                  </div>
+                </div>
+
+                {/* Model Split Distribution */}
+                <div className="rounded-[2rem] border border-white/[0.06] bg-[#0c0c12]/50 backdrop-blur-xl shadow-xl overflow-hidden p-6 flex flex-col justify-between">
+                  <div>
+                    <span className="text-[10px] font-black tracking-[0.2em] text-slate-500 uppercase block mb-6">Model Distribution</span>
+                    <div className="space-y-5">
+                      {summary?.model_breakdown?.map((m, idx) => {
+                        const colors = m.model.includes('pro') ? { text: 'text-purple-400', bg: 'bg-purple-500/25', bar: 'bg-purple-500' } : { text: 'text-cyan-400', bg: 'bg-cyan-500/25', bar: 'bg-cyan-500' };
+                        const total = summary.total_tokens || 1;
+                        const pct = Math.min(100, Math.round((m.tokens / total) * 100));
+                        return (
+                          <div key={idx} className="space-y-2">
+                            <div className="flex justify-between items-center text-xs">
+                              <span className="font-mono text-slate-300">{m.model}</span>
+                              <span className={`font-bold ${colors.text}`}>{pct}%</span>
+                            </div>
+                            <div className={`h-2 rounded-full ${colors.bg} overflow-hidden`}>
+                              <div className={`h-full rounded-full ${colors.bar}`} style={{ width: `${pct}%` }} />
+                            </div>
+                            <div className="flex justify-between text-[10px] text-slate-500 font-mono">
+                              <span>{m.tokens?.toLocaleString()} tkn</span>
+                              <span>${m.cost?.toFixed(2)}</span>
+                            </div>
+                          </div>
+                        );
+                      })}
+                      {(!summary?.model_breakdown || summary.model_breakdown.length === 0) && (
+                        <p className="text-sm text-slate-600 italic py-12 text-center">No model analytics available</p>
+                      )}
+                    </div>
+                  </div>
+                  
+                  {/* Subtle Cost Warning */}
+                  <div className="mt-6 p-4 rounded-xl border border-white/[0.04] bg-white/[0.01] text-[10px] text-slate-500 leading-relaxed font-mono">
+                    <span className="text-slate-400 font-bold block mb-1">Telemetry Pricing Rules:</span>
+                    • gemini-2.5-flash: $0.075 / $0.30 per 1M<br/>
+                    • gemini-2.5-pro: $1.25 / $5.00 per 1M
+                  </div>
+                </div>
               </div>
 
               {/* Recent Activity Preview */}
@@ -239,7 +323,7 @@ export default function AdminDashboard({ adminToken, onBack, onLogout }) {
                   </div>
                   <div className="px-6 py-3 max-h-64 overflow-y-auto">
                     {events.slice(0, 5).map((e, i) => <TimelineEvent key={i} event={e} idx={i} />)}
-                    {events.length === 0 && <p className="text-sm text-slate-655 py-6 text-center italic">No events recorded yet</p>}
+                    {events.length === 0 && <p className="text-sm text-slate-600 py-6 text-center italic">No events recorded yet</p>}
                   </div>
                 </div>
 
@@ -250,7 +334,7 @@ export default function AdminDashboard({ adminToken, onBack, onLogout }) {
                   </div>
                   <div className="px-6 py-4 max-h-64 overflow-y-auto space-y-3">
                     {feedback.slice(0, 3).map((f, i) => <FeedbackCard key={i} item={f} idx={i} />)}
-                    {feedback.length === 0 && <p className="text-sm text-slate-655 py-6 text-center italic">No feedback received yet</p>}
+                    {feedback.length === 0 && <p className="text-sm text-slate-600 py-6 text-center italic">No feedback received yet</p>}
                   </div>
                 </div>
               </div>
@@ -265,7 +349,7 @@ export default function AdminDashboard({ adminToken, onBack, onLogout }) {
               </div>
               <div className="px-6 py-3 max-h-[calc(100vh-260px)] overflow-y-auto">
                 {events.map((e, i) => <TimelineEvent key={i} event={e} idx={i} />)}
-                {events.length === 0 && <p className="text-sm text-slate-655 py-12 text-center italic">No events recorded yet</p>}
+                {events.length === 0 && <p className="text-sm text-slate-600 py-12 text-center italic">No events recorded yet</p>}
               </div>
             </div>
           )}

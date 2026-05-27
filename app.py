@@ -1115,6 +1115,39 @@ _PETRO_KEYS = frozenset({
 
 _tls = threading.local()
 
+def _add_breadcrumb(msg: str):
+    if not hasattr(_tls, "breadcrumbs"):
+        _tls.breadcrumbs = []
+    _tls.breadcrumbs.append({
+        "timestamp": time.time(),
+        "step": msg
+    })
+
+def _log_api_usage(session_id: str, model: str, prompt_tokens: int, completion_tokens: int):
+    # Calculate cost (Standard rates per 1M tokens)
+    in_rate = 1.25 if "pro" in model else 0.075
+    out_rate = 5.00 if "pro" in model else 0.30
+    cost = ((prompt_tokens * in_rate) + (completion_tokens * out_rate)) / 1_000_000
+    
+    try:
+        db("INSERT INTO api_metrics (session_id, timestamp, model, prompt_tokens, completion_tokens, cost_usd) VALUES (?, ?, ?, ?, ?, ?)",
+           (session_id, time.time(), model, prompt_tokens, completion_tokens, cost))
+    except Exception as e:
+        _logger.warning(f"[CostTracker] Failed to insert metrics: {e}")
+
+def _extract_and_log_corrections(session_id: str, email: str, text: str) -> str:
+    # Pattern to find [CORRECTION: issue | value]
+    pattern = r"\[CORRECTION:\s*(.*?)\s*\|\s*(.*?)\s*\]"
+    matches = re.findall(pattern, text)
+    for issue, val in matches:
+        try:
+            db("INSERT INTO user_corrections (session_id, user_email, original_issue, corrected_value, timestamp) VALUES (?, ?, ?, ?, ?)",
+               (session_id, email, issue.strip(), val.strip(), time.time()))
+        except Exception as e:
+            _logger.warning(f"[LearningLoop] Failed to store correction: {e}")
+    # Strip the tags from the final user-facing text
+    return re.sub(pattern, "", text).strip()
+
 
 
 
@@ -1128,9 +1161,20 @@ def _call_gemini_with_retry(client, model, contents, config, max_retries=5, base
     """
     for attempt in range(max_retries):
         try:
-            return client.models.generate_content(
+            resp = client.models.generate_content(
                 model=model, contents=contents, config=config
             )
+            try:
+                if resp and resp.usage_metadata:
+                    _log_api_usage(
+                        getattr(_tls, 'current_session_id', 'SYSTEM'),
+                        model,
+                        resp.usage_metadata.prompt_token_count,
+                        resp.usage_metadata.candidates_token_count
+                    )
+            except Exception as usage_err:
+                _logger.warning(f"[CostTracker] Failed to log usage from generate_content: {usage_err}")
+            return resp
         except Exception as e:
             err = str(e).lower()
             is_503 = any(x in err for x in ["503", "service_unavailable", "unavailable"])
@@ -1149,9 +1193,20 @@ def _call_gemini_with_retry(client, model, contents, config, max_retries=5, base
             if is_503 and model == "gemini-2.5-flash":
                 _logger.warning("[Fallback] gemini-2.5-flash is 503 overloaded. Falling back to gemini-2.5-pro.")
                 try:
-                    return client.models.generate_content(
+                    resp = client.models.generate_content(
                         model="gemini-2.5-pro", contents=contents, config=config
                     )
+                    try:
+                        if resp and resp.usage_metadata:
+                            _log_api_usage(
+                                getattr(_tls, 'current_session_id', 'SYSTEM'),
+                                "gemini-2.5-pro",
+                                resp.usage_metadata.prompt_token_count,
+                                resp.usage_metadata.candidates_token_count
+                            )
+                    except Exception as usage_err:
+                        _logger.warning(f"[CostTracker] Failed to log usage from fallback: {usage_err}")
+                    return resp
                 except Exception as fallback_err:
                     raise ValueError(f"CRITICAL: Both primary and fallback models are UNAVAILABLE. {fallback_err}")
             
@@ -1162,8 +1217,23 @@ def _call_gemini_stream_with_retry(client, model, contents, config, max_retries=
     """Call client.models.generate_content_stream with exponential backoff on 503/429 and fallback logic."""
     for attempt in range(max_retries):
         try:
+            prompt_tokens = 0
+            completion_tokens = 0
             for chunk in client.models.generate_content_stream(model=model, contents=contents, config=config):
+                if chunk.usage_metadata:
+                    prompt_tokens = chunk.usage_metadata.prompt_token_count or prompt_tokens
+                    completion_tokens = chunk.usage_metadata.candidates_token_count or completion_tokens
                 yield chunk
+            try:
+                if prompt_tokens > 0 or completion_tokens > 0:
+                    _log_api_usage(
+                        getattr(_tls, 'current_session_id', 'SYSTEM'),
+                        model,
+                        prompt_tokens,
+                        completion_tokens
+                    )
+            except Exception as usage_err:
+                _logger.warning(f"[CostTracker] Failed to log usage from stream: {usage_err}")
             return
         except Exception as e:
             err = str(e).lower()
@@ -1182,8 +1252,23 @@ def _call_gemini_stream_with_retry(client, model, contents, config, max_retries=
             if is_503 and model == "gemini-2.5-flash":
                 _logger.warning("[Fallback] gemini-2.5-flash is 503 overloaded. Falling back to gemini-2.5-pro for stream.")
                 try:
+                    prompt_tokens = 0
+                    completion_tokens = 0
                     for chunk in client.models.generate_content_stream(model="gemini-2.5-pro", contents=contents, config=config):
+                        if chunk.usage_metadata:
+                            prompt_tokens = chunk.usage_metadata.prompt_token_count or prompt_tokens
+                            completion_tokens = chunk.usage_metadata.candidates_token_count or completion_tokens
                         yield chunk
+                    try:
+                        if prompt_tokens > 0 or completion_tokens > 0:
+                            _log_api_usage(
+                                getattr(_tls, 'current_session_id', 'SYSTEM'),
+                                "gemini-2.5-pro",
+                                prompt_tokens,
+                                completion_tokens
+                            )
+                    except Exception as usage_err:
+                        _logger.warning(f"[CostTracker] Failed to log usage from fallback stream: {usage_err}")
                     return
                 except Exception as fallback_err:
                     raise ValueError(f"CRITICAL: Both primary (flash) and fallback (pro) models are UNAVAILABLE for streaming. {fallback_err}")
@@ -2932,7 +3017,7 @@ class PRCChatAssistant:
                                 base_delay=2
                             )
                         except Exception as e:
-                            print(f"[Fallback] gemini-2.5-flash overloaded (503): {e}. Falling back to gemini-2.5-pro...")
+                            _logger.warning(f"[Fallback] gemini-2.5-flash overloaded (503): {e}. Falling back to gemini-2.5-pro...")
                             try:
                                 # Fallback to 2.5-pro if flash is overloaded globally
                                 response = _call_gemini_with_retry(
@@ -2967,7 +3052,7 @@ class PRCChatAssistant:
                                 if last_brace != -1:
                                     salvaged_text = clean_text[:last_brace + 1] + ']'
                                     extracted_json = _json.loads(salvaged_text)
-                                    print(f"[Warning] JSON was truncated. Salvaged {len(extracted_json)} records.")
+                                    _logger.warning(f"[Pipeline] JSON was truncated. Salvaged {len(extracted_json)} records.")
                                 else:
                                     extracted_json = []
                             except Exception as e2:
@@ -3021,41 +3106,34 @@ class PRCChatAssistant:
                         if validation_result["status"] == "error":
                             # Log warnings but DO NOT crash — the raw document text
                             # is already in extracted_context and Hviel can read directly from it.
-                            print("\n" + "!"*80)
-                            print(" HVIEL SCAL PIPELINE - VALIDATION WARNINGS (NON-FATAL) ".center(80, "!"))
-                            print("!"*80)
+                            _logger.warning("[Pipeline] VALIDATION WARNINGS (NON-FATAL)")
                             for err in validation_result["errors"]:
-                                print(f" [WARN] {err}")
-                            print("!"*80)
-                            print(" Pipeline continues with raw document — Hviel will read tables directly.")
-                            print("!"*80 + "\n")
+                                _logger.warning(f"[Pipeline] Validation: {err}")
+                            _logger.warning("[Pipeline] Continues with raw document — Hviel will read tables directly.")
                             # Skip enrichment steps but don't crash
                             # The raw [WORD DOCUMENT] text is already in extracted_context
                             
                         else:
-                            print("[Pipeline] Executing Step 3: Pure-Physics Calculations (prc_physics.py)...")
+                            _logger.info("[Pipeline] Executing Step 3: Pure-Physics Calculations (prc_physics.py)...")
                             from prc_physics import calculate_compressibility_sweep
                             try:
                                 extracted_json = calculate_compressibility_sweep(extracted_json)
-                                print(f"[Pipeline] Successfully enriched JSON sweep data with Pore Compressibility and Lithology.")
+                                _logger.info("[Pipeline] Enriched JSON sweep data with Pore Compressibility and Lithology.")
                             except Exception as pe:
-                                print(f"[Pipeline] Error during deterministic physics calculation: {pe}")
+                                _logger.warning(f"[Pipeline] Error during deterministic physics calculation: {pe}")
                             
                             # 4. Master Engineer Analysis (LLM) + Deterministic Dashboard Architect
                             active_key = self._keys[self._current_idx] if hasattr(self, "_keys") and hasattr(self, "_current_idx") else os.getenv("GEMINI_API_KEY", "DUMMY_KEY")
                             master_eng = MasterEngineerNode(api_key=active_key)
                         
-                            print("\n" + "="*80)
-                            print(" HVIEL SCAL PIPELINE - RUNNING GEOMECHANICS & DASHBOARD NODES ".center(80, "="))
-                            print("="*80)
-                            print("[Pipeline] Triggering Master Engineer Node geomechanics analysis...")
+                            _logger.info("[Pipeline] Running geomechanics & dashboard nodes...")
                             engineer_report = master_eng.analyze_scal_data(extracted_json)
 
                             # 5. DETERMINISTIC Dashboard Architect (no LLM — pure Python code emission)
                             #    Auto-detects test type, routes scalars→gauges, arrays→curves
-                            print("[Pipeline] Triggering Universal Dashboard Architect (deterministic)...")
+                            _logger.info("[Pipeline] Triggering Universal Dashboard Architect (deterministic)...")
                             detected_type = detect_test_type(extracted_json)
-                            print(f"[Pipeline] Auto-detected test type: {detected_type}")
+                            _logger.info(f"[Pipeline] Auto-detected test type: {detected_type}")
 
                             well_name_dash = "PROVISIONAL WELL"
                             if isinstance(fr_data, dict):
@@ -3076,7 +3154,7 @@ class PRCChatAssistant:
                                 physics_audit=_dash_audit,
                                 output_path=dash_output_path,
                             )
-                            print(f"[Pipeline] Dashboard generated: {dash_output_path} ({len(streamlit_code)} chars)")
+                            _logger.info(f"[Pipeline] Dashboard generated: {dash_output_path} ({len(streamlit_code)} chars)")
                         
                             # Generate static plots as fallback/reference
                             outputs_dir = visualizer.generate_plots(extracted_json, streamlit_code=streamlit_code)
@@ -3085,25 +3163,13 @@ class PRCChatAssistant:
                             report_path = os.path.join(outputs_dir, "reservoir_report.md")
                             with open(report_path, "w", encoding="utf-8") as f:
                                 f.write(engineer_report)
-                            print(f"[Pipeline] Geomechanical report successfully saved: {report_path}")
+                            _logger.info(f"[Pipeline] Geomechanical report saved: {report_path}")
                         
-                            print("\n" + "="*80)
-                            print(" HVIEL SCAL PIPELINE - VALIDATION & MULTI-AGENT SUCCESS ".center(80, "="))
-                            print("="*80)
-                            print(f" Pristine data validated successfully ({len(extracted_json)} samples).")
-                            print(f" Test Type: {detected_type}")
+                            _logger.info(f"[Pipeline] Validation success: {len(extracted_json)} samples, type={detected_type}")
                             if validation_result.get("warnings"):
-                                print("\n Diagnostic Warnings (Missing Optional Parameters):")
                                 for warn in validation_result["warnings"]:
-                                    print(f"  [!] {warn}")
-                            print(f"\n Generated dynamic and standard curves under: {outputs_dir}")
-                            print("  -> porosity_vs_pressure.png (Static)")
-                            print("  -> permeability_vs_pressure.png (Static)")
-                            print("  -> validated_scal_data.json")
-                            print("  -> reservoir_report.md (Geomechanics Insights)")
-                            print("  -> app_dashboard.py (Universal Interactive Streamlit Dashboard)")
-                            print("\n Run the dashboard with: streamlit run outputs/app_dashboard.py")
-                            print("="*80 + "\n")
+                                    _logger.warning(f"[Pipeline] Diagnostic: {warn}")
+                            _logger.info(f"[Pipeline] Outputs generated under: {outputs_dir}")
 
                             # Populate well info and other stats for the assistant context
                             well_name = "PROVISIONAL WELL"
@@ -3148,8 +3214,8 @@ class PRCChatAssistant:
                     # DO NOT re-raise — let the chat continue with raw document text.
                     # The raw [WORD DOCUMENT] markdown was already added to extracted_context
                     # at line 2640, so Hviel can still read ALL tables directly.
-                    print(f"[Pipeline] Extraction pipeline encountered an issue: {e}")
-                    print(f"[Pipeline] Falling back to raw document mode — Hviel will read tables directly.")
+                    _logger.warning(f"[Pipeline] Extraction pipeline encountered an issue: {e}")
+                    _logger.warning("[Pipeline] Falling back to raw document mode — Hviel will read tables directly.")
 
                 finally:
                     try: os.unlink(tmp_path)
@@ -3197,7 +3263,7 @@ class PRCChatAssistant:
         if not extracted_context and sid and email:
             try:
                 fname_rows = db(
-                    "SELECT DISTINCT fname FROM m WHERE sid=? AND user_email=? AND fname IS NOT NULL ORDER BY id DESC",
+                    "SELECT DISTINCT fname FROM (SELECT fname FROM m WHERE sid=? AND user_email=? AND fname IS NOT NULL ORDER BY id DESC) sub",
                     (sid, email),
                 )
                 _seen_fn: set = set()
@@ -3327,13 +3393,27 @@ class PRCChatAssistant:
 
                         client = self._client
 
+                    # Dynamic prompt construction with continuous learning corrections
+                    dynamic_system_prompt = SYSTEM_PROMPT
+                    if sid or email:
+                        try:
+                            corrs = db("SELECT original_issue, corrected_value FROM user_corrections WHERE session_id=? OR user_email=? ORDER BY timestamp ASC", (sid or "", email or ""))
+                            if corrs:
+                                dynamic_system_prompt += "\n\n=== LEARNED SYSTEM PREFERENCES & PAST CORRECTIONS ===\n"
+                                dynamic_system_prompt += "The user has made the following corrections/overrides in this session. You MUST obey these instructions strictly for all subsequent data loading, column mapping, and parameter fitting:\n"
+                                for orig, corr in corrs:
+                                    dynamic_system_prompt += f"- [Issue]: {orig}  -->  [Correction]: {corr}\n"
+                                dynamic_system_prompt += "======================================================\n\n"
+                        except Exception as e_corr:
+                            _logger.warning(f"[LearningLoop] Failed to fetch corrections: {e_corr}")
+
                     cfg = genai_types.GenerateContentConfig(
 
                         temperature=0.2,
 
                         tools=_HVIEL_TOOLS,
 
-                        system_instruction=SYSTEM_PROMPT,
+                        system_instruction=dynamic_system_prompt,
 
                     )
 
@@ -3789,7 +3869,7 @@ class PRCChatAssistant:
         if not file_context and sid and email:
             try:
                 fname_rows = db(
-                    "SELECT DISTINCT fname FROM m WHERE sid=? AND user_email=? AND fname IS NOT NULL ORDER BY id DESC",
+                    "SELECT DISTINCT fname FROM (SELECT fname FROM m WHERE sid=? AND user_email=? AND fname IS NOT NULL ORDER BY id DESC) sub",
                     (sid, email),
                 )
                 # fname values may be semicolon-delimited (multiple files uploaded
@@ -3815,16 +3895,7 @@ class PRCChatAssistant:
 
         _logger.info(f"[DocGen] file_context after fallback: {len(file_context)} chars")
 
-        # ── HARD DEBUG ───────────────────────────────────────────────────────
-        print("\n=== FILE READER OUTPUTS ===")
-        print(f"  f_parts={len(f_parts or [])}  sid={sid}  email={email}")
-        print("KW DATA:", _safe_json_dumps(_debug_kw_data, indent=2))
-        print("MICP DATA:", _safe_json_dumps(_debug_micp_data, indent=2))
-        print("IMBI DATA:", _safe_json_dumps(_debug_imbi_data, indent=2))
-        print(f"  file_context length: {len(file_context)} chars")
-        print("  --- file_context preview (first 2000 chars) ---")
-        print(file_context[:2000] if file_context else "(EMPTY — fallback did not recover any stored data)")
-        # ── END HARD DEBUG ────────────────────────────────────────────────────
+        _logger.debug(f"[DocGen] f_parts={len(f_parts or [])} sid={sid} file_context={len(file_context)} chars")
 
         hist_text = "".join(
 
@@ -3870,6 +3941,15 @@ class PRCChatAssistant:
 
             f"- Never use '...' or '[insert value]'  -  use 'data not available' for missing values\n"
 
+            f"\nOUTPUT STYLE RULES:\n"
+            f"- Write in third person, past tense: 'Five samples were analyzed' not 'I analyzed five samples'\n"
+            f"- No filler, no enthusiasm ('Great!', 'Successfully!'), no hedging\n"
+            f"- Never expose internal reasoning ('I will...', 'Let me...', 'I have successfully...')\n"
+            f"- Never expose tool names, source-column references, or raw data arrays in prose\n"
+            f"- Round numbers to sensible significant figures matching measurement precision\n"
+            f"- Summarize ranges in prose ('Pressure ranged from 0.45 to 18.4 psi'); put detailed values in tables\n"
+            f"- Always state units on first mention of any value\n"
+
         )
 
 
@@ -3892,25 +3972,29 @@ class PRCChatAssistant:
 
         )
 
-        # ── HARD DEBUG ───────────────────────────────────────────────────────
-        _full_prompt = system_doc + "\n\n--- USER CONTENT ---\n" + user_content
-        print("\n=== PROMPT SENT TO GEMINI (first 4000 chars) ===")
-        print(_full_prompt[:4000])
-        # ── END HARD DEBUG ────────────────────────────────────────────────────
+        _logger.debug(f"[DocGen] Prompt built: system_doc={len(system_doc)} chars, user_content={len(user_content)} chars")
 
         active_model = "gemini-2.5-flash"
 
-        cfg = genai_types.GenerateContentConfig(temperature=0.1, system_instruction=system_doc)
+        # Dynamic document prompt construction with corrections
+        dynamic_system_doc = system_doc
+        if sid or email:
+            try:
+                corrs = db("SELECT original_issue, corrected_value FROM user_corrections WHERE session_id=? OR user_email=? ORDER BY timestamp ASC", (sid or "", email or ""))
+                if corrs:
+                    dynamic_system_doc += "\n\n=== LEARNED SYSTEM PREFERENCES & PAST CORRECTIONS ===\n"
+                    dynamic_system_doc += "The user has made the following corrections/overrides in this session. You MUST obey these instructions strictly for all subsequent data loading, column mapping, and parameter fitting:\n"
+                    for orig, corr in corrs:
+                        dynamic_system_doc += f"- [Issue]: {orig}  -->  [Correction]: {corr}\n"
+                    dynamic_system_doc += "======================================================\n\n"
+            except Exception as e_corr:
+                _logger.warning(f"[LearningLoop] Failed to fetch corrections for docgen: {e_corr}")
+
+        cfg = genai_types.GenerateContentConfig(temperature=0.1, system_instruction=dynamic_system_doc)
 
         contents = [genai_types.Content(role="user", parts=[genai_types.Part(text=user_content)])]
 
-        # ── DEBUG: immediately before Gemini call ────────────────────────────
-        import json as _json_dbg
-        print("DEBUG KW:", _json_dbg.dumps(_debug_kw_data, indent=2) if _debug_kw_data else "KW IS NONE/EMPTY")
-        print("DEBUG MICP:", _json_dbg.dumps(_debug_micp_data, indent=2) if _debug_micp_data else "MICP IS NONE/EMPTY")
-        print("DEBUG IMBI:", _json_dbg.dumps(_debug_imbi_data, indent=2) if _debug_imbi_data else "IMBI IS NONE/EMPTY")
-        print("DEBUG PROMPT SNIPPET:", _full_prompt[:3000])
-        # ── END DEBUG ─────────────────────────────────────────────────────────
+        _logger.debug(f"[DocGen] Pre-call context: kw={bool(_debug_kw_data)} micp={bool(_debug_micp_data)} imbi={bool(_debug_imbi_data)}")
 
         with self._client_lock:
 
@@ -4348,6 +4432,10 @@ def init_db() -> None:
         # ── USER FILE STORE (per-user persistent file history) ─────────────────
         "CREATE TABLE IF NOT EXISTS user_files (id INTEGER PRIMARY KEY AUTOINCREMENT, user_email TEXT NOT NULL, filename TEXT NOT NULL, file_hash TEXT NOT NULL, extracted_text TEXT, data_type TEXT, key_params TEXT, created_at REAL, UNIQUE(user_email, file_hash))",
 
+        "CREATE TABLE IF NOT EXISTS api_metrics (id INTEGER PRIMARY KEY AUTOINCREMENT, session_id TEXT, timestamp REAL, model TEXT, prompt_tokens INTEGER, completion_tokens INTEGER, cost_usd REAL)",
+
+        "CREATE TABLE IF NOT EXISTS user_corrections (id INTEGER PRIMARY KEY AUTOINCREMENT, session_id TEXT, user_email TEXT, original_issue TEXT, corrected_value TEXT, timestamp REAL)",
+
     ]
 
     if _PG_AVAILABLE:
@@ -4631,6 +4719,42 @@ def get_summary(admin: bool = Depends(verify_admin)):
 
         t_kb       = db("SELECT COUNT(*) FROM kb")[0][0]
 
+        # ── Visual Admin Telemetry updates ──
+        
+        t_tokens_res = db("SELECT SUM(prompt_tokens + completion_tokens) FROM api_metrics")
+        t_tokens = t_tokens_res[0][0] if t_tokens_res and t_tokens_res[0][0] is not None else 0
+
+        t_cost_res = db("SELECT SUM(cost_usd) FROM api_metrics")
+        t_cost = t_cost_res[0][0] if t_cost_res and t_cost_res[0][0] is not None else 0.0
+
+        t_engineers_res = db("SELECT COUNT(DISTINCT user_email) FROM m WHERE user_email IS NOT NULL AND role = 'user'")
+        t_engineers = t_engineers_res[0][0] if t_engineers_res and t_engineers_res[0][0] is not None else 0
+
+        # Usage breakdown by engineer
+        eng_breakdown = []
+        try:
+            eng_rows = db("""
+                SELECT COALESCE(s.user_email, 'anonymous') as email, 
+                       SUM(a.prompt_tokens + a.completion_tokens) as tokens, 
+                       SUM(a.cost_usd) as cost, 
+                       COUNT(DISTINCT a.session_id) as sessions 
+                FROM api_metrics a 
+                LEFT JOIN sessions s ON a.session_id = s.sid 
+                GROUP BY s.user_email 
+                ORDER BY tokens DESC
+            """)
+            eng_breakdown = [{"email": r[0], "tokens": r[1], "cost": r[2], "sessions": r[3]} for r in eng_rows]
+        except Exception as e_eng:
+            _logger.warning(f"[AdminSummary] Failed to query engineer breakdown: {e_eng}")
+
+        # Usage breakdown by model
+        mod_breakdown = []
+        try:
+            mod_rows = db("SELECT model, SUM(prompt_tokens + completion_tokens) as tokens, SUM(cost_usd) as cost FROM api_metrics GROUP BY model")
+            mod_breakdown = [{"model": r[0], "tokens": r[1], "cost": r[2]} for r in mod_rows]
+        except Exception as e_mod:
+            _logger.warning(f"[AdminSummary] Failed to query model breakdown: {e_mod}")
+
         return {
 
             "total_users": t_users, "total_feedback": t_feedback,
@@ -4638,6 +4762,14 @@ def get_summary(admin: bool = Depends(verify_admin)):
             "total_events": t_events, "total_messages": t_msgs,
 
             "total_sessions": t_sessions, "total_kb_chunks": t_kb,
+
+            "total_tokens": t_tokens, "total_cost_usd": t_cost,
+            
+            "total_engineers": t_engineers,
+            
+            "engineer_breakdown": eng_breakdown,
+            
+            "model_breakdown": mod_breakdown,
 
             "storage_type": "PostgreSQL" if _PG_AVAILABLE else "SQLite"
 
@@ -4916,6 +5048,7 @@ async def chat_stream(
                 # 6. Finalization
 
                 if full_reply:
+                    full_reply = _extract_and_log_corrections(sid, email, full_reply)
 
                     db("INSERT INTO m (sid,role,text,ts,user_email) VALUES (?,?,?,?,?)",
 
@@ -5080,268 +5213,290 @@ async def handle(
     files:         list[UploadFile] = File(default=[]),
 
 ):
+    try:
+        _tls.breadcrumbs = []
+        _add_breadcrumb("Chat request received")
 
-    sid      = session_id or str(uuid.uuid4())
+        sid      = session_id or str(uuid.uuid4())
 
-    email    = user_email.lower().strip() if user_email else None
+        email    = user_email.lower().strip() if user_email else None
 
-    engineer = (engineer_name or "PRC Engineering Staff").strip()
+        engineer = (engineer_name or "PRC Engineering Staff").strip()
 
 
 
-    valid_files = [f for f in files if getattr(f, "filename", "")]
+        valid_files = [f for f in files if getattr(f, "filename", "")]
 
-    for f in valid_files:
-        f.filename = sanitize_filename(f.filename)
-        sig_bytes = await f.read(1024)
-        await f.seek(0)
-        if not verify_file_signature(sig_bytes, f.filename):
-            raise HTTPException(status_code=400, detail=f"File signature mismatch or invalid format for extension: {f.filename}")
+        for f in valid_files:
+            f.filename = sanitize_filename(f.filename)
+            sig_bytes = await f.read(1024)
+            await f.seek(0)
+            if not verify_file_signature(sig_bytes, f.filename):
+                raise HTTPException(status_code=400, detail=f"File signature mismatch or invalid format for extension: {f.filename}")
 
-    f_parts = []
+        f_parts = []
 
-    _tls.last_file_name = valid_files[0].filename if valid_files else None
+        _tls.last_file_name = valid_files[0].filename if valid_files else None
 
-    _tls.current_session_id = sid
+        _tls.current_session_id = sid
 
-    _MAX_UPLOAD_BYTES = 20 * 1024 * 1024  # 20 MB
+        _MAX_UPLOAD_BYTES = 20 * 1024 * 1024  # 20 MB
 
-    for file in valid_files:
+        for file in valid_files:
 
-        b = await file.read(_MAX_UPLOAD_BYTES + 1)
+            b = await file.read(_MAX_UPLOAD_BYTES + 1)
 
-        if len(b) > _MAX_UPLOAD_BYTES:
-            raise HTTPException(status_code=413, detail=f"File '{file.filename}' exceeds the 20 MB limit.")
+            if len(b) > _MAX_UPLOAD_BYTES:
+                raise HTTPException(status_code=413, detail=f"File '{file.filename}' exceeds the 20 MB limit.")
 
-        if b:
+            if b:
 
-            f_parts.append((b, file.content_type, file.filename))
+                f_parts.append((b, file.content_type, file.filename))
 
-            # Persist a file record for cross-session history (key_params filled later by background task)
+                # Persist a file record for cross-session history (key_params filled later by background task)
+                try:
+                    fhash = hashlib.sha256(b).hexdigest()
+                    fext  = os.path.splitext(file.filename.lower())[1].lstrip(".")
+                    ftype = fext.upper() or "UNKNOWN"
+                    if _PG_AVAILABLE:
+                        db(
+                            "INSERT INTO user_files (user_email, filename, file_hash, data_type, created_at) "
+                            "VALUES (?,?,?,?,?) ON CONFLICT (user_email, file_hash) DO NOTHING",
+                            (email, file.filename, fhash, ftype, time.time()),
+                        )
+                    else:
+                        db(
+                            "INSERT OR IGNORE INTO user_files (user_email, filename, file_hash, data_type, created_at) "
+                            "VALUES (?,?,?,?,?)",
+                            (email, file.filename, fhash, ftype, time.time()),
+                        )
+                except Exception as _ufe:
+                    _logger.warning(f"[UserFiles] Could not record file for {email}: {_ufe}")
+
+
+
+        kb_ctx = await KnowledgeBase.search_async(message, sid=sid, email=email)
+
+        file_history_ctx = get_user_file_history_context(email)
+        summary_ctx = get_session_summary_context(sid)
+        prefix = "\n\n".join(filter(None, [file_history_ctx, summary_ctx]))
+        if prefix:
+            kb_ctx = prefix + "\n\n" + kb_ctx if kb_ctx else prefix
+
+        # Save user message WITH filename if applicable
+
+        # Store all uploaded filenames (semicolon-delimited) so the session-file
+        # fallback in generate_document_json() can recover extracted_text for every
+        # file, not just the first one in a multi-file upload.
+        fname = ";".join(f.filename for f in valid_files) if valid_files else None
+
+        await async_db("INSERT INTO m (sid,role,text,ts,user_email,fname) VALUES (?,?,?,?,?,?)",
+
+           (sid, "user", message, time.time(), email, fname))
+
+
+
+        # Upsert into sessions table
+
+        if _PG_AVAILABLE:
+
+            await async_db("INSERT INTO sessions (sid, title, user_email, updated_at) VALUES (?, 'New Study', ?, ?) "
+
+               "ON CONFLICT (sid) DO UPDATE SET updated_at = EXCLUDED.updated_at",
+
+               (sid, email, time.time()))
+
+        else:
+
+            await async_db("INSERT OR IGNORE INTO sessions (sid, title, user_email, created_at, updated_at) VALUES (?, 'New Study', ?, ?, ?)",
+
+               (sid, email, time.time(), time.time()))
+
+            await async_db("UPDATE sessions SET updated_at=? WHERE sid=?", (time.time(), sid))
+
+
+
+        # â"€â"€ Security Guard: Verify session ownership before any data access â"€â"€â"€â"€â"€â"€â"€
+
+        _verify_session_owner(sid, email)
+
+
+
+        # â"€â"€ Document generation path (Gemini JSON  ->  HvielDocEngine file) â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€
+
+        file_type = hviel_engine._detect_type(message) if hviel_engine else None
+
+        if file_type:
+
             try:
-                fhash = hashlib.sha256(b).hexdigest()
-                fext  = os.path.splitext(file.filename.lower())[1].lstrip(".")
-                ftype = fext.upper() or "UNKNOWN"
-                if _PG_AVAILABLE:
-                    db(
-                        "INSERT INTO user_files (user_email, filename, file_hash, data_type, created_at) "
-                        "VALUES (?,?,?,?,?) ON CONFLICT (user_email, file_hash) DO NOTHING",
-                        (email, file.filename, fhash, ftype, time.time()),
+
+                hist_rows = db("SELECT role, text FROM m WHERE sid=? AND user_email=? ORDER BY id DESC LIMIT 10", (sid, email))
+
+                history   = list(reversed([{"role": r, "text": t} for r, t in hist_rows]))
+
+
+
+                # Run blocking Gemini call + file I/O in a thread so we don't block the event loop
+
+                def _build_file():
+
+                    raw_json = assistant.generate_document_json(
+
+                        file_type, message, history, kb_ctx, engineer, f_parts,
+                        sid=sid, email=email,
+
                     )
-                else:
-                    db(
-                        "INSERT OR IGNORE INTO user_files (user_email, filename, file_hash, data_type, created_at) "
-                        "VALUES (?,?,?,?,?)",
-                        (email, file.filename, fhash, ftype, time.time()),
-                    )
-            except Exception as _ufe:
-                _logger.warning(f"[UserFiles] Could not record file for {email}: {_ufe}")
+
+                    return hviel_engine.build_from_json(raw_json, file_type, engineer=engineer)
 
 
 
-    kb_ctx = await KnowledgeBase.search_async(message, sid=sid, email=email)
+                filepath = await asyncio.get_running_loop().run_in_executor(None, _build_file)
 
-    file_history_ctx = get_user_file_history_context(email)
-    summary_ctx = get_session_summary_context(sid)
-    prefix = "\n\n".join(filter(None, [file_history_ctx, summary_ctx]))
-    if prefix:
-        kb_ctx = prefix + "\n\n" + kb_ctx if kb_ctx else prefix
+                basename = os.path.basename(filepath)
 
-    # Save user message WITH filename if applicable
-
-    # Store all uploaded filenames (semicolon-delimited) so the session-file
-    # fallback in generate_document_json() can recover extracted_text for every
-    # file, not just the first one in a multi-file upload.
-    fname = ";".join(f.filename for f in valid_files) if valid_files else None
-
-    await async_db("INSERT INTO m (sid,role,text,ts,user_email,fname) VALUES (?,?,?,?,?,?)",
-
-       (sid, "user", message, time.time(), email, fname))
+                dl_url   = f"/api/download/{basename}"
 
 
 
-    # Upsert into sessions table
+                type_labels = {"docx": "Word Document", "xlsx": "Excel Spreadsheet",
 
-    if _PG_AVAILABLE:
+                               "pptx": "PowerPoint Presentation", "pdf": "PDF Report"}
 
-        await async_db("INSERT INTO sessions (sid, title, user_email, updated_at) VALUES (?, 'New Study', ?, ?) "
+                reply = (
 
-           "ON CONFLICT (sid) DO UPDATE SET updated_at = EXCLUDED.updated_at",
+                    f"### PRC {type_labels.get(file_type, file_type.upper())} Ready\n\n"
 
-           (sid, email, time.time()))
+                    f"Your professional export has been compiled from the current session analysis. "
 
-    else:
-
-        await async_db("INSERT OR IGNORE INTO sessions (sid, title, user_email, created_at, updated_at) VALUES (?, 'New Study', ?, ?, ?)",
-
-           (sid, email, time.time(), time.time()))
-
-        await async_db("UPDATE sessions SET updated_at=? WHERE sid=?", (time.time(), sid))
-
-
-
-    # â"€â"€ Security Guard: Verify session ownership before any data access â"€â"€â"€â"€â"€â"€â"€
-
-    _verify_session_owner(sid, email)
-
-
-
-    # â"€â"€ Document generation path (Gemini JSON  ->  HvielDocEngine file) â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€
-
-    file_type = hviel_engine._detect_type(message) if hviel_engine else None
-
-    if file_type:
-
-        try:
-
-            hist_rows = db("SELECT role, text FROM m WHERE sid=? AND user_email=? ORDER BY id DESC LIMIT 10", (sid, email))
-
-            history   = list(reversed([{"role": r, "text": t} for r, t in hist_rows]))
-
-
-
-            # Run blocking Gemini call + file I/O in a thread so we don't block the event loop
-
-            def _build_file():
-
-                raw_json = assistant.generate_document_json(
-
-                    file_type, message, history, kb_ctx, engineer, f_parts,
-                    sid=sid, email=email,
+                    f"Click **Download** to retrieve the file."
 
                 )
 
-                return hviel_engine.build_from_json(raw_json, file_type, engineer=engineer)
+                await async_db("INSERT INTO m (sid,role,text,url,ts,user_email,fname) VALUES (?,?,?,?,?,?,?)",
+
+                   (sid, "model", reply, dl_url, time.time(), email, basename))
 
 
 
-            filepath = await asyncio.get_running_loop().run_in_executor(None, _build_file)
+                return {
 
-            basename = os.path.basename(filepath)
+                    "status":          "success",
 
-            dl_url   = f"/api/download/{basename}"
+                    "session_id":      sid,
 
+                    "reply":           reply,
 
+                    "is_report_ready": True,
 
-            type_labels = {"docx": "Word Document", "xlsx": "Excel Spreadsheet",
+                    "download_url":    dl_url,
 
-                           "pptx": "PowerPoint Presentation", "pdf": "PDF Report"}
+                    "doc_type":        "excel" if file_type == "xlsx" else file_type,
 
-            reply = (
+                }
 
-                f"### PRC {type_labels.get(file_type, file_type.upper())} Ready\n\n"
+            except Exception as e:
 
-                f"Your professional export has been compiled from the current session analysis. "
+                _logger.error(f"[DocGen] {file_type} generation failed: {e}")
 
-                f"Click **Download** to retrieve the file."
+                err_lower = str(e).lower()
+                is_overload = any(x in err_lower for x in [
+                    "503", "unavailable", "resource_exhausted", "overload", "retries"
+                ])
+                reply = (
+                    " Gemini is currently unavailable after 5 attempts. "
+                    "Please try again in a few minutes or contact PRC support."
+                    if is_overload else
+                    f" Document generation failed: {str(e)[:200]}. "
+                    "Please retry or contact PRC support."
+                )
 
-            )
+                await async_db("INSERT INTO m (sid,role,text,ts,user_email) VALUES (?,?,?,?,?)",
 
-            await async_db("INSERT INTO m (sid,role,text,url,ts,user_email,fname) VALUES (?,?,?,?,?,?,?)",
+                   (sid, "model", reply, time.time(), email))
 
-               (sid, "model", reply, dl_url, time.time(), email, basename))
-
-
-
-            return {
-
-                "status":          "success",
-
-                "session_id":      sid,
-
-                "reply":           reply,
-
-                "is_report_ready": True,
-
-                "download_url":    dl_url,
-
-                "doc_type":        "excel" if file_type == "xlsx" else file_type,
-
-            }
-
-        except Exception as e:
-
-            _logger.error(f"[DocGen] {file_type} generation failed: {e}")
-
-            err_lower = str(e).lower()
-            is_overload = any(x in err_lower for x in [
-                "503", "unavailable", "resource_exhausted", "overload", "retries"
-            ])
-            reply = (
-                " Gemini is currently unavailable after 5 attempts. "
-                "Please try again in a few minutes or contact PRC support."
-                if is_overload else
-                f" Document generation failed: {str(e)[:200]}. "
-                "Please retry or contact PRC support."
-            )
-
-            await async_db("INSERT INTO m (sid,role,text,ts,user_email) VALUES (?,?,?,?,?)",
-
-               (sid, "model", reply, time.time(), email))
-
-            return {"status": "error", "session_id": sid, "reply": reply,
-                    "is_doc_error": True}
+                return {"status": "error", "session_id": sid, "reply": reply,
+                        "is_doc_error": True}
 
 
 
-    # â"€â"€ Standard chat path (Gemini with file analysis) â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€
+        # â"€â"€ Standard chat path (Gemini with file analysis) â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€
 
-    hist_rows = db("SELECT role, text FROM m WHERE sid=? AND user_email=? ORDER BY id DESC LIMIT 10", (sid, email))
+        hist_rows = db("SELECT role, text FROM m WHERE sid=? AND user_email=? ORDER BY id DESC LIMIT 10", (sid, email))
 
-    history   = list(reversed([{"role": r, "text": t} for r, t in hist_rows]))
-
-
-
-    # Run blocking Gemini call in a thread so we don't block the FastAPI event loop.
-    # _post_kb captures _tls.pending_kb from INSIDE the executor thread where chat() runs,
-    # because _tls is thread-local and invisible across thread boundaries.
-    _post_kb: list = []
-
-    def _chat_capture():
-        result = assistant.chat(history, message, kb_ctx, f_parts, sid=sid, email=email)
-        _post_kb.extend(getattr(_tls, 'pending_kb', []))
-        return result
-
-    try:
-        resp = await asyncio.get_running_loop().run_in_executor(None, _chat_capture)
-    except Exception as e:
-        _logger.error(f"[Chat] Gemini/file processing error: {e}")
-        reply = f"Processing error: {str(e)[:300]}. Please retry or contact PRC support."
-        await async_db("INSERT INTO m (sid,role,text,ts,user_email) VALUES (?,?,?,?,?)",
-           (sid, "model", reply, time.time(), email))
-        return {"status": "error", "session_id": sid, "reply": reply}
-
-    resp_text = resp if isinstance(resp, str) else str(resp) if resp is not None else ""
-    await async_db("INSERT INTO m (sid,role,text,ts,user_email) VALUES (?,?,?,?,?)",
-
-       (sid, "model", resp_text, time.time(), email))
+        history   = list(reversed([{"role": r, "text": t} for r, t in hist_rows]))
 
 
 
-    if _post_kb:
+        # Run blocking Gemini call in a thread so we don't block the FastAPI event loop.
+        # _post_kb captures _tls.pending_kb from INSIDE the executor thread where chat() runs,
+        # because _tls is thread-local and invisible across thread boundaries.
+        _post_kb: list = []
 
-        background_tasks.add_task(KnowledgeBase.ingest_transactional, "SCAL Upload", _post_kb, sid=sid, email=email)
+        def _chat_capture():
+            result = assistant.chat(history, message, kb_ctx, f_parts, sid=sid, email=email)
+            _post_kb.extend(getattr(_tls, 'pending_kb', []))
+            return result
 
-    if valid_files and resp_text:
-        background_tasks.add_task(_save_summary_background, sid, email, resp_text, valid_files[0].filename)
         try:
-            import tempfile
-            ext = os.path.splitext(valid_files[0].filename or "")[1].lower() or ".xlsx"
-            with tempfile.NamedTemporaryFile(delete=False, suffix=ext) as tf:
-                tf.write(f_parts[0][0])
-                tmp_filepath = tf.name
-            try:
-                result = grade_ai_response(tmp_filepath, resp_text)
-                print("\n" + "="*60 + "\n[AUTO GRADER CONSOLE REPORT]\n" + "="*60)
-                print(result["report"])
-                print("="*60 + "\n")
-            finally:
-                try: os.unlink(tmp_filepath)
-                except OSError: pass
-        except Exception as ge:
-            _logger.warning(f"[AutoGrader] Failed to execute console grade: {ge}")
+            resp = await asyncio.get_running_loop().run_in_executor(None, _chat_capture)
+        except Exception as e:
+            _logger.error(f"[Chat] Gemini/file processing error: {e}")
+            reply = f"Processing error: {str(e)[:300]}. Please retry or contact PRC support."
+            await async_db("INSERT INTO m (sid,role,text,ts,user_email) VALUES (?,?,?,?,?)",
+               (sid, "model", reply, time.time(), email))
+            return {"status": "error", "session_id": sid, "reply": reply}
 
-    return {"status": "success", "session_id": sid, "reply": resp_text}
+        resp_text = resp if isinstance(resp, str) else str(resp) if resp is not None else ""
+        resp_text = _extract_and_log_corrections(sid, email, resp_text)
+        await async_db("INSERT INTO m (sid,role,text,ts,user_email) VALUES (?,?,?,?,?)",
+
+           (sid, "model", resp_text, time.time(), email))
+
+
+
+        if _post_kb:
+
+            background_tasks.add_task(KnowledgeBase.ingest_transactional, "SCAL Upload", _post_kb, sid=sid, email=email)
+
+        if valid_files and resp_text:
+            background_tasks.add_task(_save_summary_background, sid, email, resp_text, valid_files[0].filename)
+            try:
+                import tempfile
+                ext = os.path.splitext(valid_files[0].filename or "")[1].lower() or ".xlsx"
+                with tempfile.NamedTemporaryFile(delete=False, suffix=ext) as tf:
+                    tf.write(f_parts[0][0])
+                    tmp_filepath = tf.name
+                try:
+                    result = grade_ai_response(tmp_filepath, resp_text)
+                    _logger.info("[AutoGrader] Console Report")
+                    _logger.info(result["report"])
+                finally:
+                    try: os.unlink(tmp_filepath)
+                    except OSError: pass
+            except Exception as ge:
+                _logger.warning(f"[AutoGrader] Failed to execute console grade: {ge}")
+
+        return {"status": "success", "session_id": sid, "reply": resp_text}
+    except Exception as e:
+        import traceback
+        tb = traceback.format_exc()
+        diag = {
+            "timestamp": time.time(),
+            "error": str(e),
+            "traceback": tb,
+            "breadcrumbs": getattr(_tls, "breadcrumbs", [])
+        }
+        try:
+            import os
+            os.makedirs("outputs", exist_ok=True)
+            with open("outputs/crash_diagnostics.json", "w", encoding="utf-8") as diag_f:
+                import json as _json_diag
+                _json_diag.dump(diag, diag_f, indent=2)
+        except Exception as save_err:
+            _logger.warning(f"[AppCrash] Failed to save crash diagnostics: {save_err}")
+        _logger.error(f"[AppCrash] Diagnostic report saved: {e}")
+        raise HTTPException(status_code=500, detail=f"Request crashed. Diagnostics stored. Error: {str(e)}")
 
 
 
