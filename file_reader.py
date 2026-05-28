@@ -139,9 +139,30 @@ def _read_excel(filepath):
 
     return result
 
+def smart_read_csv(filepath: str, encodings: list = None, **kwargs):
+    import pandas as pd
+    import logging
+    logger = logging.getLogger("HvielPipeline")
+    if encodings is None:
+        encodings = ["utf-8", "utf-8-sig", "latin1", "cp1252", "utf-16"]
+        
+    for idx, encoding in enumerate(encodings):
+        try:
+            logger.info(f"Attempting CSV parsing using encoding scheme: {encoding}")
+            df = pd.read_csv(filepath, encoding=encoding, **kwargs)
+            logger.info(f"Successfully decoded and parsed CSV with {encoding}")
+            return df
+        except (UnicodeDecodeError, LookupError) as e:
+            logger.warning(f"Encoding {encoding} failed to decode {filepath}. Error: {str(e)}")
+            if idx == len(encodings) - 1:
+                raise ValueError(
+                    f"Failed to decode CSV file. File encoding is unsupported. "
+                    f"Please save the data using standard UTF-8 or Latin1 format."
+                ) from e
+
 def _read_csv(filepath):
     import pandas as pd
-    df = pd.read_csv(filepath)
+    df = smart_read_csv(filepath)
     result = {"type": "csv", "columns": {}, "shape": df.shape}
     for col in df.columns:
         is_num = df[col].dtype in (float, int) or df[col].dropna().apply(_is_number).mean() > 0.8

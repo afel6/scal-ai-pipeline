@@ -17,6 +17,7 @@ import pandas as pd
 import numpy as np
 import json
 import os
+from file_reader import smart_read_csv
 
 
 class SCALFileHandler:
@@ -55,7 +56,7 @@ class SCALFileHandler:
                 )
 
         elif self.extension == '.csv':
-            df = pd.read_csv(self.file_path, header=None)
+            df = smart_read_csv(self.file_path, header=None)
             self.sheet_names = ['Sheet1']
             self.raw_data['Sheet1'] = df
 
@@ -704,7 +705,7 @@ def robust_extract_scal(filepath):
         try:
             if eng == "csv":
                 sep = "," if ext == ".csv" else "\t"
-                df = pd.read_csv(filepath, header=None, sep=sep)
+                df = smart_read_csv(filepath, header=None, sep=sep)
                 sheets_dict = {"Sheet1": df}
                 result["engine_used"] = "csv"
                 break

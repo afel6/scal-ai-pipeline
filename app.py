@@ -5763,27 +5763,440 @@ async def dl(filename: str):
 
 
 
-@app.post("/api/report/generate")
+# ── PRODUCTION ASYNC PIPELINE REMEDIATION ────────────────────────────────────
+TASKS_DB: dict[str, dict] = {}
+_MAX_UPLOAD_BYTES = 20 * 1024 * 1024
 
-async def generate_report(
+import tempfile
 
-    session_id: str = Form(...),
+async def process_large_file_stream(file: UploadFile, temp_file_path: str, max_bytes: int):
+    """
+    Streams incoming files in 512KB chunks directly to disk.
+    If the file size exceeds the max_bytes limit, raises HTTP 413.
+    """
+    total_bytes = 0
+    with open(temp_file_path, "wb") as buffer:
+        while True:
+            chunk = await file.read(512 * 1024)  # 512KB chunks
+            if not chunk:
+                break
+            total_bytes += len(chunk)
+            if total_bytes > max_bytes:
+                raise HTTPException(
+                    status_code=413,
+                    detail=f"File size exceeds maximum allowed {max_bytes // (1024 * 1024)}MB limit."
+                )
+            buffer.write(chunk)
 
-    well_name:  str = Form("UNKNOWN WELL"),
 
+def sync_document_generation_task(
+    session_id: str,
+    temp_file_path: str,
+    filename: str,
+    email: str = None,
+    message: str = None
 ):
-
     try:
+        # Progress 0-10%
+        TASKS_DB[session_id].update({"status": "processing", "progress": 5})
+        ext = os.path.splitext(filename.lower())[1]
+        is_docx = ext == ".docx"
+        is_spreadsheet = ext in [".xlsx", ".xls", ".csv"]
+        
+        # Read the file
+        fr_data = read_file(temp_file_path, target_identifier=None)
+        fr_text, _ = to_prompt_string(fr_data)
+        if not fr_text:
+            raise ValueError("Empty or unreadable file content.")
+            
+        TASKS_DB[session_id].update({"progress": 15})
+        
+        # Progress 10-30%: Extract structure from Gemini with HA client
+        extraction_prompt_path = os.path.join(
+            os.path.dirname(os.path.abspath(__file__)),
+            "prompts",
+            "extraction_system_prompt.md"
+        )
+        with open(extraction_prompt_path, "r", encoding="utf-8") as f:
+            system_instruction = f.read()
+            
+        msg = message or "Analyze petrophysical data from uploaded file."
+        full_markdown_variable = (
+            f"--- START OF FULL DOCUMENT MARKDOWN ---\n{fr_text}\n--- END OF FULL DOCUMENT MARKDOWN ---\n\n"
+            f"USER REQUEST: {msg}\n\n"
+            f"CRITICAL: Only extract the specific table(s) or data requested by the user above. "
+            f"If the user specifies a specific table (e.g., 'Table 2.1.1'), only extract the rows for that table. "
+            f"Do not extract rows from other tables or other core plug sweeps."
+        )
+        
+        contents = [
+            genai_types.Content(
+                role="user",
+                parts=[genai_types.Part.from_text(text=full_markdown_variable)]
+            )
+        ]
+        config = genai_types.GenerateContentConfig(
+            system_instruction=system_instruction,
+            response_mime_type="application/json"
+        )
+        
+        TASKS_DB[session_id].update({"progress": 20})
+        
+        client = assistant._client or genai_new.Client(api_key=GEMINI_KEY_POOL[0])
+        try:
+            response = _call_gemini_with_retry(
+                client=client,
+                model="gemini-2.5-flash",
+                contents=contents,
+                config=config,
+                max_retries=3,
+                base_delay=2
+            )
+        except Exception as e:
+            _logger.warning(f"[Background Task Fallback] gemini-2.5-flash overloaded (503): {e}. Falling back to gemini-2.5-pro...")
+            response = _call_gemini_with_retry(
+                client=client,
+                model="gemini-2.5-pro",
+                contents=contents,
+                config=config,
+                max_retries=3,
+                base_delay=2
+            )
+            
+        response_text = response.text or ""
+        clean_text = response_text.strip()
+        if clean_text.startswith("```"):
+            lines = clean_text.splitlines()
+            if lines[0].startswith("```"):
+                lines = lines[1:]
+            if lines[-1].startswith("```"):
+                lines = lines[:-1]
+            clean_text = "\n".join(lines).strip()
+            
+        try:
+            extracted_json = _json.loads(clean_text)
+        except Exception as je:
+            try:
+                last_brace = clean_text.rfind('}')
+                if last_brace != -1:
+                    salvaged_text = clean_text[:last_brace + 1] + ']'
+                    extracted_json = _json.loads(salvaged_text)
+                else:
+                    extracted_json = []
+            except Exception:
+                raise ValueError(f"Failed to parse Gemini extraction output as JSON: {je}")
+                
+        def merge_and_deduplicate_sweeps(samples):
+            if not samples: return samples
+            sweeps = []
+            current_sweep = []
+            last_p = None
+            for s in samples:
+                p = s.get("Pressure_psi")
+                if p is not None:
+                    if last_p is not None and p <= last_p:
+                        if current_sweep: sweeps.append(current_sweep)
+                        current_sweep = []
+                current_sweep.append(s)
+                last_p = p
+            if current_sweep: sweeps.append(current_sweep)
+            
+            merged_sweeps = []
+            for sweep in sweeps:
+                matched = False
+                for ms in merged_sweeps:
+                    if len(sweep) == len(ms):
+                        match = True
+                        for i in range(len(sweep)):
+                            if sweep[i].get("Pressure_psi") != ms[i].get("Pressure_psi") or sweep[i].get("Porosity_percent") != ms[i].get("Porosity_percent"):
+                                match = False
+                                break
+                        if match:
+                            for i in range(len(sweep)):
+                                for k, v in sweep[i].items():
+                                    if v is not None and ms[i].get(k) is None:
+                                        ms[i][k] = v
+                            matched = True
+                            break
+                if not matched:
+                    merged_sweeps.append(sweep)
+                    
+            result = []
+            for ms in merged_sweeps:
+                result.extend(ms)
+            return result
 
-        filename = PRCReportEngine().generate(session_id, well_name)
-
-        return {"status": "success", "download_url": f"/api/report/download/{filename}"}
-
+        extracted_json = merge_and_deduplicate_sweeps(extracted_json)
+        TASKS_DB[session_id].update({"progress": 30})
+        
+        # Progress 30-70%: Physics Audit, DB Inserts, isolated geomech md, dashboard and plots
+        validation_result = data_validator.validate_scal_data(extracted_json)
+        physics_score = 100
+        physics_status = "PASS"
+        violations = []
+        
+        if validation_result.get("status") == "error":
+            physics_status = "FAIL"
+            physics_score = max(0, 100 - 15 * len(validation_result.get("errors", [])))
+            violations = validation_result.get("errors", [])
+            
+        detected_type = detect_test_type(extracted_json)
+        _log_physics_audit(
+            sid=session_id,
+            data_type=detected_type,
+            audit_res={"score": physics_score, "violations": violations},
+            file_name=filename
+        )
+        
+        TASKS_DB[session_id].update({"progress": 40})
+        
+        from prc_physics import calculate_compressibility_sweep
+        try:
+            extracted_json = calculate_compressibility_sweep(extracted_json)
+        except Exception as pe:
+            _logger.warning(f"Error during deterministic physics calculation in bg: {pe}")
+            
+        TASKS_DB[session_id].update({"progress": 45})
+        
+        # Insert consecutively in DB
+        db("INSERT INTO m (sid,role,text,ts,user_email,fname) VALUES (?,?,?,?,?,?)",
+           (session_id, "user", msg, time.time() - 2.0, email, filename))
+           
+        violations_str = "\n".join(f"- {v}" for v in violations) if violations else "No physical violations found."
+        audit_text = f"PHYSICS HEALTH AUDIT: {physics_score}% | STATUS: {physics_status}\n{violations_str}"
+        db("INSERT INTO m (sid,role,text,ts,user_email) VALUES (?,?,?,?,?)",
+           (session_id, "model", audit_text, time.time() - 1.0, email))
+           
+        pressures = []
+        porosities = []
+        perms = []
+        for r in extracted_json:
+            p = r.get("Pressure_psi")
+            phi = r.get("Porosity_percent")
+            k = r.get("Air_Permeability_md")
+            if p is not None and phi is not None:
+                pressures.append(p)
+                porosities.append(phi)
+                perms.append(k if k is not None else 0.0)
+                
+        plot_json = {
+            "title": "Porosity & Permeability vs Overburden Pressure",
+            "curves": [
+                {"name": "Porosity (%)", "x": pressures, "y": porosities, "yId": "left"},
+                {"name": "Permeability (mD)", "x": pressures, "y": perms, "yId": "right"}
+            ],
+            "dualAxis": True,
+            "y_label": "Porosity (%)",
+            "y_label2": "Air Permeability (mD)",
+            "x_label": "Overburden Pressure (psi)"
+        }
+        plot_text = f"__PRC_PLOT__\n{_json.dumps(plot_json)}\n\n"
+        db("INSERT INTO m (sid,role,text,ts,user_email) VALUES (?,?,?,?,?)",
+           (session_id, "model", plot_text, time.time(), email))
+           
+        TASKS_DB[session_id].update({"progress": 55})
+        
+        base_dir = os.path.dirname(os.path.abspath(__file__))
+        outputs_dir = os.path.join(base_dir, "outputs", session_id)
+        os.makedirs(outputs_dir, exist_ok=True)
+        
+        active_key = GEMINI_KEY_POOL[0]
+        master_eng = MasterEngineerNode(api_key=active_key)
+        engineer_report = master_eng.analyze_scal_data(extracted_json)
+        
+        report_path = os.path.join(outputs_dir, "reservoir_report.md")
+        with open(report_path, "w", encoding="utf-8") as f:
+            f.write(engineer_report)
+            
+        well_name = "PROVISIONAL WELL"
+        if isinstance(fr_data, dict):
+            well_name = fr_data.get("well_name") or fr_data.get("well") or "PROVISIONAL WELL"
+            
+        _dash_audit = {"score": physics_score, "status": physics_status, "violations": violations}
+        dash_output_path = os.path.join(outputs_dir, "app_dashboard.py")
+        
+        streamlit_code = generate_universal_dashboard(
+            validated_json=extracted_json,
+            well_name=well_name,
+            test_type=detected_type,
+            physics_audit=_dash_audit,
+            output_path=dash_output_path,
+        )
+        
+        visualizer.generate_plots(extracted_json, output_dir=outputs_dir, streamlit_code=streamlit_code)
+        
+        try:
+            with open(temp_file_path, "rb") as f:
+                data_bytes = f.read()
+            _fhash_store = hashlib.sha256(data_bytes).hexdigest()
+            db(
+                "INSERT INTO user_files"
+                " (user_email, filename, file_hash, extracted_text, data_type, created_at)"
+                " VALUES (?,?,?,?,?,?)"
+                " ON CONFLICT(user_email, file_hash)"
+                " DO UPDATE SET extracted_text=EXCLUDED.extracted_text,"
+                " filename=EXCLUDED.filename",
+                (email, filename, _fhash_store, fr_text, "SCAL", time.time()),
+            )
+        except Exception as _ufe:
+            _logger.warning(f"Could not log file to user_files in bg task: {_ufe}")
+            
+        TASKS_DB[session_id].update({"progress": 70})
+        
+        filename_report = PRCReportEngine().generate(session_id, well_name)
+        TASKS_DB[session_id].update({
+            "status": "success",
+            "progress": 100,
+            "result": f"/api/report/download/{filename_report}"
+        })
+        
     except Exception as e:
+        _logger.error(f"[BgTask] Failed document generation task for {session_id}: {e}", exc_info=True)
+        if session_id in TASKS_DB:
+            TASKS_DB[session_id].update({
+                "status": "error",
+                "progress": 100,
+                "error": str(e)
+            })
+    finally:
+        if os.path.exists(temp_file_path):
+            try:
+                os.unlink(temp_file_path)
+            except OSError:
+                pass
 
-        _logger.error(f"[Report] {e}")
 
+def async_report_compile_task(session_id: str, well_name: str):
+    try:
+        TASKS_DB[session_id]["progress"] = 30
+        filename = PRCReportEngine().generate(session_id, well_name)
+        TASKS_DB[session_id].update({
+            "status": "success",
+            "progress": 100,
+            "result": f"/api/report/download/{filename}"
+        })
+    except Exception as e:
+        _logger.error(f"[Background Task Error] Report generation failed: {e}")
+        TASKS_DB[session_id].update({
+            "status": "error",
+            "progress": 100,
+            "error": f"Report generation failed: {str(e)}"
+        })
+
+
+@app.post("/api/report/generate")
+async def generate_report(
+    background_tasks: BackgroundTasks,
+    session_id: str = Form(...),
+    well_name:  str = Form("UNKNOWN WELL"),
+):
+    # Path traversal prevention using regex
+    if not re.match(r"^(report-)?[a-zA-Z0-9\-]+$", session_id):
+        raise HTTPException(status_code=400, detail="Invalid session_id format.")
+
+    # Initialize task record in TASKS_DB
+    TASKS_DB[session_id] = {
+        "status": "processing",
+        "progress": 10,
+        "result": None,
+        "error": None
+    }
+
+    background_tasks.add_task(async_report_compile_task, session_id, well_name)
+
+    return JSONResponse(
+        status_code=202,
+        content={
+            "status": "processing",
+            "progress": 10,
+            "session_id": session_id,
+            "task_url": f"/api/v1/tasks/{session_id}"
+        }
+    )
+
+
+@app.post("/api/v1/analyze-scal")
+async def analyze_scal(
+    background_tasks: BackgroundTasks,
+    file: UploadFile = File(...),
+    session_id: Optional[str] = Form(None),
+    user_email: Optional[str] = Form(None),
+    message: Optional[str] = Form(None),
+):
+    try:
+        sid = session_id or str(uuid.uuid4())
+        email = user_email.lower().strip() if user_email else None
+        msg = (message or "Analyze petrophysical data from uploaded file.").strip()
+        filename = sanitize_filename(file.filename)
+        
+        # Path traversal prevention using regex
+        if not re.match(r"^(report-)?[a-zA-Z0-9\-]+$", sid):
+            raise HTTPException(status_code=400, detail="Invalid session_id format.")
+            
+        # Signature verification (prevent invalid files)
+        sig_bytes = await file.read(1024)
+        await file.seek(0)
+        if not verify_file_signature(sig_bytes, filename):
+            raise HTTPException(status_code=400, detail=f"File signature mismatch or invalid format for extension: {filename}")
+            
+        # Setup isolated temp file paths
+        ext = os.path.splitext(filename.lower())[1]
+        temp_fd, temp_file_path = tempfile.mkstemp(suffix=ext)
+        os.close(temp_fd)
+        
+        # Safe streaming of file chunked to temp path
+        try:
+            await process_large_file_stream(file, temp_file_path, _MAX_UPLOAD_BYTES)
+        except Exception as se:
+            if os.path.exists(temp_file_path):
+                try: os.unlink(temp_file_path)
+                except: pass
+            raise se
+            
+        # Initialize task record in TASKS_DB
+        TASKS_DB[sid] = {
+            "status": "queued",
+            "progress": 0,
+            "result": None,
+            "error": None
+        }
+        
+        # Trigger the background task worker
+        background_tasks.add_task(
+            sync_document_generation_task,
+            session_id=sid,
+            temp_file_path=temp_file_path,
+            filename=filename,
+            email=email,
+            message=msg
+        )
+        
+        return JSONResponse(
+            status_code=202,
+            content={
+                "status": "queued",
+                "progress": 0,
+                "session_id": sid,
+                "task_url": f"/api/v1/tasks/{sid}"
+            }
+        )
+    except HTTPException as he:
+        raise he
+    except Exception as e:
+        _logger.error(f"[AnalyzeSCAL] Failed: {e}")
         raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/v1/tasks/{session_id}")
+async def get_task_status(session_id: str):
+    # Path traversal prevention using regex check
+    if not re.match(r"^(report-)?[a-zA-Z0-9\-]+$", session_id):
+        raise HTTPException(status_code=400, detail="Invalid session_id format.")
+        
+    if session_id not in TASKS_DB:
+        raise HTTPException(status_code=404, detail="Task not found or expired.")
+        
+    return TASKS_DB[session_id]
 
 
 

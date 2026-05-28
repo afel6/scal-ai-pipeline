@@ -327,9 +327,11 @@ class UniversalDashboardArchitect:
         # Build violation display strings
         viol_lines = ""
         for v in violations:
-            sev = v.get("severity", "HIGH")
-            rule = v.get("rule", "")
-            detail = v.get("detail", "")
+            if isinstance(v, str):
+                v = {"severity": "HIGH", "rule": "Physics Violation", "detail": v}
+            sev = v.get("severity", "HIGH") if isinstance(v, dict) else "HIGH"
+            rule = v.get("rule", "") if isinstance(v, dict) else ""
+            detail = v.get("detail", str(v)) if isinstance(v, dict) else str(v)
             emoji = "🚫" if sev == "HIGH" else "⚠️"
             viol_lines += f'    st.markdown("- {emoji} **[{sev}] {rule}**: {detail}")\n'
 
