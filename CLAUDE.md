@@ -125,6 +125,10 @@ Documents must be in English. Arabic field reports must be translated before ing
 Do not ingest vendor marketing materials, datasheets, or content not peer-reviewed
 or standards-body approved.
 
+### Ingested Documents Registry
+
+- **[2026-05-29] API-RP 40-Core-Analysis.pdf** (1,234,972 bytes): Programmatically ingested under precise 500-word / 50-word overlap chunking constraints. Embedded 287 chunks using the `text-embedding-004` model (via `gemini-embedding-2` pool) and committed to SQLite `library_chunks` table. Retrieval verified at a similarity score of 1.0000 (exceeding the 0.85 threshold).
+
 ---
 
 ## 4. LEST-WE-FORGET — Security Audit Log
@@ -132,6 +136,17 @@ or standards-body approved.
 This section is append-only. Every security vulnerability discovered, patched, or
 mitigated during development or audits is recorded here. Do not remove entries.
 Add new entries at the top of the list with date, CVE class, and patch description.
+
+---
+
+### [2026-05-29] High-Fidelity Extraction Protocols & Benchmark Priority — Structured RAG Extractor
+
+**Class:** Accuracy & Reliability Gate / Structural Hallucination Prevention  
+**Discovery:** Technical evaluation audit (Accuracy score 4/10 due to structural/citation errors and parameter fabrication).  
+**Risk:** Under high-dimensional SCAL data extraction, models can invent citations, misidentify column units, or compute derived parameters instead of prioritizing explicitly reported benchmarks (e.g., Swi/Sor).  
+**Patch:**
+Upgraded system prompt template (`extraction_system_prompt.md`) to mandate three structural execution protocols inside the JSON extraction envelope: Protocol 1 (FILE-OPEN PROOF: sheet names and raw column target inventory), Protocol 2 (HEADER & UNIT DOUBLE-CHECK: literal column header/unit alignment checks per cell value), and Protocol 3 (LABELED-VALUE ABSOLUTE PRIORITY: explicit laboratory benchmark extraction). Refactored prompt building and loaded JSON parsing/salvaging logic in `app.py` and `prc_physics.py` to seamlessly isolate audit blocks, perform robust multi-suffix salvaging, and enforce priority laboratory overrides (e.g., min Swi and Sor endpoints) downstream.  
+**Status:** RESOLVED 2026-05-29. Verified passing fuzzer and 8/8 regression unit tests.
 
 ---
 

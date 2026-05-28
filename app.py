@@ -2993,7 +2993,12 @@ class PRCChatAssistant:
                             f"USER REQUEST: {msg}\n\n"
                             f"CRITICAL: Only extract the specific table(s) or data requested by the user above. "
                             f"If the user specifies a specific table (e.g., 'Table 2.1.1'), only extract the rows for that table. "
-                            f"Do not extract rows from other tables or other core plug sweeps."
+                            f"Do not extract rows from other tables or other core plug sweeps.\n\n"
+                            f"MANDATORY PROTOCOLS FOR EXTRACTION:\n"
+                            f"1. You must execute and return Protocol 1 (FILE-OPEN PROOF: sheet names and raw column headers target sheet inventory).\n"
+                            f"2. You must execute and return Protocol 2 (HEADER & UNIT DOUBLE-CHECK: print literal column headers/units for every extracted data value).\n"
+                            f"3. You must execute and return Protocol 3 (LABELED-VALUE ABSOLUTE PRIORITY: extract explicitly stated Swi/Sor laboratory values and list them under overridden_endpoints).\n"
+                            f"Your JSON output MUST match the new structured schema format: a single object containing 'protocol_1_file_open_proof', 'protocol_2_header_unit_double_check', 'protocol_3_labeled_value_absolute_priority', and the final rows array as 'extracted_data'."
                         )
                         
                         contents = [
@@ -3043,20 +3048,50 @@ class PRCChatAssistant:
                                 lines = lines[:-1]
                             clean_text = "\n".join(lines).strip()
                             
-                        try:
-                            extracted_json = _json.loads(clean_text)
-                        except Exception as je:
-                            # Attempt to salvage truncated JSON (common when hitting max_output_tokens for large files)
+                        def salvage_and_clean_json(text_to_parse: str) -> list:
+                            parsed = None
                             try:
-                                last_brace = clean_text.rfind('}')
+                                parsed = _json.loads(text_to_parse)
+                            except Exception:
+                                clean_t = text_to_parse.strip()
+                                last_brace = clean_t.rfind('}')
                                 if last_brace != -1:
-                                    salvaged_text = clean_text[:last_brace + 1] + ']'
-                                    extracted_json = _json.loads(salvaged_text)
-                                    _logger.warning(f"[Pipeline] JSON was truncated. Salvaged {len(extracted_json)} records.")
-                                else:
-                                    extracted_json = []
-                            except Exception as e2:
-                                raise ValueError(f"Failed to parse Gemini extraction output as JSON: {je}\nResponse was: {response_text[:500]}...")
+                                    if clean_t.startswith("{"):
+                                        for suffix in ["}", "]}", "]} }", "] }"]:
+                                            try:
+                                                parsed = _json.loads(clean_t[:last_brace + 1] + suffix)
+                                                break
+                                            except Exception:
+                                                continue
+                                    else:
+                                        try:
+                                            parsed = _json.loads(clean_t[:last_brace + 1] + ']')
+                                        except Exception:
+                                            pass
+                            
+                            if parsed is None:
+                                raise ValueError("Could not parse or salvage valid JSON from LLM extraction response.")
+                                
+                            if isinstance(parsed, dict) and "extracted_data" in parsed:
+                                _logger.info("[Pipeline] Successfully parsed mandatory protocols and structured data.")
+                                overrides = parsed.get("protocol_3_labeled_value_absolute_priority", {}).get("overridden_endpoints", {})
+                                data_list = parsed.get("extracted_data", [])
+                                if isinstance(data_list, list) and isinstance(overrides, dict):
+                                    for row in data_list:
+                                        if isinstance(row, dict):
+                                            for ok, ov in overrides.items():
+                                                if ov is not None:
+                                                    if ok.lower() == "swi":
+                                                        row["explicit_Swi"] = float(ov)
+                                                    elif ok.lower() == "sor":
+                                                        row["explicit_Sor"] = float(ov)
+                                return data_list
+                            return parsed if isinstance(parsed, list) else []
+
+                        try:
+                            extracted_json = salvage_and_clean_json(clean_text)
+                        except Exception as je:
+                            raise ValueError(f"Failed to parse Gemini extraction output as JSON: {je}\nResponse was: {response_text[:500]}...")
 
                         def merge_and_deduplicate_sweeps(samples):
                             if not samples: return samples
@@ -4633,6 +4668,61 @@ def diag():
 
 
 
+@app.get("/api/v1/telemetry/metrics")
+async def get_telemetry_metrics(
+    authorization: Optional[str] = Header(None),
+    x_admin_pin: Optional[str] = Header(None),
+    pin: Optional[str] = None
+):
+    # Authenticate either via Bearer Token, X-Admin-Pin header, or pin query parameter
+    authenticated = False
+    if authorization and authorization.startswith("Bearer "):
+        try:
+            verify_admin(authorization)
+            authenticated = True
+        except HTTPException:
+            pass
+    
+    if not authenticated:
+        input_pin = (x_admin_pin or pin or "").strip()
+        if ADMIN_PIN and hmac.compare_digest(input_pin, ADMIN_PIN):
+            authenticated = True
+            
+    if not authenticated:
+        raise HTTPException(status_code=401, detail="Unauthorized metrics access. Valid Bearer token or ADMIN_PIN required.")
+        
+    # Compile Latency Metrics
+    with _REPORT_LATENCY_LOCK:
+        latencies = list(_REPORT_LATENCY_LIST)
+    avg_latency = sum(latencies) / len(latencies) if latencies else 0.0
+    
+    # Fetch cumulative API costs
+    try:
+        cost_res = db("SELECT SUM(cost_usd) FROM api_metrics")
+        cumulative_cost_usd = float(cost_res[0][0]) if cost_res and cost_res[0][0] is not None else 0.0
+    except Exception:
+        cumulative_cost_usd = 0.0
+        
+    # Fetch total volume of processed petrophysical datasets
+    try:
+        dataset_res = db("SELECT COUNT(*) FROM physics_audits")
+        total_processed_datasets = int(dataset_res[0][0]) if dataset_res and dataset_res[0][0] is not None else 0
+    except Exception:
+        total_processed_datasets = 0
+        
+    return {
+        "status": "success",
+        "metrics": {
+            "average_document_compilation_latency_seconds": round(avg_latency, 2),
+            "cumulative_api_token_cost_usd": round(cumulative_cost_usd, 6),
+            "total_processed_datasets_volume": total_processed_datasets,
+            "cached_report_runs_count": len(latencies)
+        }
+    }
+
+
+
+
 # â"€â"€ ADMIN AUTH â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€
 
 def verify_admin(authorization: str = Header(None)):
@@ -5765,6 +5855,8 @@ async def dl(filename: str):
 
 # ── PRODUCTION ASYNC PIPELINE REMEDIATION ────────────────────────────────────
 TASKS_DB: dict[str, dict] = {}
+_REPORT_LATENCY_LIST: list[float] = []
+_REPORT_LATENCY_LOCK: threading.Lock = threading.Lock()
 _MAX_UPLOAD_BYTES = 20 * 1024 * 1024
 
 import tempfile
@@ -5826,7 +5918,12 @@ def sync_document_generation_task(
             f"USER REQUEST: {msg}\n\n"
             f"CRITICAL: Only extract the specific table(s) or data requested by the user above. "
             f"If the user specifies a specific table (e.g., 'Table 2.1.1'), only extract the rows for that table. "
-            f"Do not extract rows from other tables or other core plug sweeps."
+            f"Do not extract rows from other tables or other core plug sweeps.\n\n"
+            f"MANDATORY PROTOCOLS FOR EXTRACTION:\n"
+            f"1. You must execute and return Protocol 1 (FILE-OPEN PROOF: sheet names and raw column headers target sheet inventory).\n"
+            f"2. You must execute and return Protocol 2 (HEADER & UNIT DOUBLE-CHECK: print literal column headers/units for every extracted data value).\n"
+            f"3. You must execute and return Protocol 3 (LABELED-VALUE ABSOLUTE PRIORITY: extract explicitly stated Swi/Sor laboratory values and list them under overridden_endpoints).\n"
+            f"Your JSON output MUST match the new structured schema format: a single object containing 'protocol_1_file_open_proof', 'protocol_2_header_unit_double_check', 'protocol_3_labeled_value_absolute_priority', and the final rows array as 'extracted_data'."
         )
         
         contents = [
@@ -5873,21 +5970,55 @@ def sync_document_generation_task(
                 lines = lines[:-1]
             clean_text = "\n".join(lines).strip()
             
-        try:
-            extracted_json = _json.loads(clean_text)
-        except Exception as je:
+        def salvage_and_clean_json(text_to_parse: str) -> list:
+            parsed = None
             try:
-                last_brace = clean_text.rfind('}')
-                if last_brace != -1:
-                    salvaged_text = clean_text[:last_brace + 1] + ']'
-                    extracted_json = _json.loads(salvaged_text)
-                else:
-                    extracted_json = []
+                parsed = _json.loads(text_to_parse)
             except Exception:
-                raise ValueError(f"Failed to parse Gemini extraction output as JSON: {je}")
+                clean_t = text_to_parse.strip()
+                last_brace = clean_t.rfind('}')
+                if last_brace != -1:
+                    if clean_t.startswith("{"):
+                        for suffix in ["}", "]}", "]} }", "] }"]:
+                            try:
+                                parsed = _json.loads(clean_t[:last_brace + 1] + suffix)
+                                break
+                            except Exception:
+                                continue
+                    else:
+                        try:
+                            parsed = _json.loads(clean_t[:last_brace + 1] + ']')
+                        except Exception:
+                            pass
+            
+            if parsed is None:
+                raise ValueError("Could not parse or salvage valid JSON from LLM extraction response.")
+                
+            if isinstance(parsed, dict) and "extracted_data" in parsed:
+                _logger.info("[Pipeline] Successfully parsed mandatory protocols and structured data in background task.")
+                overrides = parsed.get("protocol_3_labeled_value_absolute_priority", {}).get("overridden_endpoints", {})
+                data_list = parsed.get("extracted_data", [])
+                if isinstance(data_list, list) and isinstance(overrides, dict):
+                    for row in data_list:
+                        if isinstance(row, dict):
+                            for ok, ov in overrides.items():
+                                if ov is not None:
+                                    if ok.lower() == "swi":
+                                        row["explicit_Swi"] = float(ov)
+                                    elif ok.lower() == "sor":
+                                        row["explicit_Sor"] = float(ov)
+                                return data_list
+            return parsed if isinstance(parsed, list) else []
+
+        try:
+            extracted_json = salvage_and_clean_json(clean_text)
+        except Exception as je:
+            raise ValueError(f"Failed to parse Gemini extraction output as JSON: {je}")
                 
         def merge_and_deduplicate_sweeps(samples):
-            if not samples: return samples
+            if not samples or not isinstance(samples, list): return []
+            samples = [s for s in samples if isinstance(s, dict)]
+            if not samples: return []
             sweeps = []
             current_sweep = []
             last_p = None
@@ -5950,9 +6081,10 @@ def sync_document_generation_task(
         
         TASKS_DB[session_id].update({"progress": 40})
         
-        from prc_physics import calculate_compressibility_sweep
+        from prc_physics import calculate_compressibility_sweep, enrich_json_with_brooks_corey
         try:
             extracted_json = calculate_compressibility_sweep(extracted_json)
+            extracted_json = enrich_json_with_brooks_corey(extracted_json)
         except Exception as pe:
             _logger.warning(f"Error during deterministic physics calculation in bg: {pe}")
             
@@ -6043,7 +6175,12 @@ def sync_document_generation_task(
             
         TASKS_DB[session_id].update({"progress": 70})
         
+        start_time = time.time()
         filename_report = PRCReportEngine().generate(session_id, well_name)
+        duration = time.time() - start_time
+        with _REPORT_LATENCY_LOCK:
+            _REPORT_LATENCY_LIST.append(duration)
+            
         TASKS_DB[session_id].update({
             "status": "success",
             "progress": 100,
@@ -6069,7 +6206,12 @@ def sync_document_generation_task(
 def async_report_compile_task(session_id: str, well_name: str):
     try:
         TASKS_DB[session_id]["progress"] = 30
+        start_time = time.time()
         filename = PRCReportEngine().generate(session_id, well_name)
+        duration = time.time() - start_time
+        with _REPORT_LATENCY_LOCK:
+            _REPORT_LATENCY_LIST.append(duration)
+            
         TASKS_DB[session_id].update({
             "status": "success",
             "progress": 100,
@@ -6189,41 +6331,45 @@ async def analyze_scal(
 
 @app.get("/api/v1/tasks/{session_id}")
 async def get_task_status(session_id: str):
-    # Path traversal prevention using regex check
-    if not re.match(r"^(report-)?[a-zA-Z0-9\-]+$", session_id):
-        raise HTTPException(status_code=400, detail="Invalid session_id format.")
-        
-    if session_id not in TASKS_DB:
-        raise HTTPException(status_code=404, detail="Task not found or expired.")
-        
-    return TASKS_DB[session_id]
-
-
-
+    try:
+        if "\x00" in session_id:
+            raise HTTPException(status_code=400, detail="Null bytes are strictly prohibited.")
+        # Path traversal prevention using regex check
+        if not re.match(r"^(report-)?[a-zA-Z0-9\-]+$", session_id):
+            raise HTTPException(status_code=400, detail="Invalid session_id format.")
+            
+        if session_id not in TASKS_DB:
+            raise HTTPException(status_code=404, detail="Task not found or expired.")
+            
+        return TASKS_DB[session_id]
+    except HTTPException as he:
+        raise he
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"Invalid session identifier: {str(e)}")
 
 
 @app.get("/api/report/download/{filename}")
-
 async def download_report(filename: str):
+    try:
+        # Clean null bytes immediately (CWE-22)
+        if "\x00" in filename:
+            raise HTTPException(status_code=400, detail="Null bytes are strictly prohibited.")
+            
+        # Serve from the reports/ subdirectory with path-containment guard (CWE-22)
+        reports_root = _pathlib.Path(os.getcwd()) / "reports"
+        target = (reports_root / _pathlib.Path(filename).name).resolve()
 
-    # Serve from the reports/ subdirectory with path-containment guard (CWE-22)
+        if not str(target).startswith(str(reports_root.resolve())):
+            raise HTTPException(status_code=403, detail="Access denied")
 
-    reports_root = _pathlib.Path(os.getcwd()) / "reports"
+        if not target.is_file():
+            raise HTTPException(status_code=404, detail="Report not found")
 
-    target = (reports_root / _pathlib.Path(filename).name).resolve()
-
-    if not str(target).startswith(str(reports_root.resolve())):
-
-        raise HTTPException(status_code=403, detail="Access denied")
-
-    if not target.is_file():
-
-        raise HTTPException(status_code=404, detail="Report not found")
-
-    return FileResponse(str(target), filename=_pathlib.Path(filename).name)
-
-
-
+        return FileResponse(str(target), filename=_pathlib.Path(filename).name)
+    except HTTPException as he:
+        raise he
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"Invalid path parameters: {str(e)}")
 
 # -- GRADER ------------------------------------------------------------------
 
@@ -6303,6 +6449,16 @@ async def serve_spa(full_path: str):
     if candidate.is_file():
 
         return FileResponse(str(candidate))
+
+
+
+    # If the path has an extension, it's a file request that wasn't found - return 404!
+
+    # This prevents returning index.html (200 OK) for ../app.py or other system files.
+
+    if "." in _pathlib.Path(full_path).name:
+
+        raise HTTPException(status_code=404, detail="File not found")
 
 
 

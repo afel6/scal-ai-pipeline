@@ -121,6 +121,30 @@ def validate_scal_data(json_data: List[Dict[str, Any]]) -> dict:
             if ri < 1.0:
                 errors.append(f"{prefix}: Resistivity Index = {ri} < 1.0 — physically impossible (RI = Rt/Ro ≥ 1.0 by definition).")
 
+    # 10. Drainage Physics Validation: Water saturation must not increase as capillary pressure increases
+    previous_sw = None
+    previous_pc = None
+    for idx, row in enumerate(json_data):
+        sample_num = idx + 1
+        pc = row.get("Capillary_Pressure_psi") or row.get("Pc_psi") or row.get("Pressure_psi")
+        sw = row.get("Water_Saturation_fraction") or row.get("Water_Saturation_percent") or row.get("Water_Saturation")
+        
+        if pc is not None and sw is not None and isinstance(pc, (int, float)) and isinstance(sw, (int, float)):
+            sw_frac = sw / 100.0 if sw > 1.0 else sw
+            # Reset tracking if a new sweep starts (e.g. pressure drops)
+            if previous_pc is not None and pc < previous_pc:
+                previous_sw = None
+                previous_pc = None
+                
+            if previous_sw is not None and previous_pc is not None:
+                if pc > previous_pc and sw_frac > previous_sw + 0.001:
+                    errors.append(
+                        f"Sample {sample_num}: Drainage physics violation — water saturation increased "
+                        f"({previous_sw:.4f} -> {sw_frac:.4f}) as capillary pressure increased ({previous_pc} -> {pc} psi)."
+                    )
+            previous_sw = sw_frac
+            previous_pc = pc
+
     if errors:
         return {
             "status": "error",

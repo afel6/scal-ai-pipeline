@@ -202,3 +202,186 @@ def calculate_washburn_radius(pressure_psia: float, contact_angle_deg: float = 1
     radius_microns = radius_cm * 10000.0
     
     return round(radius_microns, 4)
+
+
+def fit_brooks_corey(json_data: list[dict]) -> dict:
+    """
+    Fits Brooks-Corey optimization parameters for Pc and Kr data from extracted json data.
+    Ensures 100% thread safety by using purely local variables.
+    
+    Pc = Pd * (Se) ^ (-1/lambda)
+    Krw = Krw_max * (Se) ^ nw
+    Krnw = Krnw_max * (1 - Se) ^ no
+    
+    where Se = (Sw - Swi) / (1 - Swi - Sor)
+    """
+    import numpy as np
+    
+    # 1. Filter rows with valid Sw, Pc, or Kr
+    valid_rows = []
+    for row in json_data:
+        # Saturation
+        sw = row.get("Water_Saturation_fraction") or row.get("Water_Saturation_percent") or row.get("Water_Saturation")
+        if sw is None:
+            continue
+        sw_frac = float(sw) / 100.0 if float(sw) > 1.0 else float(sw)
+        
+        row_data = {
+            "Sw": sw_frac,
+            "Pc": row.get("Capillary_Pressure_psi") or row.get("Pc_psi") or row.get("Pressure_psi"),
+            "Krw": row.get("Relative_Permeability_Water") or row.get("Krw"),
+            "Krnw": row.get("Relative_Permeability_Oil") or row.get("Kro") or row.get("Krnw") or row.get("Relative_Permeability_Non_Wetting"),
+            "explicit_Swi": row.get("explicit_Swi"),
+            "explicit_Sor": row.get("explicit_Sor")
+        }
+        valid_rows.append(row_data)
+        
+    if not valid_rows:
+        return {}
+        
+    # Check for explicit overrides from Protocol 3
+    explicit_swi = None
+    explicit_sor = None
+    for r in valid_rows:
+        if r.get("explicit_Swi") is not None:
+            try:
+                explicit_swi = float(r["explicit_Swi"])
+            except ValueError:
+                pass
+        if r.get("explicit_Sor") is not None:
+            try:
+                explicit_sor = float(r["explicit_Sor"])
+            except ValueError:
+                pass
+
+    # Estimate endpoint Swi and Sor (prioritizing explicit laboratory values)
+    if explicit_swi is not None:
+        swi = explicit_swi
+    else:
+        sw_vals = [r["Sw"] for r in valid_rows]
+        swi = min(sw_vals)
+        
+    # Ensure Swi is strictly less than 1.0
+    if swi >= 1.0:
+        swi = 0.1
+        
+    # Estimate Sor (residual oil saturation or non-wetting residual)
+    if explicit_sor is not None:
+        sor = explicit_sor
+    else:
+        sw_vals = [r["Sw"] for r in valid_rows]
+        # Sw_max is usually 1 - Sor
+        sor = max(0.0, 1.0 - max(sw_vals))
+        
+    if swi + sor >= 1.0:
+        sor = 0.1
+        
+    # Brooks-Corey Fitting
+    pc_points = []
+    krw_points = []
+    krnw_points = []
+    
+    for r in valid_rows:
+        sw = r["Sw"]
+        # Effective saturation Se
+        denom = 1.0 - swi - sor
+        if denom <= 0:
+            denom = 0.8
+        se = (sw - swi) / denom
+        se = max(1e-5, min(0.99999, se))
+        
+        # Pc fit points
+        if r["Pc"] is not None and float(r["Pc"]) > 0:
+            pc_points.append((se, float(r["Pc"])))
+            
+        # Krw fit points
+        if r["Krw"] is not None and float(r["Krw"]) > 0:
+            krw_points.append((se, float(r["Krw"])))
+            
+        # Krnw fit points
+        if r["Krnw"] is not None and float(r["Krnw"]) > 0:
+            krnw_points.append((1 - se, float(r["Krnw"])))
+            
+    # Perform Least-Squares fits
+    def least_squares_fit(x_arr, y_arr):
+        n = len(x_arr)
+        if n < 2:
+            return 1.0, 0.0
+        sum_x = sum(x_arr)
+        sum_y = sum(y_arr)
+        sum_xx = sum(xi * xi for xi in x_arr)
+        sum_xy = sum(xi * yi for xi, yi in zip(x_arr, y_arr))
+        denom = n * sum_xx - sum_x * sum_x
+        if abs(denom) < 1e-9:
+            return 1.0, 0.0
+        slope = (n * sum_xy - sum_x * sum_y) / denom
+        intercept = (sum_y - slope * sum_x) / n
+        return slope, intercept
+
+    # 1. Capillary Pressure Fit: ln(Pc) = ln(Pd) - (1/lambda) * ln(Se)
+    # y = ln(Pc), x = ln(Se)
+    if len(pc_points) >= 2:
+        x_pc = [math.log(p[0]) for p in pc_points]
+        y_pc = [math.log(p[1]) for p in pc_points]
+        # slope = -1/lambda, intercept = ln(Pd)
+        slope, intercept = least_squares_fit(x_pc, y_pc)
+        lambda_val = -1.0 / slope if slope < 0 else 2.0
+        pd_psi = math.exp(intercept)
+    else:
+        lambda_val = 2.0
+        pd_psi = 1.0
+        
+    # 2. Wetting Phase relative perm fit: ln(Krw) = ln(Krw_max) + nw * ln(Se)
+    if len(krw_points) >= 2:
+        x_krw = [math.log(p[0]) for p in krw_points]
+        y_krw = [math.log(p[1]) for p in krw_points]
+        nw, intercept = least_squares_fit(x_krw, y_krw)
+        krw_max = math.exp(intercept)
+        nw = max(0.5, nw)
+    else:
+        nw = 3.0
+        krw_max = 1.0
+        
+    # 3. Non-wetting Phase relative perm fit: ln(Krnw) = ln(Krnw_max) + no * ln(1 - Se)
+    if len(krnw_points) >= 2:
+        x_krnw = [math.log(p[0]) for p in krnw_points]
+        y_krnw = [math.log(p[1]) for p in krnw_points]
+        no, intercept = least_squares_fit(x_krnw, y_krnw)
+        krnw_max = math.exp(intercept)
+        no = max(0.5, no)
+    else:
+        no = 3.0
+        krnw_max = 1.0
+        
+    return {
+        "Swi": round(swi, 4),
+        "Sor": round(sor, 4),
+        "Pd_psi": round(pd_psi, 4),
+        "lambda": round(lambda_val, 4),
+        "nw": round(nw, 4),
+        "no": round(no, 4),
+        "krw_max": round(krw_max, 4),
+        "krnw_max": round(krnw_max, 4)
+    }
+
+def enrich_json_with_brooks_corey(json_data: list[dict]) -> list[dict]:
+    """
+    Enriches the extracted SCAL JSON list with Brooks-Corey fitted exponents and fits.
+    """
+    fit = fit_brooks_corey(json_data)
+    if not fit:
+        return json_data
+        
+    # Attach to every row for downstream petrophysical consumption
+    for row in json_data:
+        row["brooks_corey_Swi"] = fit["Swi"]
+        row["brooks_corey_Sor"] = fit["Sor"]
+        row["brooks_corey_Pd_psi"] = fit["Pd_psi"]
+        row["brooks_corey_lambda"] = fit["lambda"]
+        row["brooks_corey_nw"] = fit["nw"]
+        row["brooks_corey_no"] = fit["no"]
+        row["brooks_corey_krw_max"] = fit["krw_max"]
+        row["brooks_corey_krnw_max"] = fit["krnw_max"]
+        
+    return json_data
+
