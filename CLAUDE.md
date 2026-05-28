@@ -139,6 +139,23 @@ Add new entries at the top of the list with date, CVE class, and patch descripti
 
 ---
 
+### [2026-05-29] Phase 0b ACTIVATION: Ground Truth Inventory Injection & Server-Side Validation
+
+**Class:** CWE-20 Dead Code Activation / Structural Hallucination Prevention / Defense-in-Depth  
+**Discovery:** Code audit revealed that three critical Phase 0b functions were built but NEVER WIRED into the extraction pipeline:  
+  1. `generate_structural_inventory_text()` — generated human-readable inventory but was never called in `app.py`.  
+  2. `validate_extraction_against_inventory()` — imported at line 51 but never invoked post-extraction.  
+  3. The `structural_inventory` dict returned by `SCALFileHandler.process()` was silently discarded in all code paths.  
+**Risk:** Without the ground-truth inventory injected into the LLM prompt, the model had no Python-verified reference to check against, allowing context recycling and citation fabrication to persist. Without the server-side validation call, hallucinated sheets/columns were never caught by Python code.  
+**Patch:**  
+  1. **SYNC PATH (line ~2991):** Instantiate `SCALFileHandler(tmp_path)` on spreadsheet files, call `.read()` + `.generate_structural_inventory()` + `.generate_structural_inventory_text()`, and inject the ground truth text directly into the LLM prompt between `--- GROUND TRUTH ---` markers.  
+  2. **BACKGROUND PATH (line ~5967):** Identical injection using `SCALFileHandler(temp_file_path)`.  
+  3. **POST-EXTRACTION VALIDATION (both paths):** After salvage_and_clean_json, call `validate_extraction_against_inventory(parsed, phase0b_inventory)` to catch hallucinated sheets/columns server-side and raise `STRUCTURAL_HALT`.  
+  4. **THINKING BLOCK STRIP (both paths):** Added `strip_thinking_blocks(clean_text)` after markdown code block removal but before JSON parsing, ensuring `<thinking>` tags never corrupt JSON.  
+**Status:** RESOLVED 2026-05-29. Verified via pytest regression suite (30/30 Phase 0b + 133/133 full).
+
+---
+
 ### [2026-05-29] Phase 0b: Proof of Read — Anti-Hallucination Runtime Isolation
 
 **Class:** CWE-20 Improper Input Validation / Structural Hallucination Prevention / Context Recycling Defense  

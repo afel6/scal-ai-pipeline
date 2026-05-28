@@ -406,3 +406,121 @@ class TestExtractionPromptIntegrity:
         content = open(prompt_path, "r", encoding="utf-8").read()
         word_count = len(content.split())
         assert word_count >= 500, f"Extraction prompt too short: {word_count} words"
+
+
+# ────────────────────────────────────────────────────────
+# TEST: Phase 0b Wiring — Inventory Text Injection Readiness
+# ────────────────────────────────────────────────────────
+
+class TestInventoryTextInjection:
+    """Verify that generate_structural_inventory_text() produces
+    ground-truth content suitable for direct injection into the LLM prompt."""
+
+    def test_inventory_text_contains_ground_truth_markers(self, sample_xlsx):
+        """The text must contain exact file/sheet data the LLM can verify against."""
+        handler = SCALFileHandler(sample_xlsx)
+        handler.read()
+        text = handler.generate_structural_inventory_text()
+        # Must contain the exact filename
+        assert "Phi_k_OBP_T1-31.xlsx" in text
+        # Must contain all sheet names
+        assert "comp 1" in text
+        assert "comp 2" in text
+        assert "Summary" in text
+        # Must contain shape info
+        assert "×" in text  # shape format: (rows × columns)
+        # Must contain the HEADER ROW label
+        assert "HEADER ROW:" in text
+
+    def test_inventory_text_contains_data_rows(self, sample_xlsx):
+        """The text must include actual data rows so the LLM has proof-of-read."""
+        handler = SCALFileHandler(sample_xlsx)
+        handler.read()
+        text = handler.generate_structural_inventory_text()
+        # Must have DATA ROW entries
+        assert "DATA ROW" in text
+
+    def test_inventory_text_not_empty_for_spreadsheets(self, sample_xlsx):
+        """For any spreadsheet file, inventory text must never be empty."""
+        handler = SCALFileHandler(sample_xlsx)
+        handler.read()
+        text = handler.generate_structural_inventory_text()
+        assert len(text) > 100, f"Inventory text too short ({len(text)} chars)"
+
+    def test_inventory_and_validation_round_trip(self, sample_xlsx):
+        """Full round-trip: generate inventory, then validate a clean extraction against it."""
+        handler = SCALFileHandler(sample_xlsx)
+        handler.read()
+        inventory = handler.generate_structural_inventory()
+
+        # Simulate a clean LLM extraction that references valid sheets
+        clean_extraction = {
+            "phase_0b_proof_of_read": {
+                "filename": "Phi_k_OBP_T1-31.xlsx",
+                "sheets_found": ["comp 1", "comp 2", "Summary"],
+            },
+            "protocol_1_file_open_proof": {
+                "target_sheet": "comp 1",
+                "sheet_names": ["comp 1", "comp 2", "Summary"],
+                "raw_column_headers": ["Pressure_psi", "Porosity_%", "Ka_mD"],
+            },
+            "extracted_data": [{"Pressure_psi": 800}],
+        }
+        violations = validate_extraction_against_inventory(clean_extraction, inventory)
+        assert len(violations) == 0, f"Unexpected violations: {violations}"
+
+    def test_inventory_validation_catches_hallucinated_sheet(self, sample_xlsx):
+        """Round-trip: validation must catch a hallucinated sheet."""
+        handler = SCALFileHandler(sample_xlsx)
+        handler.read()
+        inventory = handler.generate_structural_inventory()
+
+        bad_extraction = {
+            "phase_0b_proof_of_read": {
+                "sheets_found": ["comp 1", "comp 2", "Summary", "FABRICATED_SHEET"],
+            },
+            "protocol_1_file_open_proof": {
+                "target_sheet": "FABRICATED_SHEET",
+            },
+            "extracted_data": [{"A": 1}],
+        }
+        violations = validate_extraction_against_inventory(bad_extraction, inventory)
+        assert len(violations) >= 1
+        assert any("FABRICATED_SHEET" in v for v in violations)
+
+
+# ────────────────────────────────────────────────────────
+# TEST: Petrophysical Hardening Rules in Prompt
+# ────────────────────────────────────────────────────────
+
+class TestPetrophysicalHardeningRules:
+    """Verify the extraction prompt contains specific hardening rules for
+    Phi_k_OBP comp sheets, Specific Oil Permeability isolation, and saturation logic."""
+
+    def test_comp_sheet_iteration_rule(self):
+        prompt_path = os.path.join(
+            os.path.dirname(os.path.dirname(__file__)),
+            "prompts", "extraction_system_prompt.md"
+        )
+        content = open(prompt_path, "r", encoding="utf-8").read()
+        assert "comp" in content.lower(), "Missing comp sheet iteration rule"
+        assert "Phi_k_OBP" in content, "Missing Phi_k_OBP reference"
+
+    def test_specific_oil_perm_isolation_rule(self):
+        prompt_path = os.path.join(
+            os.path.dirname(os.path.dirname(__file__)),
+            "prompts", "extraction_system_prompt.md"
+        )
+        content = open(prompt_path, "r", encoding="utf-8").read()
+        assert "Specific Oil Permeability" in content or "Sheet1" in content, \
+            "Missing Specific Oil Permeability isolation rule"
+
+    def test_explicit_swi_sor_rule(self):
+        prompt_path = os.path.join(
+            os.path.dirname(os.path.dirname(__file__)),
+            "prompts", "extraction_system_prompt.md"
+        )
+        content = open(prompt_path, "r", encoding="utf-8").read()
+        assert "explicit_Swi" in content or "Swi" in content, "Missing Swi override rule"
+        assert "explicit_Sor" in content or "Sor" in content, "Missing Sor override rule"
+
