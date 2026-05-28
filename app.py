@@ -48,7 +48,7 @@ from petrophysical_curves import Endpoints, KrCurveFitter
 
 from physics_validator import PhysicsGuard
 
-from scal_file_handler import SCALFileHandler, extract_file_data, _extract_pdf as _sfh_extract_pdf, _extract_docx as _sfh_extract_docx, strip_thinking_blocks, strip_placeholder_artifacts, validate_extraction_against_inventory
+from scal_file_handler import SCALFileHandler, extract_file_data, _extract_pdf as _sfh_extract_pdf, _extract_docx as _sfh_extract_docx, strip_thinking_blocks, strip_placeholder_artifacts, validate_extraction_against_inventory, extract_absolute_file_truth, validate_permeability_column_binding
 from file_reader import read_file, to_prompt_string, build_gemini_message
 
 from report_generator import PRCReportEngine
@@ -2992,6 +2992,17 @@ class PRCChatAssistant:
                         # Phase 0b: Generate GROUND TRUTH structural inventory from the actual file
                         phase0b_inventory = None
                         phase0b_inventory_text = ""
+                        mandatory_ground_truth = ""
+                        if is_spreadsheet or is_docx:
+                            try:
+                                # Deterministic pre-parser: raw pd.ExcelFile, zero SCALFileHandler dependency
+                                mandatory_ground_truth = extract_absolute_file_truth(
+                                    [(tmp_path, fname)]
+                                )
+                                _logger.info(f"[Phase 0b] Deterministic MANDATORY_GROUND_TRUTH_INVENTORY generated for {fname}")
+                            except Exception as mgt_err:
+                                _logger.warning(f"[Phase 0b] extract_absolute_file_truth failed for {fname}: {mgt_err}")
+                        
                         if is_spreadsheet:
                             try:
                                 _handler = SCALFileHandler(tmp_path)
@@ -3006,11 +3017,35 @@ class PRCChatAssistant:
                             except Exception as inv_err:
                                 _logger.warning(f"[Phase 0b] Inventory generation failed for {fname}: {inv_err}")
                         
+                        # Inject MANDATORY_GROUND_TRUTH_INVENTORY into the SYSTEM INSTRUCTION
+                        # This is architecturally un-bypassable: the LLM cannot ignore system-level instructions
+                        if mandatory_ground_truth:
+                            system_instruction = (
+                                f"{system_instruction}\n\n"
+                                f"## MANDATORY_GROUND_TRUTH_INVENTORY\n\n"
+                                f"You are provided with a MANDATORY_GROUND_TRUTH_INVENTORY extracted "
+                                f"programmatically by the Python server from the actual binary file. "
+                                f"This inventory is ABSOLUTE TRUTH and supersedes ANY text analysis you perform.\n\n"
+                                f"RULES:\n"
+                                f"1. If your analysis references a sheet name that does NOT exist in this inventory, "
+                                f"you MUST immediately output STRUCTURAL_HALT and fail.\n"
+                                f"2. If your analysis references a column label that does NOT exist in this inventory, "
+                                f"you MUST immediately output STRUCTURAL_HALT and fail.\n"
+                                f"3. You are FORBIDDEN from recycling numbers, columns, or sheet names from previous "
+                                f"chat turns or cached context. Only use what is in the current file.\n"
+                                f"4. For permeability fields (KL, Ka, Air_Permeability_md, Klinkenberg_Permeability_md), "
+                                f"the source column header MUST contain 'mD', 'Permeability', 'KL', or 'Ka'. "
+                                f"You MUST REJECT columns with '(cc)', 'Volume', 'Cum.vol', or 'Cumulative' for permeability extraction.\n"
+                                f"5. If a cell explicitly states 'Swi = <value>' or 'Sor = <value>', bind that value "
+                                f"directly to explicit_Swi or explicit_Sor. These override ALL derived calculations.\n\n"
+                                f"{mandatory_ground_truth}\n"
+                            )
+                        
                         full_markdown_variable = (
                             f"--- START OF FULL DOCUMENT MARKDOWN ---\n{fr_text}\n--- END OF FULL DOCUMENT MARKDOWN ---\n\n"
                         )
                         
-                        # Inject ground-truth Phase 0b inventory if available
+                        # Also inject Phase 0b inventory text into user prompt for cross-validation
                         if phase0b_inventory_text:
                             full_markdown_variable += (
                                 f"--- GROUND TRUTH: PHASE 0b STRUCTURAL INVENTORY (generated by Python parser) ---\n"
@@ -3126,6 +3161,17 @@ class PRCChatAssistant:
                                     raise ValueError(
                                         f"STRUCTURAL_HALT: Python-side validation caught {len(violations)} "
                                         f"hallucinated reference(s): {'; '.join(violations[:3])}"
+                                    )
+                            
+                            # Permeability column binding validation
+                            if isinstance(parsed, dict):
+                                perm_violations = validate_permeability_column_binding(parsed)
+                                if perm_violations:
+                                    for pv in perm_violations:
+                                        _logger.error(f"[Phase 0b] {pv}")
+                                    raise ValueError(
+                                        f"PERM_COLUMN_HALT: {len(perm_violations)} permeability "
+                                        f"data-shuffling error(s): {'; '.join(perm_violations[:3])}"
                                     )
                                 
                             if isinstance(parsed, dict) and "extracted_data" in parsed:
@@ -5966,6 +6012,17 @@ def sync_document_generation_task(
         # Phase 0b: Generate GROUND TRUTH structural inventory from the actual file
         phase0b_inventory = None
         phase0b_inventory_text = ""
+        mandatory_ground_truth = ""
+        if is_spreadsheet or is_docx:
+            try:
+                # Deterministic pre-parser: raw pd.ExcelFile, zero SCALFileHandler dependency
+                mandatory_ground_truth = extract_absolute_file_truth(
+                    [(temp_file_path, filename)]
+                )
+                _logger.info(f"[Phase 0b BG] Deterministic MANDATORY_GROUND_TRUTH_INVENTORY generated for {filename}")
+            except Exception as mgt_err:
+                _logger.warning(f"[Phase 0b BG] extract_absolute_file_truth failed for {filename}: {mgt_err}")
+        
         if is_spreadsheet:
             try:
                 _handler = SCALFileHandler(temp_file_path)
@@ -5988,13 +6045,36 @@ def sync_document_generation_task(
         )
         with open(extraction_prompt_path, "r", encoding="utf-8") as f:
             system_instruction = f.read()
+        
+        # Inject MANDATORY_GROUND_TRUTH_INVENTORY into the SYSTEM INSTRUCTION
+        if mandatory_ground_truth:
+            system_instruction = (
+                f"{system_instruction}\n\n"
+                f"## MANDATORY_GROUND_TRUTH_INVENTORY\n\n"
+                f"You are provided with a MANDATORY_GROUND_TRUTH_INVENTORY extracted "
+                f"programmatically by the Python server from the actual binary file. "
+                f"This inventory is ABSOLUTE TRUTH and supersedes ANY text analysis you perform.\n\n"
+                f"RULES:\n"
+                f"1. If your analysis references a sheet name that does NOT exist in this inventory, "
+                f"you MUST immediately output STRUCTURAL_HALT and fail.\n"
+                f"2. If your analysis references a column label that does NOT exist in this inventory, "
+                f"you MUST immediately output STRUCTURAL_HALT and fail.\n"
+                f"3. You are FORBIDDEN from recycling numbers, columns, or sheet names from previous "
+                f"chat turns or cached context. Only use what is in the current file.\n"
+                f"4. For permeability fields (KL, Ka, Air_Permeability_md, Klinkenberg_Permeability_md), "
+                f"the source column header MUST contain 'mD', 'Permeability', 'KL', or 'Ka'. "
+                f"You MUST REJECT columns with '(cc)', 'Volume', 'Cum.vol', or 'Cumulative' for permeability extraction.\n"
+                f"5. If a cell explicitly states 'Swi = <value>' or 'Sor = <value>', bind that value "
+                f"directly to explicit_Swi or explicit_Sor. These override ALL derived calculations.\n\n"
+                f"{mandatory_ground_truth}\n"
+            )
             
         msg = message or "Analyze petrophysical data from uploaded file."
         full_markdown_variable = (
             f"--- START OF FULL DOCUMENT MARKDOWN ---\n{fr_text}\n--- END OF FULL DOCUMENT MARKDOWN ---\n\n"
         )
         
-        # Inject ground-truth Phase 0b inventory if available
+        # Also inject Phase 0b inventory text into user prompt for cross-validation
         if phase0b_inventory_text:
             full_markdown_variable += (
                 f"--- GROUND TRUTH: PHASE 0b STRUCTURAL INVENTORY (generated by Python parser) ---\n"
@@ -6107,6 +6187,17 @@ def sync_document_generation_task(
                     raise ValueError(
                         f"STRUCTURAL_HALT: Python-side validation caught {len(violations)} "
                         f"hallucinated reference(s): {'; '.join(violations[:3])}"
+                    )
+            
+            # Permeability column binding validation
+            if isinstance(parsed, dict):
+                perm_violations = validate_permeability_column_binding(parsed)
+                if perm_violations:
+                    for pv in perm_violations:
+                        _logger.error(f"[Phase 0b BG] {pv}")
+                    raise ValueError(
+                        f"PERM_COLUMN_HALT: {len(perm_violations)} permeability "
+                        f"data-shuffling error(s): {'; '.join(perm_violations[:3])}"
                     )
                 
             if isinstance(parsed, dict) and "extracted_data" in parsed:

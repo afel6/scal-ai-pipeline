@@ -402,7 +402,6 @@ def validate_extraction_against_inventory(
     """Validate that LLM extraction output does not cite hallucinated sheets or columns.
 
     Returns a list of violation strings. Empty list = clean pass.
-    Raises ValueError on STRUCTURAL_HALT conditions if violations are critical.
     """
     violations = []
     valid_sheets = set(inventory.get("sheets_found", []))
@@ -428,7 +427,7 @@ def validate_extraction_against_inventory(
                     f"but not present in actual file. Valid sheets: {sorted(valid_sheets)}"
                 )
 
-    # Validate column headers against inventory
+    # Validate column headers against inventory (FIX: was dead code — now active)
     inv_headers_by_sheet = {}
     for si in inventory.get("sheet_inventories", []):
         sn = si.get("sheet_name", "")
@@ -437,8 +436,185 @@ def validate_extraction_against_inventory(
             h.strip().lower() for h in raw_h.split("|") if h.strip()
         )
 
+    # Validate Protocol 2 column citations against ground truth headers
+    p2 = extracted_json.get("protocol_2_header_unit_double_check", [])
+    if isinstance(p2, list) and inv_headers_by_sheet:
+        # Get the target sheet's valid headers
+        target_sheet = ""
+        if isinstance(p1, dict):
+            target_sheet = p1.get("target_sheet", "")
+        valid_headers = inv_headers_by_sheet.get(target_sheet, set())
+        if not valid_headers:
+            # Fall back to union of all sheet headers
+            valid_headers = set()
+            for headers in inv_headers_by_sheet.values():
+                valid_headers.update(headers)
+
+        for check_item in p2:
+            if not isinstance(check_item, dict):
+                continue
+            checks = check_item.get("checks", [])
+            if not isinstance(checks, list):
+                continue
+            for c in checks:
+                if not isinstance(c, dict):
+                    continue
+                literal_header = c.get("literal_header", "")
+                if literal_header and valid_headers:
+                    # Fuzzy check: the literal header (lowered) should be a substring
+                    # of at least one valid header, or vice versa
+                    lit_lower = literal_header.strip().lower()
+                    found = any(
+                        lit_lower in vh or vh in lit_lower
+                        for vh in valid_headers
+                    )
+                    if not found:
+                        violations.append(
+                            f"COLUMN_HALT: Column '{literal_header}' cited in protocol_2 "
+                            f"but not found in ground truth headers for sheet '{target_sheet}'. "
+                            f"Valid headers: {sorted(valid_headers)}"
+                        )
+
     return violations
 
+
+# ------------------------------------------------------------------ #
+# DETERMINISTIC METADATA PRE-PARSER (Extract Absolute File Truth)
+# ------------------------------------------------------------------ #
+
+def extract_absolute_file_truth(temp_file_paths: list) -> str:
+    """Pure Python deterministic pre-parser that extracts un-bypassable
+    ground truth metadata from uploaded files BEFORE the LLM is called.
+
+    This function uses raw pandas calls (pd.ExcelFile, pd.read_excel, 
+    smart_read_csv) with ZERO SCALFileHandler dependency.
+
+    Args:
+        temp_file_paths: List of (file_path, original_filename) tuples.
+
+    Returns:
+        A formatted MANDATORY_GROUND_TRUTH_INVENTORY text block suitable
+        for direct injection into the LLM system instruction.
+    """
+    lines = [
+        "╔══════════════════════════════════════════════════════════════════════╗",
+        "║  MANDATORY_GROUND_TRUTH_INVENTORY                                  ║",
+        "║  Generated programmatically by the Python server.                   ║",
+        "║  This inventory is ABSOLUTE TRUTH. You MUST NOT contradict it.      ║",
+        "╚══════════════════════════════════════════════════════════════════════╝",
+        "",
+    ]
+
+    for file_path, original_filename in temp_file_paths:
+        ext = os.path.splitext(original_filename)[1].lower()
+        lines.append(f"═══ FILE: {original_filename} ═══")
+
+        try:
+            if ext in ('.xlsx', '.xlsm', '.xls', '.ods'):
+                engine = (
+                    'openpyxl' if ext in ('.xlsx', '.xlsm')
+                    else ('xlrd' if ext == '.xls' else 'odf')
+                )
+                xl = pd.ExcelFile(file_path, engine=engine)
+                sheet_names = xl.sheet_names
+                lines.append(f"TOTAL SHEETS: {len(sheet_names)}")
+                lines.append(f"SHEET NAMES: {sheet_names}")
+                lines.append("")
+
+                for sheet in sheet_names:
+                    df = pd.read_excel(xl, sheet_name=sheet, nrows=2)
+                    full_df_shape = pd.read_excel(xl, sheet_name=sheet, header=None).shape
+                    columns = list(df.columns)
+                    lines.append(f"  SHEET: \"{sheet}\"")
+                    lines.append(f"    COLUMNS ({len(columns)}): {columns}")
+                    lines.append(f"    FULL SHAPE: ({full_df_shape[0]} rows × {full_df_shape[1]} cols)")
+                    # Print first 2 rows as raw values
+                    for row_idx in range(min(2, len(df))):
+                        row_vals = df.iloc[row_idx].tolist()
+                        # Convert NaN to None for clarity
+                        row_vals = [
+                            None if pd.isna(v) else (float(v) if isinstance(v, (int, float, np.integer, np.floating)) else str(v))
+                            for v in row_vals
+                        ]
+                        lines.append(f"    ROW {row_idx}: {row_vals}")
+                    lines.append("")
+
+                xl.close()
+
+            elif ext == '.csv':
+                df = smart_read_csv(file_path, nrows=2)
+                full_df = smart_read_csv(file_path)
+                columns = list(df.columns)
+                lines.append(f"TOTAL SHEETS: 1 (CSV)")
+                lines.append(f"SHEET NAMES: ['Sheet1']")
+                lines.append(f"  SHEET: \"Sheet1\"")
+                lines.append(f"    COLUMNS ({len(columns)}): {columns}")
+                lines.append(f"    FULL SHAPE: ({len(full_df)} rows × {len(columns)} cols)")
+                for row_idx in range(min(2, len(df))):
+                    row_vals = df.iloc[row_idx].tolist()
+                    row_vals = [
+                        None if pd.isna(v) else (float(v) if isinstance(v, (int, float, np.integer, np.floating)) else str(v))
+                        for v in row_vals
+                    ]
+                    lines.append(f"    ROW {row_idx}: {row_vals}")
+                lines.append("")
+
+            else:
+                lines.append(f"  [Non-tabular file, no sheet/column inventory applicable]")
+                lines.append("")
+
+        except Exception as e:
+            lines.append(f"  [ERROR reading file: {e}]")
+            lines.append("")
+
+    lines.append("═══════════════════════════════════════════════════════════════")
+    lines.append("END OF MANDATORY_GROUND_TRUTH_INVENTORY")
+    lines.append("═══════════════════════════════════════════════════════════════")
+    return "\n".join(lines)
+
+
+def validate_permeability_column_binding(extracted_json: dict) -> list:
+    """Post-extraction validation: ensure permeability values are NOT sourced
+    from volume/cumulative columns.
+
+    Returns a list of violation strings. Empty list = clean pass.
+    """
+    violations = []
+
+    # Check Protocol 2 for mismatched permeability bindings
+    p2 = extracted_json.get("protocol_2_header_unit_double_check", [])
+    if not isinstance(p2, list):
+        return violations
+
+    # Column headers that MUST NOT be bound to permeability fields
+    volume_keywords = {'cc', 'volume', 'cum.vol', 'cumulative', 'ml', 'pore volume', 'pv'}
+    perm_fields = {'klinkenberg_permeability_md', 'air_permeability_md', 'permeability'}
+
+    for check_item in p2:
+        if not isinstance(check_item, dict):
+            continue
+        checks = check_item.get("checks", [])
+        if not isinstance(checks, list):
+            continue
+        for c in checks:
+            if not isinstance(c, dict):
+                continue
+            field = (c.get("field", "") or "").lower()
+            literal_header = (c.get("literal_header", "") or "").lower()
+
+            # Check if a permeability field is bound to a volume column
+            is_perm_field = any(pf in field for pf in perm_fields)
+            is_volume_header = any(vk in literal_header for vk in volume_keywords)
+
+            if is_perm_field and is_volume_header:
+                violations.append(
+                    f"PERM_COLUMN_HALT: Permeability field '{c.get('field')}' is bound to "
+                    f"volume/cumulative column '{c.get('literal_header')}'. This is a "
+                    f"data-shuffling error. Permeability must be bound to headers containing "
+                    f"'mD', 'Permeability', 'KL', or 'Ka'."
+                )
+
+    return violations
 
 def strip_thinking_blocks(text: str) -> str:
     """Remove <thinking>...</thinking> blocks from LLM output."""

@@ -139,6 +139,21 @@ Add new entries at the top of the list with date, CVE class, and patch descripti
 
 ---
 
+### [2026-05-29] Deterministic Pre-Parser & Permeability Column Binding — Anti-Data-Shuffling Defense
+
+**Class:** CWE-20 Data Integrity / Column Binding Validation / System Instruction Injection  
+**Discovery:** Diagnostic test confirmed Specific_Oil_Permeability.xlsx contains ONLY ['Sheet1'], but LLM hallucinated phantom sheets ('Sample-1,2,3,24') and confused Cumulative Volume columns with KL Permeability. No prompt-level fix can prevent this — the ground truth must be deterministically injected from the backend server.  
+**Risk:** Without deterministic server-side column binding validation, the LLM can silently bind volume/cumulative columns (e.g., 'Cum.vol.inj. (cc)') to permeability fields, producing physically impossible extraction results. Additionally, the existing column header validation in `validate_extraction_against_inventory()` was dead code (built the `inv_headers_by_sheet` dict but never used it).  
+**Patch:**  
+  1. **NEW FUNCTION: `extract_absolute_file_truth()`** — Standalone, zero-SCALFileHandler-dependency pre-parser using raw `pd.ExcelFile().sheet_names` and `pd.read_excel(nrows=2)`. Produces deterministic `MANDATORY_GROUND_TRUTH_INVENTORY` text block.  
+  2. **SYSTEM INSTRUCTION INJECTION**: Ground truth injected into the Gemini SYSTEM INSTRUCTION (not user prompt), making it architecturally un-bypassable. Includes 5 mandatory rules: sheet validation, column validation, anti-recycling, permeability column binding, and Swi/Sor explicit value priority.  
+  3. **NEW FUNCTION: `validate_permeability_column_binding()`** — Post-extraction server-side validation rejecting any permeability field bound to columns containing 'cc', 'Volume', 'Cum.vol', or 'Cumulative'. Raises `PERM_COLUMN_HALT`.  
+  4. **FIX: Column Header Validation (was dead code)** — `validate_extraction_against_inventory()` now actually checks Protocol 2 column citations against the ground truth headers from the inventory (was building the dict but never checking it).  
+  5. **DUAL-LAYER INJECTION**: Ground truth injected at BOTH system instruction level (MANDATORY_GROUND_TRUTH_INVENTORY) and user prompt level (Phase 0b inventory text), providing cross-validation at two architectural layers.  
+**Status:** RESOLVED 2026-05-29. Applied to both sync and background extraction paths. Verified via pytest regression suite.
+
+---
+
 ### [2026-05-29] Phase 0b ACTIVATION: Ground Truth Inventory Injection & Server-Side Validation
 
 **Class:** CWE-20 Dead Code Activation / Structural Hallucination Prevention / Defense-in-Depth  

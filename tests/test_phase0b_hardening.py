@@ -21,6 +21,8 @@ from scal_file_handler import (
     strip_placeholder_artifacts,
     validate_extraction_against_inventory,
     detect_multi_well_mixing,
+    extract_absolute_file_truth,
+    validate_permeability_column_binding,
 )
 
 
@@ -524,3 +526,233 @@ class TestPetrophysicalHardeningRules:
         assert "explicit_Swi" in content or "Swi" in content, "Missing Swi override rule"
         assert "explicit_Sor" in content or "Sor" in content, "Missing Sor override rule"
 
+
+# ────────────────────────────────────────────────────────
+# TEST: Deterministic Pre-Parser (extract_absolute_file_truth)
+# ────────────────────────────────────────────────────────
+
+class TestExtractAbsoluteFileTruth:
+    """Verify the standalone deterministic pre-parser produces correct ground truth."""
+
+    @staticmethod
+    def _safe_unlink(path):
+        """Best-effort cleanup — Windows may hold locks."""
+        try:
+            os.unlink(path)
+        except PermissionError:
+            pass
+
+    def test_xlsx_single_sheet(self):
+        """XLSX with a single sheet returns correct metadata."""
+        f = tempfile.NamedTemporaryFile(suffix=".xlsx", delete=False)
+        fpath = f.name
+        f.close()
+        df = pd.DataFrame({"Ka (mD)": [10.5, 20.3], "Porosity (%)": [18.0, 16.5]})
+        df.to_excel(fpath, index=False, sheet_name="Sheet1")
+        result = extract_absolute_file_truth([(fpath, "test_single.xlsx")])
+        self._safe_unlink(fpath)
+
+        assert "MANDATORY_GROUND_TRUTH_INVENTORY" in result
+        assert "test_single.xlsx" in result
+        assert "TOTAL SHEETS: 1" in result
+        assert "Sheet1" in result
+        assert "Ka (mD)" in result
+        assert "Porosity (%)" in result
+
+    def test_xlsx_multi_sheet(self):
+        """XLSX with multiple sheets lists all of them."""
+        f = tempfile.NamedTemporaryFile(suffix=".xlsx", delete=False)
+        fpath = f.name
+        f.close()
+        with pd.ExcelWriter(fpath, engine="openpyxl") as writer:
+            pd.DataFrame({"A": [1]}).to_excel(writer, sheet_name="comp 1", index=False)
+            pd.DataFrame({"B": [2]}).to_excel(writer, sheet_name="comp 2", index=False)
+            pd.DataFrame({"C": [3]}).to_excel(writer, sheet_name="Summary", index=False)
+        result = extract_absolute_file_truth([(fpath, "multi_sheet.xlsx")])
+        self._safe_unlink(fpath)
+
+        assert "TOTAL SHEETS: 3" in result
+        assert "comp 1" in result
+        assert "comp 2" in result
+        assert "Summary" in result
+
+    def test_csv_file(self):
+        """CSV files are handled as single-sheet."""
+        f = tempfile.NamedTemporaryFile(suffix=".csv", delete=False, mode="w", encoding="utf-8")
+        f.write("Pressure,Porosity\n800,18.5\n1200,17.8\n")
+        fpath = f.name
+        f.close()
+        result = extract_absolute_file_truth([(fpath, "test.csv")])
+        self._safe_unlink(fpath)
+
+        assert "TOTAL SHEETS: 1 (CSV)" in result
+        assert "Pressure" in result
+        assert "Porosity" in result
+
+    def test_non_tabular_file(self):
+        """Non-tabular files produce a graceful note."""
+        f = tempfile.NamedTemporaryFile(suffix=".txt", delete=False, mode="w")
+        f.write("some text")
+        fpath = f.name
+        f.close()
+        result = extract_absolute_file_truth([(fpath, "notes.txt")])
+        self._safe_unlink(fpath)
+
+        assert "Non-tabular file" in result
+
+    def test_multiple_files(self):
+        """Multiple files in a single call produce combined inventory."""
+        paths = []
+        for name, col in [("file_A.xlsx", "X"), ("file_B.xlsx", "Y")]:
+            f = tempfile.NamedTemporaryFile(suffix=".xlsx", delete=False)
+            fpath = f.name
+            f.close()
+            pd.DataFrame({col: [1]}).to_excel(fpath, index=False)
+            paths.append((fpath, name))
+
+        result = extract_absolute_file_truth(paths)
+        for p, _ in paths:
+            self._safe_unlink(p)
+
+        assert "file_A.xlsx" in result
+        assert "file_B.xlsx" in result
+
+    def test_row_data_present(self):
+        """First 2 data rows are printed in the inventory."""
+        f = tempfile.NamedTemporaryFile(suffix=".xlsx", delete=False)
+        fpath = f.name
+        f.close()
+        df = pd.DataFrame({"Value": [42.7, 99.1, 0.5]})
+        df.to_excel(fpath, index=False)
+        result = extract_absolute_file_truth([(fpath, "rows.xlsx")])
+        self._safe_unlink(fpath)
+
+        assert "ROW 0" in result
+        assert "ROW 1" in result
+        assert "42.7" in result
+        assert "99.1" in result
+
+    def test_end_marker_present(self):
+        """Output ends with the END OF MANDATORY_GROUND_TRUTH_INVENTORY marker."""
+        f = tempfile.NamedTemporaryFile(suffix=".xlsx", delete=False)
+        fpath = f.name
+        f.close()
+        pd.DataFrame({"A": [1]}).to_excel(fpath, index=False)
+        result = extract_absolute_file_truth([(fpath, "x.xlsx")])
+        self._safe_unlink(fpath)
+
+        assert "END OF MANDATORY_GROUND_TRUTH_INVENTORY" in result
+
+
+# ────────────────────────────────────────────────────────
+# TEST: Permeability Column Binding Validation
+# ────────────────────────────────────────────────────────
+
+class TestPermeabilityColumnBinding:
+    """Verify that permeability fields bound to volume columns are caught."""
+
+    def test_clean_binding_passes(self):
+        """Permeability bound to a real permeability column — no violations."""
+        parsed = {
+            "protocol_2_header_unit_double_check": [
+                {
+                    "row_index": 1,
+                    "checks": [
+                        {"field": "Klinkenberg_Permeability_md", "literal_header": "KL (mD)", "literal_unit": "mD", "value": 42.1},
+                        {"field": "Air_Permeability_md", "literal_header": "Ka (mD)", "literal_unit": "mD", "value": 45.2},
+                    ]
+                }
+            ]
+        }
+        violations = validate_permeability_column_binding(parsed)
+        assert violations == [], f"Expected no violations but got: {violations}"
+
+    def test_volume_binding_caught(self):
+        """Permeability bound to Cum.vol.inj. (cc) — MUST be caught."""
+        parsed = {
+            "protocol_2_header_unit_double_check": [
+                {
+                    "row_index": 1,
+                    "checks": [
+                        {"field": "Klinkenberg_Permeability_md", "literal_header": "Cum.vol.inj. (cc)", "literal_unit": "cc", "value": 5.2},
+                    ]
+                }
+            ]
+        }
+        violations = validate_permeability_column_binding(parsed)
+        assert len(violations) == 1
+        assert "PERM_COLUMN_HALT" in violations[0]
+        assert "Cum.vol.inj." in violations[0]
+
+    def test_cumulative_volume_caught(self):
+        """Permeability bound to 'Cumulative Volume' — MUST be caught."""
+        parsed = {
+            "protocol_2_header_unit_double_check": [
+                {
+                    "row_index": 1,
+                    "checks": [
+                        {"field": "Air_Permeability_md", "literal_header": "Cumulative Volume (ml)", "literal_unit": "ml", "value": 10.0},
+                    ]
+                }
+            ]
+        }
+        violations = validate_permeability_column_binding(parsed)
+        assert len(violations) == 1
+        assert "PERM_COLUMN_HALT" in violations[0]
+
+    def test_empty_protocol2_passes(self):
+        """Empty or missing protocol_2 — no violations."""
+        assert validate_permeability_column_binding({}) == []
+        assert validate_permeability_column_binding({"protocol_2_header_unit_double_check": []}) == []
+
+
+# ────────────────────────────────────────────────────────
+# TEST: Fixed Column Header Validation (was dead code)
+# ────────────────────────────────────────────────────────
+
+class TestColumnHeaderValidation:
+    """Verify that validate_extraction_against_inventory now checks column headers."""
+
+    def test_valid_column_passes(self):
+        """Column that exists in inventory passes validation."""
+        inventory = {
+            "sheets_found": ["Sheet1"],
+            "sheet_inventories": [
+                {
+                    "sheet_name": "Sheet1",
+                    "header_row_raw": "Ka (mD) | KL (mD) | Porosity (%)",
+                }
+            ]
+        }
+        parsed = {
+            "protocol_1_file_open_proof": {"target_sheet": "Sheet1", "raw_column_headers": ["Ka (mD)"]},
+            "phase_0b_proof_of_read": {"sheets_found": ["Sheet1"]},
+            "protocol_2_header_unit_double_check": [
+                {"row_index": 1, "checks": [{"field": "Air_Permeability_md", "literal_header": "Ka (mD)", "literal_unit": "mD", "value": 10.0}]}
+            ]
+        }
+        violations = validate_extraction_against_inventory(parsed, inventory)
+        assert violations == []
+
+    def test_hallucinated_column_caught(self):
+        """Column NOT in inventory is caught."""
+        inventory = {
+            "sheets_found": ["Sheet1"],
+            "sheet_inventories": [
+                {
+                    "sheet_name": "Sheet1",
+                    "header_row_raw": "Ka (mD) | Porosity (%)",
+                }
+            ]
+        }
+        parsed = {
+            "protocol_1_file_open_proof": {"target_sheet": "Sheet1", "raw_column_headers": ["Ka (mD)"]},
+            "phase_0b_proof_of_read": {"sheets_found": ["Sheet1"]},
+            "protocol_2_header_unit_double_check": [
+                {"row_index": 1, "checks": [{"field": "Pressure_psi", "literal_header": "Phantom Column XYZ", "literal_unit": "psi", "value": 800}]}
+            ]
+        }
+        violations = validate_extraction_against_inventory(parsed, inventory)
+        assert len(violations) >= 1
+        assert any("COLUMN_HALT" in v for v in violations)
+        assert "Phantom Column XYZ" in violations[0]
