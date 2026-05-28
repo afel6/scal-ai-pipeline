@@ -139,6 +139,23 @@ Add new entries at the top of the list with date, CVE class, and patch descripti
 
 ---
 
+### [2026-05-29] Phase 0b: Proof of Read — Anti-Hallucination Runtime Isolation
+
+**Class:** CWE-20 Improper Input Validation / Structural Hallucination Prevention / Context Recycling Defense  
+**Discovery:** Production accuracy evaluation (4/10 score). LLM recycled cached values (Cum.vol.inj. misidentified as KL Permeability), hallucinated sheets in Specific_Oil_Permeability.xlsx, and missed permeability records on 'comp' sheets of Phi_k_OBP files.  
+**Risk:** Without runtime structural proof-of-read, the LLM engine can fabricate citations by relying on memorized file structures from prior context windows, leading to silent data-integrity failures in SCAL extraction.  
+**Patch:**
+1. Rewrote `extraction_system_prompt.md` to mandate Phase 0b structural file inventory output (sheet names, header rows, shapes, first 2 data rows) BEFORE any extraction. Added STRUCTURAL_HALT conditions forbidding citation of sheets/columns not in the inventory.
+2. Added `generate_structural_inventory()` and `generate_structural_inventory_text()` methods to `SCALFileHandler` for Python-side inventory generation.
+3. Added `validate_extraction_against_inventory()`, `strip_thinking_blocks()`, `strip_placeholder_artifacts()`, and `detect_multi_well_mixing()` utility functions to `scal_file_handler.py`.
+4. **CRITICAL BUG FIX**: Fixed indentation bug in background `salvage_and_clean_json()` (app.py) where `return data_list` was inside the `for ok, ov in overrides.items()` loop, causing Sor override to be skipped when Swi was the first key.
+5. Added STRUCTURAL_HALT detection to both sync and background extraction salvage functions.
+6. Added `<thinking>` block stripping and `[NOT YET CHECKED]` placeholder cleanup to SSE finalization path.
+7. Updated both sync and background extraction prompts with Phase 0b mandate and 5-key JSON schema (phase_0b_proof_of_read + protocol_1-3 + extracted_data).  
+**Status:** RESOLVED 2026-05-29. Verified via pytest regression suite.
+
+---
+
 ### [2026-05-29] High-Fidelity Extraction Protocols & Benchmark Priority — Structured RAG Extractor
 
 **Class:** Accuracy & Reliability Gate / Structural Hallucination Prevention  

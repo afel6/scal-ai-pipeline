@@ -48,7 +48,7 @@ from petrophysical_curves import Endpoints, KrCurveFitter
 
 from physics_validator import PhysicsGuard
 
-from scal_file_handler import SCALFileHandler, extract_file_data, _extract_pdf as _sfh_extract_pdf, _extract_docx as _sfh_extract_docx
+from scal_file_handler import SCALFileHandler, extract_file_data, _extract_pdf as _sfh_extract_pdf, _extract_docx as _sfh_extract_docx, strip_thinking_blocks, strip_placeholder_artifacts, validate_extraction_against_inventory
 from file_reader import read_file, to_prompt_string, build_gemini_message
 
 from report_generator import PRCReportEngine
@@ -2994,11 +2994,16 @@ class PRCChatAssistant:
                             f"CRITICAL: Only extract the specific table(s) or data requested by the user above. "
                             f"If the user specifies a specific table (e.g., 'Table 2.1.1'), only extract the rows for that table. "
                             f"Do not extract rows from other tables or other core plug sweeps.\n\n"
+                            f"MANDATORY PHASE 0b — PROOF OF READ:\n"
+                            f"Before ANY extraction, you MUST output a structural file inventory proving you have inspected the actual file.\n"
+                            f"You are FORBIDDEN from relying on remembered file structures or historical context.\n\n"
                             f"MANDATORY PROTOCOLS FOR EXTRACTION:\n"
+                            f"0b. You must execute and return Phase 0b (PROOF OF READ: filename, sheets_found, per-sheet header/shape/first 2 rows inventory, multi_well_alert).\n"
                             f"1. You must execute and return Protocol 1 (FILE-OPEN PROOF: sheet names and raw column headers target sheet inventory).\n"
                             f"2. You must execute and return Protocol 2 (HEADER & UNIT DOUBLE-CHECK: print literal column headers/units for every extracted data value).\n"
                             f"3. You must execute and return Protocol 3 (LABELED-VALUE ABSOLUTE PRIORITY: extract explicitly stated Swi/Sor laboratory values and list them under overridden_endpoints).\n"
-                            f"Your JSON output MUST match the new structured schema format: a single object containing 'protocol_1_file_open_proof', 'protocol_2_header_unit_double_check', 'protocol_3_labeled_value_absolute_priority', and the final rows array as 'extracted_data'."
+                            f"Your JSON output MUST match the structured schema format: a single object containing 'phase_0b_proof_of_read', 'protocol_1_file_open_proof', 'protocol_2_header_unit_double_check', 'protocol_3_labeled_value_absolute_priority', and the final rows array as 'extracted_data'.\n\n"
+                            f"STRUCTURAL HALT: If you cite a sheet name or column header NOT in your own Phase 0b inventory, HALT and output a STRUCTURAL_HALT error."
                         )
                         
                         contents = [
@@ -3071,9 +3076,15 @@ class PRCChatAssistant:
                             
                             if parsed is None:
                                 raise ValueError("Could not parse or salvage valid JSON from LLM extraction response.")
+                            
+                            # Phase 0b: Check for STRUCTURAL_HALT from LLM
+                            if isinstance(parsed, dict) and "STRUCTURAL_HALT" in parsed:
+                                halt_msg = parsed["STRUCTURAL_HALT"]
+                                _logger.error(f"[Phase 0b] STRUCTURAL HALT: {halt_msg}")
+                                raise ValueError(f"STRUCTURAL_HALT: LLM detected hallucinated reference — {halt_msg}")
                                 
                             if isinstance(parsed, dict) and "extracted_data" in parsed:
-                                _logger.info("[Pipeline] Successfully parsed mandatory protocols and structured data.")
+                                _logger.info("[Pipeline] Successfully parsed Phase 0b + mandatory protocols and structured data.")
                                 overrides = parsed.get("protocol_3_labeled_value_absolute_priority", {}).get("overridden_endpoints", {})
                                 data_list = parsed.get("extracted_data", [])
                                 if isinstance(data_list, list) and isinstance(overrides, dict):
@@ -5135,9 +5146,13 @@ async def chat_stream(
 
 
 
-                # 6. Finalization
+                # 6. Finalization — strip LLM artifacts before persistence
 
                 if full_reply:
+                    # Phase 0b cleanup: strip <thinking> blocks and placeholder artifacts
+                    full_reply = strip_thinking_blocks(full_reply)
+                    full_reply = strip_placeholder_artifacts(full_reply)
+
                     full_reply = _extract_and_log_corrections(sid, email, full_reply)
 
                     db("INSERT INTO m (sid,role,text,ts,user_email) VALUES (?,?,?,?,?)",
@@ -5919,11 +5934,16 @@ def sync_document_generation_task(
             f"CRITICAL: Only extract the specific table(s) or data requested by the user above. "
             f"If the user specifies a specific table (e.g., 'Table 2.1.1'), only extract the rows for that table. "
             f"Do not extract rows from other tables or other core plug sweeps.\n\n"
+            f"MANDATORY PHASE 0b — PROOF OF READ:\n"
+            f"Before ANY extraction, you MUST output a structural file inventory proving you have inspected the actual file.\n"
+            f"You are FORBIDDEN from relying on remembered file structures or historical context.\n\n"
             f"MANDATORY PROTOCOLS FOR EXTRACTION:\n"
+            f"0b. You must execute and return Phase 0b (PROOF OF READ: filename, sheets_found, per-sheet header/shape/first 2 rows inventory, multi_well_alert).\n"
             f"1. You must execute and return Protocol 1 (FILE-OPEN PROOF: sheet names and raw column headers target sheet inventory).\n"
             f"2. You must execute and return Protocol 2 (HEADER & UNIT DOUBLE-CHECK: print literal column headers/units for every extracted data value).\n"
             f"3. You must execute and return Protocol 3 (LABELED-VALUE ABSOLUTE PRIORITY: extract explicitly stated Swi/Sor laboratory values and list them under overridden_endpoints).\n"
-            f"Your JSON output MUST match the new structured schema format: a single object containing 'protocol_1_file_open_proof', 'protocol_2_header_unit_double_check', 'protocol_3_labeled_value_absolute_priority', and the final rows array as 'extracted_data'."
+            f"Your JSON output MUST match the structured schema format: a single object containing 'phase_0b_proof_of_read', 'protocol_1_file_open_proof', 'protocol_2_header_unit_double_check', 'protocol_3_labeled_value_absolute_priority', and the final rows array as 'extracted_data'.\n\n"
+            f"STRUCTURAL HALT: If you cite a sheet name or column header NOT in your own Phase 0b inventory, HALT and output a STRUCTURAL_HALT error."
         )
         
         contents = [
@@ -5993,9 +6013,15 @@ def sync_document_generation_task(
             
             if parsed is None:
                 raise ValueError("Could not parse or salvage valid JSON from LLM extraction response.")
+            
+            # Phase 0b: Check for STRUCTURAL_HALT from LLM
+            if isinstance(parsed, dict) and "STRUCTURAL_HALT" in parsed:
+                halt_msg = parsed["STRUCTURAL_HALT"]
+                _logger.error(f"[Phase 0b] STRUCTURAL HALT in background task: {halt_msg}")
+                raise ValueError(f"STRUCTURAL_HALT: LLM detected hallucinated reference — {halt_msg}")
                 
             if isinstance(parsed, dict) and "extracted_data" in parsed:
-                _logger.info("[Pipeline] Successfully parsed mandatory protocols and structured data in background task.")
+                _logger.info("[Pipeline] Successfully parsed Phase 0b + mandatory protocols and structured data in background task.")
                 overrides = parsed.get("protocol_3_labeled_value_absolute_priority", {}).get("overridden_endpoints", {})
                 data_list = parsed.get("extracted_data", [])
                 if isinstance(data_list, list) and isinstance(overrides, dict):
@@ -6007,7 +6033,7 @@ def sync_document_generation_task(
                                         row["explicit_Swi"] = float(ov)
                                     elif ok.lower() == "sor":
                                         row["explicit_Sor"] = float(ov)
-                                return data_list
+                return data_list
             return parsed if isinstance(parsed, list) else []
 
         try:

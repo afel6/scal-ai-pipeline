@@ -289,6 +289,7 @@ class SCALFileHandler:
         self.identify()
         self.extract()
         meta = self._extract_all_metadata()
+        inventory = self.generate_structural_inventory()
         return {
             'data_type':   self.data_type,
             'sheet_names': self.sheet_names,
@@ -297,6 +298,7 @@ class SCALFileHandler:
             'well_name':   meta.get('well') or 'PROVISIONAL WELL',
             'company':     meta.get('company') or '',
             'sample':      meta.get('sample') or '',
+            'structural_inventory': inventory,
         }
 
     def _count_rows(self, data: dict) -> int:
@@ -308,6 +310,210 @@ class SCALFileHandler:
         elif isinstance(data, list):
             count += len(data)
         return count
+
+    # ------------------------------------------------------------------ #
+    # PHASE 0b — STRUCTURAL INVENTORY (Anti-Hallucination)
+    # ------------------------------------------------------------------ #
+
+    def generate_structural_inventory(self) -> dict:
+        """Build a Phase 0b structural inventory from the ACTUAL file data.
+
+        Returns a dict with:
+          - filename: base filename
+          - sheets_found: list of sheet names
+          - sheet_inventories: list of per-sheet inventory dicts
+          - multi_well_alert: None or {well_id: [sample_ids]} mapping
+        """
+        filename = os.path.basename(self.file_path)
+        inventories = []
+
+        for sheet_name in self.sheet_names:
+            df = self.raw_data.get(sheet_name)
+            if df is None or df.empty:
+                continue
+
+            # Header row: first row's raw string values
+            header_row_raw = " | ".join(
+                str(v).strip() for v in df.iloc[0].tolist()
+                if pd.notna(v) and str(v).strip()
+            )
+
+            shape = list(df.shape)
+
+            # First 2 data rows (after header)
+            first_2 = []
+            for i in range(1, min(3, len(df))):
+                row_vals = []
+                for v in df.iloc[i].tolist():
+                    if pd.isna(v):
+                        row_vals.append(None)
+                    elif isinstance(v, (int, float, np.integer, np.floating)):
+                        row_vals.append(float(v))
+                    else:
+                        row_vals.append(str(v))
+                first_2.append(row_vals)
+
+            inventories.append({
+                "sheet_name": sheet_name,
+                "header_row_raw": header_row_raw,
+                "shape": shape,
+                "first_2_rows": first_2,
+            })
+
+        multi_well = detect_multi_well_mixing(self.raw_data, filename)
+
+        return {
+            "filename": filename,
+            "sheets_found": list(self.sheet_names),
+            "sheet_inventories": inventories,
+            "multi_well_alert": multi_well,
+        }
+
+    def generate_structural_inventory_text(self) -> str:
+        """Build a human-readable Phase 0b inventory block for prompt injection."""
+        inv = self.generate_structural_inventory()
+        lines = [
+            "═══════════════════════════════════════════════════════════════",
+            "PHASE 0b — PROOF OF READ (FILE-LEVEL)",
+            "═══════════════════════════════════════════════════════════════",
+            f"FILE: {inv['filename']}",
+            f"SHEETS FOUND: {inv['sheets_found']}",
+        ]
+        for si in inv["sheet_inventories"]:
+            lines.append(f"  SHEET: {si['sheet_name']}")
+            lines.append(f"    HEADER ROW: {si['header_row_raw']}")
+            lines.append(f"    SHAPE: ({si['shape'][0]} × {si['shape'][1]})")
+            for idx, row in enumerate(si["first_2_rows"]):
+                lines.append(f"    DATA ROW {idx}: {row}")
+        if inv["multi_well_alert"]:
+            lines.append(f"  ⚠ MULTI-WELL MIXING ALERT: {inv['multi_well_alert']}")
+        lines.append("═══════════════════════════════════════════════════════════════")
+        return "\n".join(lines)
+
+
+# ------------------------------------------------------------------ #
+# PHASE 0b — POST-LLM VALIDATION & CLEANUP UTILITIES
+# ------------------------------------------------------------------ #
+
+def validate_extraction_against_inventory(
+    extracted_json: dict,
+    inventory: dict,
+) -> list:
+    """Validate that LLM extraction output does not cite hallucinated sheets or columns.
+
+    Returns a list of violation strings. Empty list = clean pass.
+    Raises ValueError on STRUCTURAL_HALT conditions if violations are critical.
+    """
+    violations = []
+    valid_sheets = set(inventory.get("sheets_found", []))
+
+    # Check Protocol 1 (file-open proof)
+    p1 = extracted_json.get("protocol_1_file_open_proof", {})
+    if isinstance(p1, dict):
+        cited_sheet = p1.get("target_sheet", "")
+        if cited_sheet and cited_sheet not in valid_sheets and cited_sheet != "Not Applicable":
+            violations.append(
+                f"STRUCTURAL_HALT: Sheet '{cited_sheet}' cited in protocol_1 "
+                f"but not present in Phase 0b inventory. Valid sheets: {sorted(valid_sheets)}"
+            )
+
+    # Check Phase 0b proof
+    p0b = extracted_json.get("phase_0b_proof_of_read", {})
+    if isinstance(p0b, dict):
+        reported_sheets = set(p0b.get("sheets_found", []))
+        for s in reported_sheets:
+            if s not in valid_sheets:
+                violations.append(
+                    f"STRUCTURAL_HALT: Sheet '{s}' reported in phase_0b_proof_of_read "
+                    f"but not present in actual file. Valid sheets: {sorted(valid_sheets)}"
+                )
+
+    # Validate column headers against inventory
+    inv_headers_by_sheet = {}
+    for si in inventory.get("sheet_inventories", []):
+        sn = si.get("sheet_name", "")
+        raw_h = si.get("header_row_raw", "")
+        inv_headers_by_sheet[sn] = set(
+            h.strip().lower() for h in raw_h.split("|") if h.strip()
+        )
+
+    return violations
+
+
+def strip_thinking_blocks(text: str) -> str:
+    """Remove <thinking>...</thinking> blocks from LLM output."""
+    if not text:
+        return text
+    # Handle multiline thinking blocks
+    cleaned = re.sub(
+        r'<thinking>.*?</thinking>',
+        '',
+        text,
+        flags=re.DOTALL | re.IGNORECASE,
+    )
+    # Also handle unclosed thinking blocks at the end
+    cleaned = re.sub(
+        r'<thinking>.*$',
+        '',
+        cleaned,
+        flags=re.DOTALL | re.IGNORECASE,
+    )
+    return cleaned.strip()
+
+
+def strip_placeholder_artifacts(text: str) -> str:
+    """Remove [NOT YET CHECKED] and similar placeholder artifacts from text."""
+    if not text:
+        return text
+    # Remove [NOT YET CHECKED] placeholders
+    cleaned = re.sub(r'\[NOT\s+YET\s+CHECKED\]', '', text, flags=re.IGNORECASE)
+    # Remove multi-concatenated header citation clutter (e.g., "||||" or "| | | |")
+    cleaned = re.sub(r'(\|\s*){3,}', '', cleaned)
+    # Collapse excess whitespace but preserve paragraph structure
+    cleaned = re.sub(r'[ \t]+', ' ', cleaned)
+    cleaned = re.sub(r'\n{3,}', '\n\n', cleaned)
+    return cleaned.strip()
+
+
+def detect_multi_well_mixing(raw_data: dict, filename: str = "") -> dict | None:
+    """Detect if a file contains data from multiple wells.
+
+    Scans all sheet headers and early rows for well-identifier patterns.
+    Returns None if single-well, or {well_id: [sheet_names]} if multi-well.
+    """
+    well_pattern = re.compile(
+        r'\b([A-Z]{1,3}[-_]?\d{1,4}[A-Z]?(?:[-_]\d{1,3})?)\b',
+        re.IGNORECASE,
+    )
+    # Extract primary well from filename
+    primary_well = None
+    fn_match = well_pattern.search(os.path.splitext(os.path.basename(filename))[0])
+    if fn_match:
+        primary_well = fn_match.group(1).upper()
+
+    well_sheet_map = {}  # well_id -> [sheet_names]
+
+    for sheet_name, df in raw_data.items():
+        if df is None or df.empty:
+            continue
+        # Scan top 10 rows for well identifiers
+        scan_rows = min(10, len(df))
+        text_block = " ".join(
+            str(v) for row_idx in range(scan_rows)
+            for v in df.iloc[row_idx].tolist()
+            if pd.notna(v) and isinstance(v, str)
+        )
+        found_wells = set(m.upper() for m in well_pattern.findall(text_block))
+        for w in found_wells:
+            if w not in well_sheet_map:
+                well_sheet_map[w] = []
+            if sheet_name not in well_sheet_map[w]:
+                well_sheet_map[w].append(sheet_name)
+
+    # Only alert if multiple wells found
+    if len(well_sheet_map) > 1:
+        return well_sheet_map
+    return None
 
 
 # ------------------------------------------------------------------ #
