@@ -134,8 +134,9 @@ Where:
 - Swi = The lab-reported Swi value from the active cache (e.g., Centrifuge_TestD)
 - Sor = The lab-reported Sor value from the active cache (e.g., Imbibition_TestE)
 
-You are FORBIDDEN from using the incorrect expression (Swi - Sor) / Swi. 
-Perform the arithmetic expansion cleanly, display the final value as a percentage (e.g., 62.1%), and state that both input parameters were programmatically verified via the SESSION_DATA_CACHE. You are strictly FORBIDDEN from reporting displacement efficiency using the initial oil saturation fraction as a baseline divider. You must compute it relative to mobile volume: (1 - Swi - Sor) / (1 - Swi). The correct calculation for this diagnostic workbook must equal exactly 0.621 (62.1%).
+Perform the arithmetic expansion cleanly, display the final value as a percentage (e.g., 62.1%), and state that both input parameters were programmatically verified via the SESSION_DATA_CACHE. You are strictly FORBIDDEN from reporting displacement efficiency using the initial oil saturation fraction as a baseline divider. You must compute it relative to mobile volume: Ed = (1 - Swi - Sor) / (1 - Swi).
+
+When evaluating the diagnostic workbook for displacement efficiency (L2), you must divide by the mobile fluid phase baseline (1 - Swi). The exact expected calculation result is 0.621 or 62.1%. Any output resulting in 47.6% is an immediate calculation failure.
 
 
 

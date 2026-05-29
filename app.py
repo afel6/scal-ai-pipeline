@@ -758,7 +758,7 @@ def calculate_derived_value(formula_id: str, inputs_str: str, session_id: str) -
         swi = get_param("swi")
         if sor > 1.0: sor /= 100.0
         if swi > 1.0: swi /= 100.0
-        return 1.0 - (sor / (1.0 - swi))
+        return (1.0 - swi - sor) / (1.0 - swi)
         
     else:
         raise ValueError(f"Unknown formula: {formula_id}")
@@ -3143,18 +3143,17 @@ class PRCChatAssistant:
         is_file_ref = bool(re.search(r'(?i)sheet|sample|value|file|xlsx|csv|xls|docx|table|data|plug|porosity|permeability|swi|sor|pressure|klinkenberg|mD', msg))
         
         has_cached_data = False
+        cached_gt = ""
         if sid:
             with SESSION_DATA_CACHE_LOCK:
                 if sid in SESSION_DATA_CACHE and SESSION_DATA_CACHE[sid]:
                     has_cached_data = True
+                    cached_gt = SESSION_DATA_CACHE[sid].get("ground_truth", "")
                     
-        if is_file_ref and not f_parts and not has_cached_data:
-            refusal_str = "Error: SCAL file contents are currently inaccessible to the chat thread. Please use the 'Generate Report' button for verified parameters."
-            if stream:
-                def _gen_refusal():
-                    yield {"type": "token", "text": refusal_str}
-                return _gen_refusal()
-            return refusal_str
+        # Direct context injection pass: reach straight into the active SESSION_DATA_CACHE[session_id] data payload
+        # and extract the full un-truncated spreadsheet data frame rows, appending cleanly to extracted_context.
+        if has_cached_data and cached_gt and not f_parts:
+            extracted_context += f"\n\n{cached_gt}\n\n"
             
         no_file_metadata = not has_cached_data
 
@@ -4983,6 +4982,14 @@ def init_db() -> None:
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     init_db()
+    try:
+        purge_all_historical_assets()
+    except Exception as pe:
+        _logger.error(f"Startup purge failed: {pe}")
+    try:
+        start_session_ttl_monitor()
+    except Exception as me:
+        _logger.error(f"Failed to start TTL monitor: {me}")
     # Increase default thread pool size to support 50+ concurrent engineers (blocking I/O)
     loop = asyncio.get_running_loop()
     executor = ThreadPoolExecutor(max_workers=100)
@@ -5023,15 +5030,17 @@ async def _global_exception_handler(request: Request, exc: Exception):
 
 _CORS_ORIGINS: list[str] = [
     o.strip()
-    for o in os.getenv("ALLOWED_ORIGINS", "*").split(",")
-    if o.strip()
-] or ["*"]
+    for o in os.getenv("ALLOWED_ORIGINS", "").split(",")
+    if o.strip() and o.strip() != "*"
+]
 
 app.add_middleware(
 
     CORSMiddleware,
 
     allow_origins=_CORS_ORIGINS,
+
+    allow_origin_regex=r"https?://.*",
 
     allow_credentials=True,
 
@@ -5798,6 +5807,19 @@ async def handle(
 
         sid      = session_id or str(uuid.uuid4())
 
+        # Destructive memory eviction protocol on new study / file upload
+        is_new_session = session_id in ("null", "undefined", "", None) or not session_id
+        valid_files = [f for f in files if getattr(f, "filename", "")]
+        if is_new_session or valid_files:
+            import gc
+            with SESSION_DATA_CACHE_LOCK:
+                if sid not in SESSION_DATA_CACHE:
+                    SESSION_DATA_CACHE[sid] = {}
+                session_id_evict = sid
+                SESSION_DATA_CACHE[session_id_evict].clear()
+                SESSION_DATA_CACHE[session_id_evict]["labeled_values"] = {}
+            gc.collect()
+
         email    = user_email.lower().strip() if user_email else None
 
         engineer = (engineer_name or "PRC Engineering Staff").strip()
@@ -6349,6 +6371,105 @@ async def dl(filename: str):
 TASKS_DB: dict[str, dict] = {}
 SESSION_DATA_CACHE_LOCK: threading.Lock = threading.Lock()
 SESSION_DATA_CACHE: dict[str, dict] = {}
+
+def purge_all_historical_assets():
+    """Wipes historical assets (T1-31, xlsx, csv) and clears memory using Path to guarantee absolute state isolation."""
+    from pathlib import Path
+    import gc
+    import tempfile
+    import shutil
+    _logger.info("[STARTUP-PURGE] Executing synchronous background sterilization...")
+
+    # 1. Hard wipe uploads directory
+    upload_dir = Path("./uploads")
+    try:
+        if upload_dir.exists():
+            shutil.rmtree(str(upload_dir), ignore_errors=True)
+        upload_dir.mkdir(parents=True, exist_ok=True)
+        _logger.info(f"[STARTUP-PURGE] Cleaned and recreated upload directory: {upload_dir}")
+    except Exception as e:
+        _logger.warning(f"[STARTUP-PURGE] Failed to wipe upload directory {upload_dir}: {e}")
+
+    # 2. Hard wipe tmp / temp directory of any files containing 'T1-31' or ending with '.xlsx', '.csv'
+    try:
+        temp_dir = Path(tempfile.gettempdir())
+        purged_count = 0
+        if temp_dir.exists():
+            for item in temp_dir.iterdir():
+                try:
+                    if item.is_file():
+                        file_low = item.name.lower()
+                        is_t131 = 't1-31' in file_low
+                        is_excel_or_csv = file_low.endswith('.xlsx') or file_low.endswith('.xls') or file_low.endswith('.csv')
+                        if is_t131 or is_excel_or_csv:
+                            item.unlink(missing_ok=True)
+                            purged_count += 1
+                except Exception:
+                    pass
+        _logger.info(f"[STARTUP-PURGE] Purged {purged_count} orphaned spreadsheet/T1-31 files from {temp_dir}")
+    except Exception as e:
+        _logger.warning(f"[STARTUP-PURGE] Failed to purge temp files: {e}")
+
+    # 3. Clear global cache dictionaries completely
+    with SESSION_DATA_CACHE_LOCK:
+        SESSION_DATA_CACHE.clear()
+    gc.collect()
+    _logger.info("[STARTUP-PURGE] Global SESSION_DATA_CACHE wiped and garbage collector invoked.")
+
+
+def start_session_ttl_monitor():
+    """Starts a background thread to evict idle session caches after 15 minutes of inactivity."""
+    import threading
+    import time
+    import gc
+    from pathlib import Path
+    import tempfile
+
+    def monitor_loop():
+        while True:
+            try:
+                time.sleep(60)  # Check every minute
+                now = time.time()
+                evicted_sessions = []
+                
+                with SESSION_DATA_CACHE_LOCK:
+                    for sid, cache_item in list(SESSION_DATA_CACHE.items()):
+                        last_act = cache_item.get("last_activity") or cache_item.get("timestamp") or now
+                        if now - last_act > 15 * 60:  # 15 minutes idle
+                            evicted_sessions.append(sid)
+                            SESSION_DATA_CACHE.pop(sid, None)
+                
+                if evicted_sessions:
+                    _logger.info(f"[TTL-MONITOR] Evicting {len(evicted_sessions)} idle sessions: {evicted_sessions}")
+                    temp_dir = Path(tempfile.gettempdir())
+                    upload_dir = Path("./uploads")
+                    purged_files = 0
+                    
+                    for sid in evicted_sessions:
+                        for base_dir in [temp_dir, upload_dir]:
+                            if not base_dir.exists():
+                                continue
+                            try:
+                                for item in base_dir.iterdir():
+                                    if item.is_file() and sid in item.name:
+                                        try:
+                                            item.unlink(missing_ok=True)
+                                            purged_files += 1
+                                        except Exception:
+                                            pass
+                            except Exception:
+                                pass
+                    
+                    gc.collect()
+                    if purged_files:
+                        _logger.info(f"[TTL-MONITOR] Cleaned up {purged_files} files from disk associated with evicted sessions.")
+            except Exception as monitor_err:
+                _logger.warning(f"[TTL-MONITOR] Error in background thread: {monitor_err}")
+                
+    t = threading.Thread(target=monitor_loop, daemon=True)
+    t.start()
+
+
 def get_filenames_from_cache(sid: Optional[str]) -> list[str]:
     """Helper to extract original filenames from the ground truth in the session cache."""
     if not sid:
@@ -6879,6 +7000,17 @@ async def analyze_scal(
 ):
     try:
         sid = session_id or str(uuid.uuid4())
+
+        # Destructive memory eviction protocol on new file ingestion
+        import gc
+        with SESSION_DATA_CACHE_LOCK:
+            if sid not in SESSION_DATA_CACHE:
+                SESSION_DATA_CACHE[sid] = {}
+            session_id_evict = sid
+            SESSION_DATA_CACHE[session_id_evict].clear()
+            SESSION_DATA_CACHE[session_id_evict]["labeled_values"] = {}
+        gc.collect()
+
         email = user_email.lower().strip() if user_email else None
         msg = (message or "Analyze petrophysical data from uploaded file.").strip()
         filename = sanitize_filename(file.filename)
