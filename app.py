@@ -5995,9 +5995,10 @@ def sync_document_generation_task(
     message: str = None
 ):
     try:
+        import os as _os  # Defensive: prevent UnboundLocalError on Render/Linux
         # Progress 0-10%
         TASKS_DB[session_id].update({"status": "processing", "progress": 5})
-        ext = os.path.splitext(filename.lower())[1]
+        ext = _os.path.splitext(filename.lower())[1]
         is_docx = ext == ".docx"
         is_spreadsheet = ext in [".xlsx", ".xls", ".csv"]
         
@@ -6038,8 +6039,8 @@ def sync_document_generation_task(
                 _logger.warning(f"[Phase 0b BG] Inventory generation failed for {filename}: {inv_err}")
         
         # Progress 10-30%: Extract structure from Gemini with HA client
-        extraction_prompt_path = os.path.join(
-            os.path.dirname(os.path.abspath(__file__)),
+        extraction_prompt_path = _os.path.join(
+            _os.path.dirname(_os.path.abspath(__file__)),
             "prompts",
             "extraction_system_prompt.md"
         )
@@ -6334,15 +6335,15 @@ def sync_document_generation_task(
            
         TASKS_DB[session_id].update({"progress": 55})
         
-        base_dir = os.path.dirname(os.path.abspath(__file__))
-        outputs_dir = os.path.join(base_dir, "outputs", session_id)
-        os.makedirs(outputs_dir, exist_ok=True)
+        base_dir = _os.path.dirname(_os.path.abspath(__file__))
+        outputs_dir = _os.path.join(base_dir, "outputs", session_id)
+        _os.makedirs(outputs_dir, exist_ok=True)
         
         active_key = GEMINI_KEY_POOL[0]
         master_eng = MasterEngineerNode(api_key=active_key)
         engineer_report = master_eng.analyze_scal_data(extracted_json)
         
-        report_path = os.path.join(outputs_dir, "reservoir_report.md")
+        report_path = _os.path.join(outputs_dir, "reservoir_report.md")
         with open(report_path, "w", encoding="utf-8") as f:
             f.write(engineer_report)
             
@@ -6351,7 +6352,7 @@ def sync_document_generation_task(
             well_name = fr_data.get("well_name") or fr_data.get("well") or "PROVISIONAL WELL"
             
         _dash_audit = {"score": physics_score, "status": physics_status, "violations": violations}
-        dash_output_path = os.path.join(outputs_dir, "app_dashboard.py")
+        dash_output_path = _os.path.join(outputs_dir, "app_dashboard.py")
         
         streamlit_code = generate_universal_dashboard(
             validated_json=extracted_json,
@@ -6402,9 +6403,10 @@ def sync_document_generation_task(
                 "error": str(e)
             })
     finally:
-        if os.path.exists(temp_file_path):
+        import os as _os_cleanup  # Defensive: prevent UnboundLocalError
+        if _os_cleanup.path.exists(temp_file_path):
             try:
-                os.unlink(temp_file_path)
+                _os_cleanup.unlink(temp_file_path)
             except OSError:
                 pass
 

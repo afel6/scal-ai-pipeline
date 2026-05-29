@@ -139,6 +139,19 @@ Add new entries at the top of the list with date, CVE class, and patch descripti
 
 ---
 
+### [2026-05-29] UnboundLocalError Fix: Defensive `os` Module Scope Hardening
+
+**Class:** UnboundLocalError / Module Scope Fragility / Render Deployment Blocker  
+**Discovery:** Render deployment crashed with `"cannot access local variable 'os' where it is not associated with a value"` inside `extract_absolute_file_truth` and `sync_document_generation_task`. AST analysis of all Python files found ZERO explicit variable shadowing (`except ... as os`, `for os in ...`, `os = ...`).  
+**Root Cause:** The Python 3.14 runtime on Render/Linux has stricter scope resolution that can fail to bind `os` when the global import order or circular dependency chain delays module-level binding.  
+**Patch:**  
+  1. **`scal_file_handler.py`**: Moved `import os` to be the FIRST import in the file (before `re`, `io`, `pathlib`). Added defensive `import os as _os` inside `extract_absolute_file_truth()` body.  
+  2. **`app.py`**: Added defensive `import os as _os` at the top of `sync_document_generation_task()` try block, and `import os as _os_cleanup` in its `finally` block. ALL `os.` references within the function converted to `_os.` / `_os_cleanup.` to guarantee scope isolation.  
+  3. **Verified** that `document_engines.py`, `file_reader.py`, `report_generator.py` all have proper top-level `import os`.  
+**Status:** RESOLVED 2026-05-29. Deployed to Render.
+
+---
+
 ### [2026-05-29] Deterministic Pre-Parser & Permeability Column Binding — Anti-Data-Shuffling Defense
 
 **Class:** CWE-20 Data Integrity / Column Binding Validation / System Instruction Injection  

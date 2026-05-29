@@ -10,13 +10,14 @@ Usage:
     # result contains: data_type, dataframes, summary, raw_text
 """
 
+import os
 import re
 import io
 from pathlib import Path
 import pandas as pd
 import numpy as np
 import json
-import os
+
 from file_reader import smart_read_csv
 
 
@@ -505,8 +506,9 @@ def extract_absolute_file_truth(temp_file_paths: list) -> str:
         "",
     ]
 
+    import os as _os  # Defensive: prevent UnboundLocalError on Render/Linux
     for file_path, original_filename in temp_file_paths:
-        ext = os.path.splitext(original_filename)[1].lower()
+        ext = _os.path.splitext(original_filename)[1].lower()
         lines.append(f"═══ FILE: {original_filename} ═══")
 
         try:
