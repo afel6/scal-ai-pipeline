@@ -176,6 +176,19 @@ Add new entries at the top of the list with date, CVE class, and patch descripti
 
 ---
 
+### [2026-05-30] Chat Context Alignment & Provenance Interception Filter
+
+**Class:** Data-Pipeline Synchronization / Hallucination Prevention / Security & Compliance Auditing  
+**Discovery:** The Live Chat pipeline experienced context decoupling due to asynchronous parser fragmentation, yielding empty/truncated data matrices on the very first turn and enabling the LLM to hallucinate values and forge citations. Additionally, `extracted_context` was accessed before assignment when checking cached data on follow-ups.  
+**Patch:**  
+  1. **EXACT REPORT PARSER REALIGNMENT (`app.py`):** Forced the chat loop to programmatically run `extract_file_data(tmp_path)` and append the SCAL summary context, completely mirroring the high-fidelity Word report compilation pipeline.
+  2. **UN-TRUNCATED CACHE INJECTION (`app.py`):** Re-routed the chat loop to extract the un-truncated row-by-row `ground_truth` inventory from the cache and inject it directly into the chat prompt context on the very first turn.
+  3. **STRICT REFUSAL GATE ON EMPTY CACHE (`app.py`):** Restored the strict refusal gate. If `SESSION_DATA_CACHE[session_id]` is missing or unpopulated, it immediately return/yields: `"Error: SCAL file contents are currently inaccessible to the chat thread. Please use the 'Generate Report' button for verified parameters."`
+  4. **STRICT PROVENANCE FILTER (`app.py`):** Implemented a regex verification blocker inside `process_provenance_tokens`. If the LLM generates any number/citation absent from the cache (tagged with `[unverified`), the filter intercepts the output and blocks the response, returning the hard refusal string.  
+**Status:** FULLY DEPLOYED & RESOLVED 2026-05-30.
+
+---
+
 ### [2026-05-29] Live Chat Data Pathway Bridge & Spec-Compliant CORS Convergence
 
 **Class:** Data-Pipeline Integration / Spec-Compliant Networking / Memory Safety Hardening  

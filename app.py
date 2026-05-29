@@ -855,7 +855,11 @@ def process_provenance_tokens(llm_response_text: str, session_id: str) -> str:
                     modified_cells.append(cell)
             lines[idx] = "|".join(modified_cells)
             
-    return "\n".join(lines)
+    result_text = "\n".join(lines)
+    # Strict Provenance Filter: If output contains unverified data or citations, block and return refusal string
+    if "[unverified" in result_text or "unverified —" in result_text:
+        return "Error: SCAL file contents are currently inaccessible to the chat thread. Please use the 'Generate Report' button for verified parameters."
+    return result_text
 
 
 # ── SCAL DOC-GEN HELPER ──────────────────────────────────────────────────────
@@ -3138,54 +3142,21 @@ class PRCChatAssistant:
         _tls.pending_kb = []       # thread-local: safe under 50+ concurrent workers
         _tls.last_well_name = None  # updated when a SCAL file is processed this turn
 
-        # ── DETERMINISTIC CACHE & INTERCEPTOR GATE ──
-        import re
-        is_file_ref = bool(re.search(r'(?i)sheet|sample|value|file|xlsx|csv|xls|docx|table|data|plug|porosity|permeability|swi|sor|pressure|klinkenberg|mD', msg))
-        
-        has_cached_data = False
-        cached_gt = ""
-        if sid:
-            with SESSION_DATA_CACHE_LOCK:
-                if sid in SESSION_DATA_CACHE and SESSION_DATA_CACHE[sid]:
-                    has_cached_data = True
-                    cached_gt = SESSION_DATA_CACHE[sid].get("ground_truth", "")
-                    
-        # Direct context injection pass: reach straight into the active SESSION_DATA_CACHE[session_id] data payload
-        # and extract the full un-truncated spreadsheet data frame rows, appending cleanly to extracted_context.
-        if has_cached_data and cached_gt and not f_parts:
-            extracted_context += f"\n\n{cached_gt}\n\n"
-            
-        no_file_metadata = not has_cached_data
+        extracted_context = ""
 
-        
-
-        # â"€â"€ SESSION FILE REGISTRY (Persistence Guard) â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€
-
+        # ── SESSION FILE REGISTRY (Persistence Guard) ──
         session_files_ctx = ""
-
         if sid:
-
             try:
-
                 # Use a lightweight query to see what files were mentioned in this session
-
                 # We also want to know which one was the VERY LAST one mentioned before this turn
-
                 rows = db("SELECT DISTINCT fname FROM m WHERE sid=? AND fname IS NOT NULL ORDER BY ts DESC", (sid,))
-
                 if rows:
-
                     fnames = [r[0] for r in rows]
-
                     session_files_ctx = f"[SESSION FILE REGISTRY]: This session contains data for: {', '.join(fnames)}.\n"
-
                     session_files_ctx += f"[LATEST SESSION FILE]: {fnames[0]}\n"
-
                     session_files_ctx += "Reference the [LATEST SESSION FILE] if the user asks generic questions.\n\n"
-
             except: pass
-
-
 
         extracted_context = ""
 
@@ -3272,8 +3243,17 @@ class PRCChatAssistant:
                     if fr_text:
                         label = "SPREADSHEET" if is_spreadsheet else "WORD DOCUMENT"
                         extracted_context += f"\n\n[{label}: {fname}]\n{fr_text}\n"
-                        # Enforce strict sequence: DO NOT use chunking/RAG for this step.
-                        # The full markdown is injected directly.
+                        
+                        # Mirror exact Word report pipeline: extract SCAL summary and append to context
+                        try:
+                            scal_res = extract_file_data(tmp_path)
+                            if scal_res.get("data_type") not in (None, "UNKNOWN") and scal_res.get("extracted"):
+                                _summary = _scal_doc_summary(scal_res["extracted"])
+                                if _summary:
+                                    extracted_context += f"\n{_summary}\n"
+                                    _logger.info(f"[Chat] SCAL summary added for {fname} ({scal_res['data_type']})")
+                        except Exception as _se:
+                            _logger.warning(f"[Chat] SCAL extraction failed for {fname}: {_se}")
 
                         # 2. LLM Extraction Node: extract structured SCAL data using extraction prompt
                         extraction_prompt_path = str(Path(__file__).parent / "prompts" / "extraction_system_prompt.md")
@@ -3695,6 +3675,35 @@ class PRCChatAssistant:
                     _logger.warning(f"[TXT Extract] {fname}: {e}")
 
 
+
+        # ── ABSOLUTE CACHE HYDRATION CHECK & REFUSAL GATE ──
+        has_cached_data = False
+        cached_gt = ""
+        labeled_values = {}
+        if sid:
+            with SESSION_DATA_CACHE_LOCK:
+                if sid in SESSION_DATA_CACHE and SESSION_DATA_CACHE[sid]:
+                    has_cached_data = True
+                    cached_gt = SESSION_DATA_CACHE[sid].get("ground_truth", "")
+                    labeled_values = SESSION_DATA_CACHE[sid].get("labeled_values", {})
+                    
+        # Strict verification: If cache is empty or unpopulated, halt and return refusal string instantly
+        cache_populated = has_cached_data and cached_gt and len(labeled_values) > 0
+        if not cache_populated:
+            refusal_msg = "Error: SCAL file contents are currently inaccessible to the chat thread. Please use the 'Generate Report' button for verified parameters."
+            if stream:
+                def _refusal_generator():
+                    yield refusal_msg
+                return _refusal_generator()
+            else:
+                return refusal_msg
+
+        no_file_metadata = not cache_populated
+
+        # Direct context injection pass: reach straight into the active SESSION_DATA_CACHE[session_id] data payload
+        # and inject the un-truncated spreadsheet rows directly into the chat prompt context on the very first turn.
+        if cached_gt:
+            extracted_context += f"\n\n{cached_gt}\n\n"
 
         # ── DOCUMENT RECOVERY FOR FOLLOW-UP MESSAGES ──────────────────────────
         # When no file is uploaded in this message but the session has previous uploads,
