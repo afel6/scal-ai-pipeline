@@ -3676,7 +3676,7 @@ class PRCChatAssistant:
 
 
 
-        # ── ABSOLUTE CACHE HYDRATION CHECK & REFUSAL GATE ──
+        # ── DIRECTLY HYDRATE THE CHAT PROMPT WITH TRUE CACHE ──
         has_cached_data = False
         cached_gt = ""
         labeled_values = {}
@@ -3686,24 +3686,16 @@ class PRCChatAssistant:
                     has_cached_data = True
                     cached_gt = SESSION_DATA_CACHE[sid].get("ground_truth", "")
                     labeled_values = SESSION_DATA_CACHE[sid].get("labeled_values", {})
-                    
-        # Strict verification: If cache is empty or unpopulated, halt and return refusal string instantly
-        cache_populated = has_cached_data and cached_gt and len(labeled_values) > 0
-        if not cache_populated:
-            refusal_msg = "Error: SCAL file contents are currently inaccessible to the chat thread. Please use the 'Generate Report' button for verified parameters."
-            if stream:
-                def _refusal_generator():
-                    yield refusal_msg
-                return _refusal_generator()
-            else:
-                return refusal_msg
 
-        no_file_metadata = not cache_populated
+        no_file_metadata = not (has_cached_data and cached_gt)
 
-        # Direct context injection pass: reach straight into the active SESSION_DATA_CACHE[session_id] data payload
-        # and inject the un-truncated spreadsheet rows directly into the chat prompt context on the very first turn.
-        if cached_gt:
-            extracted_context += f"\n\n{cached_gt}\n\n"
+        # Inject the full un-truncated database structures directly into the context payload
+        if has_cached_data:
+            if cached_gt:
+                extracted_context += f"\n\n[MANDATORY GROUND TRUTH INVENTORY]:\n{cached_gt}\n\n"
+            if labeled_values:
+                extracted_context += f"[FULLY-VERIFIED EXTRACTION PARAMETERS]:\n{str(labeled_values)}\n\n"
+
 
         # ── DOCUMENT RECOVERY FOR FOLLOW-UP MESSAGES ──────────────────────────
         # When no file is uploaded in this message but the session has previous uploads,

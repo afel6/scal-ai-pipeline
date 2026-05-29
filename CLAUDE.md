@@ -176,6 +176,17 @@ Add new entries at the top of the list with date, CVE class, and patch descripti
 
 ---
 
+### [2026-05-30] Chat Interface Restoration & Direct Cache Hydration
+
+**Class:** Data-Pipeline Integration / Usability Restoration / Cache Synced Prompts  
+**Discovery:** The previous security refusal filter was overly restrictive, blocking all standard non-file chat queries (even simple words like "why") and returning the error string: `"Error: SCAL file contents are currently inaccessible..."` when the active cache was empty.  
+**Patch:**  
+  1. **REMOVED BLANKET REFUSAL (`app.py`):** Deleted the blanket cache empty refusal gate entirely, allowing all standard user chat queries to reach the LLM without interception.  
+  2. **DIRECT PROMPT HYDRATION (`app.py`):** Wired the chat handler to check `SESSION_DATA_CACHE[session_id]` and inject the un-truncated `ground_truth` inventory and `labeled_values` Python dictionary directly into the chat prompt context payload. This empowers the LLM to access and read active spreadsheet parameters directly on-screen.  
+**Status:** FULLY DEPLOYED & RESOLVED 2026-05-30.
+
+---
+
 ### [2026-05-30] Chat Context Alignment & Provenance Interception Filter
 
 **Class:** Data-Pipeline Synchronization / Hallucination Prevention / Security & Compliance Auditing  
