@@ -5,6 +5,15 @@ This file defines the non-negotiable engineering rules for the PRC SCAL AI Pipel
 and enforce these rules without exception.
 
 > [!IMPORTANT]
+> **[2026-05-29] Session Isolation, Pathway Synchronization & Tool Grounding Architecture**
+> - **Mandatory Hard Purge**: Every new chat stream or POST chat request executes a mandatory hard purge of the active thread's session context: `SESSION_DATA_CACHE[session_id].clear()`.
+> - **Absolute RAG & File Isolation**: All vector searches in `KnowledgeBase.search` and history retrievals in `get_user_file_history_context` are strictly restricted to `kb.sid = sid` (removing the global/null fallback).
+> - **Blocking Cache Hydration Sync**: Live chat endpoints verify cache completion before any LLM turn. If the cache is syncing or empty during a file-related query, the handler immediately returns the notice: `"Syncing file data cache... Please wait a moment and resubmit your query."` to prevent a split-brain disconnect.
+> - **Dynamic Tool Grounding Interceptor**: Custom analytical tools (`fit_petrophysical_curve`, etc.) verify input parameters against the active session's spreadsheet cache via `verify_tool_arguments_grounded`. Ungrounded parameters from previous sessions are intercepted and voided.
+> - **Displacement Efficiency Formula Correction**: Permanently corrected the calculation to the mobile-oil petrophysical standard: `Ed = (1 - Swi - Sor) / (1 - Swi)`. The expression `(Swi - Sor) / Swi` is strictly banned, and the correct diagnostic value is verified as `0.621 (62.1%)`.
+> - **Prompt & Tool Leakage Filtering**: A programmatic regex post-processing filter (`strip_prompt_and_tool_leakage`) intercepts output generation and strips raw Python signatures, thinking blocks, and tool JSON blocks before visual rendering.
+
+> [!IMPORTANT]
 > **[2026-05-29] Scorched-Earth Pathlib Migration & Complete OS Namespace Elimination**
 > The `os` module has been completely eliminated from the file-handling namespace (`app.py`, `scal_file_handler.py`, and `file_reader.py`) to permanently prevent `UnboundLocalError`. All file-system operations are now done natively using `pathlib.Path` objects. No local variable, loop counter, or exception alias may use `os` literal characters.
 

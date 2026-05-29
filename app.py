@@ -613,19 +613,33 @@ def get_session_summary_context(sid: str) -> str:
 
 # ── USER FILE HISTORY ─────────────────────────────────────────────────────────
 
-def get_user_file_history_context(email: str) -> str:
-    """Return formatted ENGINEER FILE HISTORY block for the last 5 user uploads."""
-    if not email:
+def get_user_file_history_context(email: str, sid: str = None) -> str:
+    """Return formatted ENGINEER FILE HISTORY block for files strictly in this session."""
+    if not email or not sid:
         return ""
     try:
+        # Get filenames from active session m table to ensure absolute isolation
+        fname_rows = db("SELECT DISTINCT fname FROM m WHERE sid=? AND user_email=? AND fname IS NOT NULL", (sid, email))
+        session_fnames = []
+        for r in fname_rows:
+            if r[0]:
+                for fn in r[0].split(";"):
+                    fn = fn.strip()
+                    if fn:
+                        session_fnames.append(fn)
+        if not session_fnames:
+            return ""
+
+        # Retrieve from user_files but restrict strictly to session_fnames
+        placeholders = ",".join(["?"] * len(session_fnames))
         rows = db(
-            "SELECT filename, data_type, key_params, created_at FROM user_files "
-            "WHERE user_email=? ORDER BY created_at DESC LIMIT 5",
-            (email,),
+            f"SELECT filename, data_type, key_params, created_at FROM user_files "
+            f"WHERE user_email=? AND filename IN ({placeholders}) ORDER BY created_at DESC LIMIT 5",
+            tuple([email] + session_fnames),
         )
         if not rows:
             return ""
-        lines = ["ENGINEER FILE HISTORY (your previously uploaded files):"]
+        lines = ["ENGINEER FILE HISTORY (files strictly in this session):"]
         for i, (fname, dtype, params_json, ts) in enumerate(rows, 1):
             date_str = time.strftime("%Y-%m-%d", time.localtime(ts)) if ts else "unknown"
             params: dict = {}
@@ -643,6 +657,106 @@ def get_user_file_history_context(email: str) -> str:
         _logger.warning(f"[UserFiles] History read failed for {email}: {e}")
         return ""
 
+
+
+def is_cache_syncing_or_empty(sid: str, msg: str) -> bool:
+    """Check if the user is referencing file data, but the active session cache is empty or syncing."""
+    if not sid or not msg:
+        return False
+    import re
+    is_file_ref = bool(re.search(r'(?i)sheet|sample|value|file|xlsx|csv|xls|docx|table|data|plug|porosity|permeability|swi|sor|pressure|klinkenberg|mD|T1-31', msg))
+    if not is_file_ref:
+        return False
+    # Check if there are any filenames in the messages table for this session
+    fname_rows = db("SELECT DISTINCT fname FROM m WHERE sid=? AND fname IS NOT NULL", (sid,))
+    if not fname_rows:
+        return False
+    with SESSION_DATA_CACHE_LOCK:
+        cache = SESSION_DATA_CACHE.get(sid)
+        if not cache or "labeled_values" not in cache or not cache["labeled_values"]:
+            return True
+    return False
+
+
+def verify_tool_arguments_grounded(sid: str, name: str, args: dict) -> bool:
+    """Verify that the input parameters passed to the tool are grounded in the active session's cache or ground truth."""
+    if not sid:
+        return True
+    with SESSION_DATA_CACHE_LOCK:
+        cache = SESSION_DATA_CACHE.get(sid)
+        if not cache:
+            return False
+        labeled = cache.get("labeled_values", {})
+        gt_text = cache.get("ground_truth", "")
+
+    # Extract all numerical lists/values from arguments
+    vals_to_check = []
+    
+    # Extract arrays
+    for k in ["sw", "krw", "kro", "phi", "perm", "depth", "f"]:
+        if k in args and isinstance(args[k], list):
+            vals_to_check.extend(args[k])
+        elif "params" in args and isinstance(args["params"], dict) and k in args["params"] and isinstance(args["params"][k], list):
+            vals_to_check.extend(args["params"][k])
+            
+    # Extract scalars from params
+    if "params" in args and isinstance(args["params"], dict):
+        for k, v in args["params"].items():
+            if isinstance(v, (int, float)) and k not in ["model", "mode", "script"]:
+                vals_to_check.append(v)
+    for k, v in args.items():
+        if isinstance(v, (int, float)) and k not in ["model", "mode", "script"]:
+            vals_to_check.append(v)
+            
+    if not vals_to_check:
+        return True
+        
+    for val in vals_to_check:
+        if val is None or not isinstance(val, (int, float)):
+            continue
+        val_str = f"{float(val):.4f}"
+        val_str_short = str(val)
+        
+        found = False
+        for cv in labeled.values():
+            if isinstance(cv, (int, float)) and abs(cv - val) < 1e-4:
+                found = True
+                break
+        if not found and gt_text:
+            if val_str_short in gt_text or val_str in gt_text:
+                found = True
+                
+        if not found:
+            _logger.warning(f"[Tool Grounding Shield] Intercepted ungrounded value {val} in tool {name} call.")
+            return False
+    return True
+
+
+def strip_prompt_and_tool_leakage(text: str) -> str:
+    """Implement a strict regex post-processing filter to strip raw python function signatures, internal thinking blocks, and JSON tool schemas."""
+    if not text:
+        return text
+    import re
+    # 1. Strip <thinking>...</thinking> blocks
+    text = re.sub(r'(?i)<thinking>.*?</thinking>', '', text, flags=re.DOTALL)
+    text = re.sub(r'(?i)<thinking>.*$', '', text, flags=re.DOTALL)
+    
+    # 2. Strip JSON tool definitions (e.g. { "name": "...", "description": "..." })
+    tool_pattern = r'(?i)\{\s*"name"\s*:\s*"[^"]+"\s*,\s*"description"\s*:\s*".*?"\s*\}'
+    text = re.sub(tool_pattern, '', text, flags=re.DOTALL)
+    
+    # 3. Strip raw python function schemas/signatures
+    py_func_pattern = r'(?m)^def\s+[a-zA-Z0-9_]+\s*\(.*?\)\s*(?:->\s*[a-zA-Z0-9_\[\],\s]+)?:\s*$'
+    text = re.sub(py_func_pattern, '', text)
+    
+    # 4. Strip tool schemas in markdown block format
+    schema_pattern = r'(?i)function_declarations\s*:.*?(?:\n\n|\Z)'
+    text = re.sub(schema_pattern, '', text, flags=re.DOTALL)
+    
+    # Cleanup empty brackets or stray residual tokens
+    text = re.sub(r'\{\s*\}\s*', '', text)
+    
+    return text.strip()
 
 
 def populate_cache_from_ground_truth(sid: str, gt_text: str):
@@ -1579,6 +1693,11 @@ class PRCChatAssistant:
         """Generator that yields progress strings, then finally the tool result."""
 
         name, args = call.name, call.args
+
+        sid = getattr(_tls, 'current_session_id', None)
+        if sid and not verify_tool_arguments_grounded(sid, name, args):
+            yield (True, "TOOL ERROR: Execution voided. Input parameters are not grounded in the active session's spreadsheet cache.")
+            return
 
         if name == "execute_python_simulation":
 
@@ -4714,8 +4833,8 @@ class KnowledgeBase:
 
                 cur.execute(
                     f"SELECT COUNT(*) FROM kb_vectors JOIN kb ON kb.id = kb_vectors.chunk_id "
-                    f"WHERE (kb.sid = {ph} OR (kb.sid IS NULL AND kb.user_email = {ph}))",
-                    (sid, email),
+                    f"WHERE kb.sid = {ph}",
+                    (sid,),
                 )
 
                 vec_count = cur.fetchone()[0]
@@ -4735,8 +4854,8 @@ class KnowledgeBase:
                     rows = db(
                         f"SELECT kb.source, kb.chunk, kb_vectors.embedding FROM kb_vectors "
                         f"JOIN kb ON kb.id = kb_vectors.chunk_id "
-                        f"WHERE (kb.sid = {ph} OR (kb.sid IS NULL AND kb.user_email = {ph}))",
-                        (sid, email),
+                        f"WHERE kb.sid = {ph}",
+                        (sid,),
                     )
 
                     if rows:
@@ -4799,11 +4918,11 @@ class KnowledgeBase:
             # ph is still in scope from the vec_count query above — no second _get_conn() needed
             clause = " OR ".join([f"LOWER(chunk) LIKE {ph}" for _ in words])
 
-            params = tuple([sid, email] + [f"%{w}%" for w in words])
+            params = tuple([sid] + [f"%{w}%" for w in words])
 
             rows = db(
                 f"SELECT source, chunk FROM kb "
-                f"WHERE (sid = {ph} OR (sid IS NULL AND user_email = {ph})) AND ({clause}) LIMIT {top_k}",
+                f"WHERE kb.sid = {ph} AND ({clause}) LIMIT {top_k}",
                 params,
             )
 
@@ -5427,20 +5546,16 @@ async def update_session_title(sid: str, email: str = Form(...), title: str = Fo
 
 
 @app.delete("/api/session/{sid}")
-
 def delete_session(sid: str, email: str = None):
-
     _verify_session_owner(sid, email)
-
     db("DELETE FROM m WHERE sid=?", (sid,))
-
     db("DELETE FROM sessions WHERE sid=?", (sid,))
-
     db("DELETE FROM physics_audits WHERE session_id=?", (sid,))
-
     KnowledgeBase.delete_session_data(sid)
-
+    with SESSION_DATA_CACHE_LOCK:
+        SESSION_DATA_CACHE.pop(sid, None)
     return {"status": "ok"}
+
 
 
 
@@ -5459,11 +5574,13 @@ async def chat_stream(
 ):
 
     if session_id in ("null", "undefined", "", None):
-
         sid = str(uuid.uuid4())
-
+        with SESSION_DATA_CACHE_LOCK:
+            if sid not in SESSION_DATA_CACHE:
+                SESSION_DATA_CACHE[sid] = {}
+            SESSION_DATA_CACHE[sid].clear()
+            SESSION_DATA_CACHE[sid]["labeled_values"] = {}
     else:
-
         sid = session_id
 
     email = user_email.lower().strip() if user_email else None
@@ -5501,41 +5618,37 @@ async def chat_stream(
 
             try:
 
-                # 1. Search Knowledge Base
+                # 1. Log User Message
+                db("INSERT INTO m (sid,role,text,ts,user_email) VALUES (?,?,?,?,?)", 
+                   (sid, "user", message, time.time(), email))
 
+                # 2. Session Management
+                if _PG_AVAILABLE:
+                    db("INSERT INTO sessions (sid, title, user_email, updated_at) VALUES (?, 'New Study', ?, ?) "
+                       "ON CONFLICT (sid) DO UPDATE SET updated_at = EXCLUDED.updated_at",
+                       (sid, email, time.time()))
+                else:
+                    db("INSERT OR IGNORE INTO sessions (sid, title, user_email, created_at, updated_at) VALUES (?, 'New Study', ?, ?, ?)",
+                       (sid, email, time.time(), time.time()))
+                    db("UPDATE sessions SET updated_at=? WHERE sid=?", (time.time(), sid))
+
+                # 3. Blocking cache sync check
+                if is_cache_syncing_or_empty(sid, message):
+                    sync_notice = "Syncing file data cache... Please wait a moment and resubmit your query."
+                    db("INSERT INTO m (sid,role,text,ts,user_email) VALUES (?,?,?,?,?)",
+                       (sid, "model", sync_notice, time.time(), email))
+                    _enqueue({"type": "token", "text": sync_notice})
+                    _enqueue({"type": "done"})
+                    return
+
+                # 4. Search Knowledge Base
                 kb_ctx = KnowledgeBase.search(message, sid=sid, email=email)
 
-                file_history_ctx = get_user_file_history_context(email)
+                file_history_ctx = get_user_file_history_context(email, sid)
                 summary_ctx = get_session_summary_context(sid)
                 prefix = "\n\n".join(filter(None, [file_history_ctx, summary_ctx]))
                 if prefix:
                     kb_ctx = prefix + "\n\n" + kb_ctx if kb_ctx else prefix
-
-                # 2. Log User Message
-
-                db("INSERT INTO m (sid,role,text,ts,user_email) VALUES (?,?,?,?,?)", 
-
-                   (sid, "user", message, time.time(), email))
-
-                
-
-                # 3. Session Management
-
-                if _PG_AVAILABLE:
-
-                    db("INSERT INTO sessions (sid, title, user_email, updated_at) VALUES (?, 'New Study', ?, ?) "
-
-                       "ON CONFLICT (sid) DO UPDATE SET updated_at = EXCLUDED.updated_at",
-
-                       (sid, email, time.time()))
-
-                else:
-
-                    db("INSERT OR IGNORE INTO sessions (sid, title, user_email, created_at, updated_at) VALUES (?, 'New Study', ?, ?, ?)",
-
-                       (sid, email, time.time(), time.time()))
-
-                    db("UPDATE sessions SET updated_at=? WHERE sid=?", (time.time(), sid))
 
 
 
@@ -5583,6 +5696,7 @@ async def chat_stream(
                     full_reply = strip_placeholder_artifacts(full_reply)
                     full_reply = process_provenance_tokens(full_reply, sid)
                     full_reply = compress_traceability_ledger(full_reply)
+                    full_reply = strip_prompt_and_tool_leakage(full_reply)
                     full_reply = _extract_and_log_corrections(sid, email, full_reply)
 
                     db("INSERT INTO m (sid,role,text,ts,user_email) VALUES (?,?,?,?,?)",
@@ -5687,6 +5801,9 @@ async def chat_stream(
                             # 2. Clean Up Citation Clutter
                             filenames = get_filenames_from_cache(sid)
                             output_text = clean_citation_clutter(output_text, filenames)
+                            
+                            # 3. Suppress prompt/tool schema leakage
+                            output_text = strip_prompt_and_tool_leakage(output_text)
                             
                             yield f"data: {_json.dumps({'type': 'token', 'text': output_text})}\n\n"
                         continue
@@ -5796,7 +5913,14 @@ async def handle(
         _tls.breadcrumbs = []
         _add_breadcrumb("Chat request received")
 
+        is_new_session = session_id in ("null", "undefined", "", None) or not session_id
         sid      = session_id or str(uuid.uuid4())
+        if is_new_session:
+            with SESSION_DATA_CACHE_LOCK:
+                if sid not in SESSION_DATA_CACHE:
+                    SESSION_DATA_CACHE[sid] = {}
+                SESSION_DATA_CACHE[sid].clear()
+                SESSION_DATA_CACHE[sid]["labeled_values"] = {}
 
         email    = user_email.lower().strip() if user_email else None
 
@@ -5856,7 +5980,7 @@ async def handle(
 
         kb_ctx = await KnowledgeBase.search_async(message, sid=sid, email=email)
 
-        file_history_ctx = get_user_file_history_context(email)
+        file_history_ctx = get_user_file_history_context(email, sid)
         summary_ctx = get_session_summary_context(sid)
         prefix = "\n\n".join(filter(None, [file_history_ctx, summary_ctx]))
         if prefix:
@@ -5898,6 +6022,18 @@ async def handle(
         # â"€â"€ Security Guard: Verify session ownership before any data access â"€â"€â"€â"€â"€â"€â"€
 
         _verify_session_owner(sid, email)
+
+        # Check cache synchronization first
+        if is_cache_syncing_or_empty(sid, message):
+            sync_notice = "Syncing file data cache... Please wait a moment and resubmit your query."
+            await async_db("INSERT INTO m (sid,role,text,ts,user_email) VALUES (?,?,?,?,?)",
+               (sid, "model", sync_notice, time.time(), email))
+            return {
+                "status":          "success",
+                "session_id":      sid,
+                "reply":           sync_notice,
+                "is_report_ready": False,
+            }
 
 
 
@@ -6033,6 +6169,7 @@ async def handle(
         filenames = get_filenames_from_cache(sid)
         resp_text = clean_citation_clutter(resp_text, filenames)
         resp_text = compress_traceability_ledger(resp_text)
+        resp_text = strip_prompt_and_tool_leakage(resp_text)
         resp_text = _extract_and_log_corrections(sid, email, resp_text)
         await async_db("INSERT INTO m (sid,role,text,ts,user_email) VALUES (?,?,?,?,?)",
 
