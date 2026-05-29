@@ -759,7 +759,7 @@ def purge_all_historical_assets():
         temp_dir = Path(tempfile.gettempdir())
         purged_count = 0
         if temp_dir.exists():
-            for item in temp_dir.rglob("*"):
+            for item in temp_dir.iterdir():
                 try:
                     if item.is_file():
                         file_low = item.name.lower()
@@ -814,7 +814,7 @@ def start_session_ttl_monitor():
                             if not base_dir.exists():
                                 continue
                             try:
-                                for item in base_dir.rglob("*"):
+                                for item in base_dir.iterdir():
                                     if item.is_file() and sid in item.name:
                                         try:
                                             item.unlink(missing_ok=True)
@@ -5382,15 +5382,17 @@ async def _global_exception_handler(request: Request, exc: Exception):
 
 _CORS_ORIGINS: list[str] = [
     o.strip()
-    for o in os.getenv("ALLOWED_ORIGINS", "*").split(",")
-    if o.strip()
-] or ["*"]
+    for o in os.getenv("ALLOWED_ORIGINS", "").split(",")
+    if o.strip() and o.strip() != "*"
+]
 
 app.add_middleware(
 
     CORSMiddleware,
 
     allow_origins=_CORS_ORIGINS,
+
+    allow_origin_regex=r"https?://.*",
 
     allow_credentials=True,
 
