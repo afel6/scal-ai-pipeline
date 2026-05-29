@@ -5,6 +5,14 @@ This file defines the non-negotiable engineering rules for the PRC SCAL AI Pipel
 and enforce these rules without exception.
 
 > [!IMPORTANT]
+> **[2026-05-29] Zero-Memory Footprint, Active Session TTL Eviction & Streaming Truncation Prevention Hotfix**
+> - **Automatic Startup Purge**: Synced background startup function `purge_all_historical_assets()` runs at server boot, unlinking all T1-31/CSV/Excel assets from the uploads and local temp directories, sterilizing the environment completely.
+> - **15-Minute Session TTL Monitor**: Idle sessions are actively tracked and programmatically evicted after 15 minutes of inactivity, destroying their RAM state and unlinking all session-id matching disk files.
+> - **Response Context Truncation Prevention**: Large raw matrices are programmatically truncated by the Python backend to the first 3 and last 3 rows with a summary line, guaranteeing the response fits within maximum output token limits.
+> - **Forced Python Ledger Compilation**: Stripped the LLM of compilation duty, instead building the Markdown ledger table purely on the Python side and appending it as a frozen block at the end of the streaming and non-streaming responses.
+> - **Continue Turn Attention Re-Anchoring**: Continual chat triggers ("go", "continue", "proceed") append strict override prompts to the Gemini client, locking attention exclusively to the active session cache and preventing cross-session bleed.
+
+> [!IMPORTANT]
 > **[2026-05-29] Session Isolation, Pathway Synchronization & Tool Grounding Architecture**
 > - **Mandatory Hard Purge & Destructive Memory Purge**: Every new chat stream, POST chat request, or file upload executes a mandatory hard purge of the active thread's session context: `SESSION_DATA_CACHE[session_id].clear()`, followed by immediate garbage collection `gc.collect()` to force RAM release and guarantee zero memory footprint for old sessions.
 > - **Chunked Ingestion & OOM Protection**: Consumes file uploads via a 512KB chunked byte-stream framework (`process_large_file_stream`) with a 20MB hard cap, and uses memory-efficient engines in Pandas (`engine='openpyxl'`) to avoid buffering large matrices in RAM.
@@ -165,6 +173,20 @@ or standards-body approved.
 This section is append-only. Every security vulnerability discovered, patched, or
 mitigated during development or audits is recorded here. Do not remove entries.
 Add new entries at the top of the list with date, CVE class, and patch description.
+
+---
+
+### [2026-05-29] Defatigue Streaming Truncation Hotfix, Zero-Memory Footprint & File-System Purge Protocol
+
+**Class:** Memory Lifecycle / Stream Buffer Optimization / File-System Purge Utility / Session TTL Eviction / Attention Re-Anchoring  
+**Discovery:** Response Context Truncation (LLM stopping mid-stream or freezing on massive raw tables) occurred due to context/output token exhaustion. In addition, the server required proactive environment sterilization to wipe T1-31 historical assets and orphaned session files from local storage on boot, and enforce a strict 15-minute Time-To-Live (TTL) cache eviction policy to completely destroy idle session footprints from RAM and disk.  
+**Patch:**  
+  1. **DATA PAGINATION & PROMPT TRUNCATION (`app.py`):** Added `format_and_truncate_json_table(data)` to truncate raw matrix JSON outputs to the first 3 and last 3 rows with `[... Total X rows verified by Python Backend ...]` in the middle, eliminating context bloat and mid-stream freezing.
+  2. **LOCK ATTENTION ON CONTINUE TURNS (`app.py`):** Intercepted continuation triggers ("go", "continue", "proceed") in `HvielAssistant.chat()` to forcefully append strict attention re-anchoring prompts and prepend override instructions to the dynamic system prompt, locking LLM context to `SESSION_DATA_CACHE[session_id]`.
+  3. **FORCE PYTHON-SIDE TABLE COMPILATION (`app.py`):** Stripped LLM of the duty of drafting long text ledgers, instead programmatically compiling the premium Markdown table `build_python_ledger_table(sid)` on the backend and appending it as a frozen block to the end of the streaming and non-streaming responses.
+  4. **AUTOMATIC STARTUP PURGE (`app.py`):** Implemented `purge_all_historical_assets()` running at lifespan startup, performing a synchronous hard wipe of `./uploads/` and purging any files containing "T1-31" or ending with `.xlsx`/`.csv` from both `./uploads/` and the system `tempfile.gettempdir()` directory.
+  5. **SESSION TTL CACHE EVICTION (`app.py`):** Added a background monitor thread `start_session_ttl_monitor()` that checks active caches every 60 seconds, evicting any session idle for >15 minutes from memory and unlinking all associated files containing the `session_id` from the disk.  
+**Status:** FULLY DEPLOYED & RESOLVED 2026-05-29. 100% Sterile Environment verified.
 
 ---
 
