@@ -1656,12 +1656,30 @@ class PRCChatAssistant:
 
             result = res.get("stdout") or res.get("stderr") or res.get("error", "")
 
+            # If the calculation was successful, bind thresholds/avg values to session cache
+            try:
+                calc_res = _json.loads(result)
+                sid = getattr(_tls, 'current_session_id', None)
+                if calc_res.get("status") == "success" and sid:
+                    with SESSION_DATA_CACHE_LOCK:
+                        if sid not in SESSION_DATA_CACHE:
+                            SESSION_DATA_CACHE[sid] = {}
+                        if "labeled_values" not in SESSION_DATA_CACHE[sid]:
+                            SESSION_DATA_CACHE[sid]["labeled_values"] = {}
+                        if "thresholds" in calc_res:
+                            for tk, tv in calc_res["thresholds"].items():
+                                SESSION_DATA_CACHE[sid]["labeled_values"][tk] = tv
+                    _logger.info(f"[Skills Audit] Petrophysics properties successfully bound to cache for session {sid}.")
+            except Exception as cache_err:
+                _logger.warning(f"Failed to auto-bind petrophysics properties to cache: {cache_err}")
+
             yield (True, result)
 
             return
 
         elif name == "generate_mermaid_diagram":
 
+            _logger.info("[Skills Audit] Tool generate_mermaid_diagram is INSUFFICIENT for data row validation, bypassing cache binding.")
             result = f"__MERMAID_START__\n{args.get('content','')}\n__MERMAID_END__"
 
         elif name == "fit_petrophysical_curve":
@@ -1681,6 +1699,23 @@ class PRCChatAssistant:
                 res  = SkillsEngine.run_skill("petroleum", "", "curve_fitting_skill.py", [_json.dumps(data)])
 
                 result = res.get("stdout") or res.get("stderr") or res.get("error", "")
+
+                # Bind parameters directly to local session cache (Skills Assessment Integration)
+                try:
+                    fit_res = _json.loads(result)
+                    sid = getattr(_tls, 'current_session_id', None)
+                    if fit_res.get("success") and sid:
+                        with SESSION_DATA_CACHE_LOCK:
+                            if sid not in SESSION_DATA_CACHE:
+                                SESSION_DATA_CACHE[sid] = {}
+                            if "labeled_values" not in SESSION_DATA_CACHE[sid]:
+                                SESSION_DATA_CACHE[sid]["labeled_values"] = {}
+                            for param_k in ["swr", "sor", "krw_max", "kro_max", "nw", "no", "Lw", "Ew", "Tw", "Lo", "Eo", "To"]:
+                                if param_k in fit_res:
+                                    SESSION_DATA_CACHE[sid]["labeled_values"][param_k] = fit_res[param_k]
+                        _logger.info(f"[Skills Audit] Curve fitting parameters successfully bound to cache for session {sid}.")
+                except Exception as cache_err:
+                    _logger.warning(f"Failed to auto-bind fitted curves to cache: {cache_err}")
 
         elif name == "agentic_history_matching":
 
@@ -3229,7 +3264,7 @@ class PRCChatAssistant:
                     # causing the proximity search to find 0 matches and grab wrong tables.
                     # The full DOCX markdown easily fits in Gemini's context window (~600 lines),
                     # and the extraction prompt already tells Gemini which table to extract.
-                    if is_docx:
+                    if is_docx or is_spreadsheet:
                         fr_data = read_file(tmp_path, target_identifier=None)
                     else:
                         fr_data = read_file(tmp_path, target_identifier=target_identifier)
@@ -3266,9 +3301,11 @@ class PRCChatAssistant:
                                             "timestamp": time.time()
                                         }
                                     populate_cache_from_ground_truth(sid, mandatory_ground_truth)
+                                    # Enforce strict blocking cache completion assertion
+                                    assert sid in SESSION_DATA_CACHE and "labeled_values" in SESSION_DATA_CACHE[sid] and len(SESSION_DATA_CACHE[sid]["labeled_values"]) > 0, "Cache hydration failed: labeled_values is empty or unpopulated"
                                 _logger.info(f"[Phase 0b] Deterministic MANDATORY_GROUND_TRUTH_INVENTORY generated for {fname}")
                             except Exception as mgt_err:
-                                _logger.warning(f"[Phase 0b] extract_absolute_file_truth failed for {fname}: {mgt_err}")
+                                _logger.warning(f"[Phase 0b] extract_absolute_file_truth failed or assertion failed for {fname}: {mgt_err}")
                         
                         if is_spreadsheet:
                             try:

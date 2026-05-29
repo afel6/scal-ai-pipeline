@@ -522,14 +522,14 @@ def extract_absolute_file_truth(temp_file_paths: list) -> str:
                 lines.append("")
 
                 for sheet in sheet_names:
-                    df = pd.read_excel(xl, sheet_name=sheet, nrows=2)
+                    df = pd.read_excel(xl, sheet_name=sheet)
                     full_df_shape = pd.read_excel(xl, sheet_name=sheet, header=None).shape
                     columns = list(df.columns)
                     lines.append(f"  SHEET: \"{sheet}\"")
                     lines.append(f"    COLUMNS ({len(columns)}): {columns}")
                     lines.append(f"    FULL SHAPE: ({full_df_shape[0]} rows × {full_df_shape[1]} cols)")
-                    # Print first 2 rows as raw values
-                    for row_idx in range(min(2, len(df))):
+                    # Print all rows as raw values to completely hydrate the data cache
+                    for row_idx in range(len(df)):
                         row_vals = df.iloc[row_idx].tolist()
                         # Convert NaN to None for clarity
                         row_vals = [
@@ -542,15 +542,15 @@ def extract_absolute_file_truth(temp_file_paths: list) -> str:
                 xl.close()
 
             elif ext == '.csv':
-                df = smart_read_csv(file_path, nrows=2)
-                full_df = smart_read_csv(file_path)
+                df = smart_read_csv(file_path)
                 columns = list(df.columns)
                 lines.append(f"TOTAL SHEETS: 1 (CSV)")
                 lines.append(f"SHEET NAMES: ['Sheet1']")
                 lines.append(f"  SHEET: \"Sheet1\"")
                 lines.append(f"    COLUMNS ({len(columns)}): {columns}")
-                lines.append(f"    FULL SHAPE: ({len(full_df)} rows × {len(columns)} cols)")
-                for row_idx in range(min(2, len(df))):
+                lines.append(f"    FULL SHAPE: ({len(df)} rows × {len(columns)} cols)")
+                # Print all rows as raw values to completely hydrate the data cache
+                for row_idx in range(len(df)):
                     row_vals = df.iloc[row_idx].tolist()
                     row_vals = [
                         None if pd.isna(v) else (float(v) if isinstance(v, (int, float, np.integer, np.floating)) else str(v))

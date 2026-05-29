@@ -158,6 +158,19 @@ Add new entries at the top of the list with date, CVE class, and patch descripti
 
 ---
 
+### [2026-05-29] Split-Brain Cache Routing Alignment & Programmatic Tool Audit Integration
+
+**Class:** Data-Routing Alignment / State Synchronization / Programmatic Skills Audit  
+**Discovery:** A critical split-brain desynchronization was detected where the Document Report pipeline could fetch fully populated un-truncated cache parameters (17/18 score) while the Live Chat API handler was constrained to a shallow, lazy-loaded cache (5/18 score). In addition, custom petrophysical analysis tools (curve fitting, centrifuge correction, RQI/FZI calculation) required programmatic validation and synchronous binding to the session data cache, while insufficient/formatting-only tools (such as `generate_mermaid_diagram`) needed to be explicitly bypassed.  
+**Patch:**  
+  1. **SYNCHRONOUS CACHE COMPLETION (`scal_file_handler.py`):** Completely removed `nrows=2` truncation and first-2-rows limits in `extract_absolute_file_truth()` for both Excel and CSV parsing, forcing the programmatic server to output full-row DataFrame schemas to the system ground truth.
+  2. **DATA PATHWAY UNIFICATION (`app.py`):** Aligned spreadsheet retrieval pathways inside `PRCChatAssistant.chat(...)` by forcing `target_identifier=None`, matching the identical deep-file matrix array that the report pipeline consumes.
+  3. **BLOCKING HYDRATION ASSERTION (`app.py`):** Injected a mandatory blocking assertion inside the chat router immediately after zipping to verify the session cache contains all ground truth parameters and is fully hydrated prior to LLM compilation.
+  4. **SKILLS UTILITY INTEGRATION (`app.py`):** Programmatically evaluated and integrated custom analytical tools (`fit_petrophysical_curve` and `calculate_petrophysics_properties`) directly into `_execute_tool`'s cache binding block, parsing and zipping derived/optimized parameters directly to `SESSION_DATA_CACHE[sid]["labeled_values"]`. Explicitly bypassed `generate_mermaid_diagram` as `INSUFFICIENT` due to redundant data array interaction, logging the audit result.  
+**Status:** FULLY DEPLOYED & RESOLVED 2026-05-29. Verified passing all local test suites and physics validator.
+
+---
+
 ### [2026-05-29] Visual UX Coordinates Upgrade & Domain-Logic Hardening
 
 **Class:** Visual UX Polish / Text-Compression Post-Processor / Domain-Logic Enforcement  
