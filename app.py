@@ -49,7 +49,7 @@ from petrophysical_curves import Endpoints, KrCurveFitter
 
 from physics_validator import PhysicsGuard
 
-from scal_file_handler import SCALFileHandler, extract_file_data, _extract_pdf as _sfh_extract_pdf, _extract_docx as _sfh_extract_docx, strip_thinking_blocks, strip_placeholder_artifacts, validate_extraction_against_inventory, extract_absolute_file_truth, validate_permeability_column_binding
+from scal_file_handler import SCALFileHandler, extract_file_data, _extract_pdf as _sfh_extract_pdf, _extract_docx as _sfh_extract_docx, strip_thinking_blocks, strip_placeholder_artifacts, clean_citation_clutter, validate_extraction_against_inventory, extract_absolute_file_truth, validate_permeability_column_binding
 from file_reader import read_file, to_prompt_string, build_gemini_message
 
 from report_generator import PRCReportEngine
@@ -2857,6 +2857,26 @@ class PRCChatAssistant:
         _tls.pending_kb = []       # thread-local: safe under 50+ concurrent workers
         _tls.last_well_name = None  # updated when a SCAL file is processed this turn
 
+        # ── DETERMINISTIC CACHE & INTERCEPTOR GATE ──
+        import re
+        is_file_ref = bool(re.search(r'(?i)sheet|sample|value|file|xlsx|csv|xls|docx|table|data|plug|porosity|permeability|swi|sor|pressure|klinkenberg|mD', msg))
+        
+        has_cached_data = False
+        if sid:
+            with SESSION_DATA_CACHE_LOCK:
+                if sid in SESSION_DATA_CACHE and SESSION_DATA_CACHE[sid]:
+                    has_cached_data = True
+                    
+        if is_file_ref and not f_parts and not has_cached_data:
+            refusal_str = "Error: SCAL file contents are currently inaccessible to the chat thread. Please use the 'Generate Report' button for verified parameters."
+            if stream:
+                def _gen_refusal():
+                    yield {"type": "token", "text": refusal_str}
+                return _gen_refusal()
+            return refusal_str
+            
+        no_file_metadata = not has_cached_data
+
         
 
         # â"€â"€ SESSION FILE REGISTRY (Persistence Guard) â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€
@@ -2993,6 +3013,12 @@ class PRCChatAssistant:
                                 mandatory_ground_truth = extract_absolute_file_truth(
                                     [(tmp_path, fname)]
                                 )
+                                if sid:
+                                    with SESSION_DATA_CACHE_LOCK:
+                                        SESSION_DATA_CACHE[sid] = {
+                                            "ground_truth": mandatory_ground_truth,
+                                            "timestamp": time.time()
+                                        }
                                 _logger.info(f"[Phase 0b] Deterministic MANDATORY_GROUND_TRUTH_INVENTORY generated for {fname}")
                             except Exception as mgt_err:
                                 _logger.warning(f"[Phase 0b] extract_absolute_file_truth failed for {fname}: {mgt_err}")
@@ -3526,6 +3552,31 @@ class PRCChatAssistant:
 
                     # Dynamic prompt construction with continuous learning corrections
                     dynamic_system_prompt = SYSTEM_PROMPT
+                    
+                    # 1. Inject server-side Ground Truth from Cache if available
+                    if sid:
+                        with SESSION_DATA_CACHE_LOCK:
+                            cached_entry = SESSION_DATA_CACHE.get(sid)
+                        if cached_entry and cached_entry.get("ground_truth"):
+                            gt_text = cached_entry["ground_truth"]
+                            dynamic_system_prompt = (
+                                f"## MANDATORY_GROUND_TRUTH_INVENTORY (SESSION DATA CACHE)\n\n"
+                                f"You are provided with a MANDATORY_GROUND_TRUTH_INVENTORY extracted "
+                                f"programmatically by the Python server from the actual binary file uploaded in this session.\n"
+                                f"This inventory is ABSOLUTE TRUTH. You MUST read and cite only values/sheets/columns listed below.\n\n"
+                                f"{gt_text}\n\n"
+                                f"=========================================\n\n"
+                                f"{dynamic_system_prompt}"
+                            )
+                            
+                    # 2. Append no-file Metadata Flag if cache empty
+                    if no_file_metadata:
+                        dynamic_system_prompt += (
+                            "\n\n[METADATA FLAG]: No SCAL or document file data is available in this session. "
+                            "The user has not uploaded any file or the session cache is empty. Proceed with "
+                            "general petrophysics knowledge and explicitly state this constraint if appropriate."
+                        )
+
                     if sid or email:
                         try:
                             corrs = db("SELECT original_issue, corrected_value FROM user_corrections WHERE session_id=? OR user_email=? ORDER BY timestamp ASC", (sid or "", email or ""))
@@ -5143,6 +5194,15 @@ async def chat_stream(
 
         loop = asyncio.get_running_loop()
 
+        in_thinking = False
+        text_buffer = ""
+
+        def get_matching_suffix_len(text: str, tag: str) -> int:
+            for i in range(min(len(text), len(tag)), 0, -1):
+                if tag.startswith(text[-i:].lower()):
+                    return i
+            return 0
+
         def _enqueue(item):
             """Put an item on the queue only if the consumer is still alive."""
             if q.qsize() < 1900:
@@ -5301,7 +5361,50 @@ async def chat_stream(
 
                         continue
 
-
+                    if chunk["type"] == "token":
+                        token_text = chunk.get("text", "")
+                        text_buffer += token_text
+                        
+                        output_text = ""
+                        while True:
+                            if in_thinking:
+                                idx = text_buffer.lower().find("</thinking>")
+                                if idx != -1:
+                                    in_thinking = False
+                                    text_buffer = text_buffer[idx + len("</thinking>"):]
+                                else:
+                                    keep_len = get_matching_suffix_len(text_buffer, "</thinking>")
+                                    if keep_len > 0:
+                                        text_buffer = text_buffer[-keep_len:]
+                                    else:
+                                        text_buffer = ""
+                                    break
+                            else:
+                                idx = text_buffer.lower().find("<thinking>")
+                                if idx != -1:
+                                    output_text += text_buffer[:idx]
+                                    in_thinking = True
+                                    text_buffer = text_buffer[idx + len("<thinking>"):]
+                                else:
+                                    keep_len = get_matching_suffix_len(text_buffer, "<thinking>")
+                                    if keep_len > 0:
+                                        output_text += text_buffer[:-keep_len]
+                                        text_buffer = text_buffer[-keep_len:]
+                                    else:
+                                        output_text += text_buffer
+                                        text_buffer = ""
+                                    break
+                        
+                        if output_text:
+                            # 1. Suppress Placeholder Leaks
+                            output_text = strip_placeholder_artifacts(output_text)
+                            
+                            # 2. Clean Up Citation Clutter
+                            filenames = get_filenames_from_cache(sid)
+                            output_text = clean_citation_clutter(output_text, filenames)
+                            
+                            yield f"data: {_json.dumps({'type': 'token', 'text': output_text})}\n\n"
+                        continue
 
                     yield f"data: {_json.dumps(chunk)}\n\n"
 
@@ -5639,6 +5742,10 @@ async def handle(
             return {"status": "error", "session_id": sid, "reply": reply}
 
         resp_text = resp if isinstance(resp, str) else str(resp) if resp is not None else ""
+        resp_text = strip_thinking_blocks(resp_text)
+        resp_text = strip_placeholder_artifacts(resp_text)
+        filenames = get_filenames_from_cache(sid)
+        resp_text = clean_citation_clutter(resp_text, filenames)
         resp_text = _extract_and_log_corrections(sid, email, resp_text)
         await async_db("INSERT INTO m (sid,role,text,ts,user_email) VALUES (?,?,?,?,?)",
 
@@ -5953,6 +6060,24 @@ async def dl(filename: str):
 
 # ── PRODUCTION ASYNC PIPELINE REMEDIATION ────────────────────────────────────
 TASKS_DB: dict[str, dict] = {}
+SESSION_DATA_CACHE_LOCK: threading.Lock = threading.Lock()
+SESSION_DATA_CACHE: dict[str, dict] = {}
+def get_filenames_from_cache(sid: Optional[str]) -> list[str]:
+    """Helper to extract original filenames from the ground truth in the session cache."""
+    if not sid:
+        return []
+    with SESSION_DATA_CACHE_LOCK:
+        cached = SESSION_DATA_CACHE.get(sid)
+        if not cached:
+            return []
+        gt = cached.get("ground_truth", "")
+    if not gt:
+        return []
+    import re
+    # Find all occurrences of ═══ FILE: <filename> ═══
+    filenames = re.findall(r'═══ FILE:\s*([^\s═]+)\s*═══', gt)
+    return filenames
+
 _REPORT_LATENCY_LIST: list[float] = []
 _REPORT_LATENCY_LOCK: threading.Lock = threading.Lock()
 _MAX_UPLOAD_BYTES = 20 * 1024 * 1024
@@ -6011,6 +6136,12 @@ def sync_document_generation_task(
                 mandatory_ground_truth = extract_absolute_file_truth(
                     [(temp_file_path, filename)]
                 )
+                if session_id:
+                    with SESSION_DATA_CACHE_LOCK:
+                        SESSION_DATA_CACHE[session_id] = {
+                            "ground_truth": mandatory_ground_truth,
+                            "timestamp": time.time()
+                        }
                 _logger.info(f"[Phase 0b BG] Deterministic MANDATORY_GROUND_TRUTH_INVENTORY generated for {filename}")
             except Exception as mgt_err:
                 _logger.warning(f"[Phase 0b BG] extract_absolute_file_truth failed for {filename}: {mgt_err}")

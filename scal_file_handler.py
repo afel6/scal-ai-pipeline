@@ -651,6 +651,39 @@ def strip_placeholder_artifacts(text: str) -> str:
     return cleaned.strip()
 
 
+def clean_citation_clutter(text: str, filenames: list = None) -> str:
+    """Eliminate raw, unformatted back-end citation strings and replace them with elegant,
+    hyper-clean italicized foot-tokens anchored below the table.
+    """
+    if not text:
+        return text
+    
+    default_filename = "SCAL_AI_Diagnostic_Test.xlsx"
+    if filenames and len(filenames) > 0:
+        default_filename = filenames[0]
+
+    # Regex to match raw back-end citation strings like:
+    # "Source: Company:Well:Sample:Capillary pressure psi"
+    # or "Source: Well:Sample:Porosity" or similar nested colon citations
+    # Match strings starting with "source:" followed by text containing at least 2 colons
+    pattern = r'(?i)source:\s*[a-zA-Z0-9_\-\.\s]+(?::[a-zA-Z0-9_\-\.\s]+){2,}'
+    
+    def replace_citation(match):
+        return f"*Source: {default_filename}*"
+        
+    cleaned = re.sub(pattern, replace_citation, text)
+    
+    # Also clean up standard Source: filename.xlsx:sheet:range format
+    cleaned = re.sub(
+        r'(?i)source:\s*([a-zA-Z0-9_\-\.]+\.xlsx?|[a-zA-Z0-9_\-\.]+\.docx?|[a-zA-Z0-9_\-\.]+\.csv|[a-zA-Z0-9_\-\.]+\.pdf|[a-zA-Z0-9_\-\.]+\.txt)(?::[a-zA-Z0-9_\-\s\(\)\.]+)*',
+        fr'*Source: \1*',
+        cleaned
+    )
+    
+    return cleaned
+
+
+
 def detect_multi_well_mixing(raw_data: dict, filename: str = "") -> dict | None:
     """Detect if a file contains data from multiple wells.
 

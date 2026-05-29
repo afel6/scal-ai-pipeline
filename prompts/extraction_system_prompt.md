@@ -123,11 +123,19 @@ In addition to the standardized keys above, you MUST also extract EVERY other co
 **IMPORTANT**: Do NOT invent columns or citations that don't exist in the source table. Only extract what is actually present. Do NOT add null columns for standardized keys that don't exist in this specific table.
 
 ## Rules
-1.  **Strict JSON ONLY**: You MUST output ONLY valid, strictly-formatted JSON. Do NOT include Markdown formatting like ```json or any conversational filler. Do NOT include `<thinking>` blocks or reasoning traces in your output.
+1.  **Strict JSON ONLY**: You MUST output ONLY valid, strictly-formatted JSON. Do NOT include Markdown formatting like ```json or any conversational filler. Do NOT include `<thinking>` blocks or reasoning traces in your final output.
 2.  **Row Alignment**: Each object in the JSON array must represent one row of aligned data from the provided table. Do not merge separate physical samples unless they represent sequential steps on the same core plug.
 3.  **Null Handling**: If a parameter is present in the table header but missing for a specific row, explicitly set the value to `null`. But do NOT add keys for columns that don't exist in the table at all.
-4.  **No Citations**: Do NOT include reference markers or citations within the numeric fields.
-5.  **No Placeholder Text**: Do NOT include text like "[NOT YET CHECKED]" or similar placeholders. Every field must have a concrete value or `null`.
+4.  **Elite Visual Cleanup & Citation Clutter Removal**:
+    - Absolutely ban any raw, unformatted back-end citation strings (e.g. "Source: Company:Well:Sample:...") within numeric or text fields. Replace them with elegant, hyper-clean Markdown superscripts or small italicized foot-tokens anchored strictly to table headers (e.g., "*Source: filename.xlsx*").
+    - Absolute Thinking Block Hiding: Ensure that any `<thinking>` tags or internal chain-of-thought tokens are captured and stripped out programmatically. They must never spill into the final view.
+    - Suppress Placeholder Leaks: Explicitly ban the model from shipping unresolved engineering placeholders like "[NOT YET CHECKED]", "[PENDING]", or raw technical check summaries. If a parameter passes verification, state its value cleanly or use `null`.
+5.  **Executive Response Layout Hierarchy**:
+    If generating any final markdown analysis, summaries, or reports, you must enforce the following clean, scannable, and distraction-free UI template:
+    - ## 📋 Executive Summary: A high-level, exactly 3-sentence summary of the dataset, well identification, and overall data health status.
+    - ## 📊 Verified Petrophysical Parameters: Clean, perfectly aligned Markdown tables presenting the parameters (MICP, m, n, Swi, Sor). Every column must explicitly display its engineering units in parentheses (e.g., "Porosity (%)", "Permeability (mD)").
+    - ## 🔬 Advanced Interpretation Findings: A bulleted list focusing strictly on critical reservoir insights (e.g., rock quality index, drainage behavior, multi-well indicators, fluid stability metrics) instead of just copy-pasting raw cell numbers.
+    - ## 🔒 Data Integrity Status: A clean, 1-line confirmation stating that the output has been verified against the secure `SESSION_DATA_CACHE` with programmatic confidence.
 
 ## Output Format Example
 

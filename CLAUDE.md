@@ -143,6 +143,39 @@ Add new entries at the top of the list with date, CVE class, and patch descripti
 
 ---
 
+### [2026-05-29] Cosmetic UX & Petrophysical Presentation Layer Polish
+
+**Class:** Frontend Visual Quality / Petrophysical UX Refactor / Post-Processing Response Encoder  
+**Discovery:** The Q&A chat UI contained visual clutter such as leaking `<thinking>` tags, raw backend nested colon citations (e.g. `Source: Company:Well:Sample:Stress`), and unresolved placeholder leaks (e.g. `[NOT YET CHECKED]`).  
+**Patch:**  
+  1. **ELITE VISUAL CLEANUP RULES:**
+     - Refactored `prompts/extraction_system_prompt.md` to add strict rules against `<thinking>` block leakage, placeholder leaks, and raw unformatted citations.
+     - Deployed dynamic streaming post-processing inside `chat_stream` to parse, buffer, and filter out `<thinking>` blocks and strip out unresolved placeholders.
+     - Deployed standard response post-processing in `app.py` standard chat path to clean up placeholders and format citations.
+  2. **DYNAMIC CITATION REBUILDER:** Deployed `clean_citation_clutter` in `scal_file_handler.py` (imported by `app.py`). It dynamically queries the active `SESSION_DATA_CACHE` using `get_filenames_from_cache(sid)` to retrieve the original filename, and uses a regex state-machine to clean raw backend nested citations, transforming them into elegant italicized footer anchors (`*Source: filename.xlsx*`).
+  3. **EXECUTIVE RESPONSE LAYOUT HIERARCHY:** Mandated the new scannable report layout hierarchy across prompts:
+     - `## 📋 Executive Summary` (exactly 3 sentences)
+     - `## 📊 Verified Petrophysical Parameters` (Markdown table with explicit units in parentheses)
+     - `## 🔬 Advanced Interpretation Findings` (Reservoir-insights-focused bullet points)
+     - `## 🔒 Data Integrity Status` (1-line cache verification confirmation)
+**Status:** RESOLVED 2026-05-29. Verified prompt integrity test passes.
+
+---
+
+### [2026-05-29] Q&A Chat Cache Refactor & Halting Gate (Anti-Split-Brain)
+
+**Class:** Split-Brain Data Pipeline Defect / Halting Gate Interceptor / Thread-Safe Cache Registry  
+**Discovery:** The Live Q&A Chat assistant and XLSX report generator had divergent data layers ("Split-Brain"). Uploaded files were processed perfectly by the background pipeline for reports, but the chat assistant was completely unaware of the uploaded files, leading to parameter fabrication and fake citations inside conversation memory.  
+**Patch:**  
+  1. **THREAD-SAFE SESSION CACHE (`app.py`):** Deployed a global `SESSION_DATA_CACHE` and `SESSION_DATA_CACHE_LOCK` registry to store parsed file inventory data natively on the server.  
+  2. **CACHE POPULATION:** Intercepted both background and sync extraction worker pipelines to cache the programmatically verified `MANDATORY_GROUND_TRUTH_INVENTORY` as soon as it is generated from the binary files.  
+  3. **INTERCEPTOR HALTING GATE:** Integrated a regex-based halting gate inside `PRCChatAssistant.chat(...)`. Any Q&A turn referencing worksheets, columns, samples, or parameters when no file is cached is immediately halted with a hard refuse string: `"Error: SCAL file contents are currently inaccessible to the chat thread..."`.  
+  4. **DETERMINISTIC CONTEXT SHIELD:** Forcefully prepended the cached ground-truth inventory directly to the assistant's `dynamic_system_prompt` on matched session IDs, eliminating fabrication of phantom sheets/columns. Added a `[METADATA FLAG]` for general petrophysics queries when the cache is empty.  
+  5. **LEDGER ENFORCEMENT (`hviel_system_prompt.md`):** Updated Phase 4.3 instructions to strictly forbid reference fabrication and require exact alignment of the Traceability Ledger with the session cache.  
+**Status:** RESOLVED 2026-05-29. Deployed and verified passing all test suites.
+
+---
+
 ### [2026-05-29] Scorched-Earth Pathlib Migration & Complete OS Namespace Elimination
 
 **Class:** UnboundLocalError / Module Scope Hardening / Robust Resource Cleanup  
