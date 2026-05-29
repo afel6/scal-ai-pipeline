@@ -5578,11 +5578,13 @@ async def chat_stream(
 
     if session_id in ("null", "undefined", "", None):
         sid = str(uuid.uuid4())
+        import gc
         with SESSION_DATA_CACHE_LOCK:
             if sid not in SESSION_DATA_CACHE:
                 SESSION_DATA_CACHE[sid] = {}
             SESSION_DATA_CACHE[sid].clear()
             SESSION_DATA_CACHE[sid]["labeled_values"] = {}
+        gc.collect()
     else:
         sid = session_id
 
@@ -5918,12 +5920,15 @@ async def handle(
 
         is_new_session = session_id in ("null", "undefined", "", None) or not session_id
         sid      = session_id or str(uuid.uuid4())
-        if is_new_session:
+        valid_files = [f for f in files if getattr(f, "filename", "")]
+        if is_new_session or valid_files:
+            import gc
             with SESSION_DATA_CACHE_LOCK:
                 if sid not in SESSION_DATA_CACHE:
                     SESSION_DATA_CACHE[sid] = {}
                 SESSION_DATA_CACHE[sid].clear()
                 SESSION_DATA_CACHE[sid]["labeled_values"] = {}
+            gc.collect()
 
         email    = user_email.lower().strip() if user_email else None
 
@@ -5949,14 +5954,24 @@ async def handle(
         _MAX_UPLOAD_BYTES = 20 * 1024 * 1024  # 20 MB
 
         for file in valid_files:
-
-            b = await file.read(_MAX_UPLOAD_BYTES + 1)
-
-            if len(b) > _MAX_UPLOAD_BYTES:
-                raise HTTPException(status_code=413, detail=f"File '{file.filename}' exceeds the 20 MB limit.")
+            ext = Path(file.filename.lower()).suffix
+            temp_file = tempfile.NamedTemporaryFile(delete=False, suffix=ext)
+            temp_file_path = temp_file.name
+            temp_file.close()
+            
+            try:
+                await process_large_file_stream(file, temp_file_path, _MAX_UPLOAD_BYTES)
+                with open(temp_file_path, "rb") as tf:
+                    b = tf.read()
+            except Exception as se:
+                try: Path(temp_file_path).unlink(missing_ok=True)
+                except Exception: pass
+                raise se
+            finally:
+                try: Path(temp_file_path).unlink(missing_ok=True)
+                except Exception: pass
 
             if b:
-
                 f_parts.append((b, file.content_type, file.filename))
 
                 # Persist a file record for cross-session history (key_params filled later by background task)

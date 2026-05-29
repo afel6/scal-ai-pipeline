@@ -12,7 +12,7 @@ def _read_excel(filepath):
 
     for sheet_name in xl.sheet_names:
         try:
-            df = pd.read_excel(xl, sheet_name=sheet_name, header=None)
+            df = pd.read_excel(xl, sheet_name=sheet_name, header=None, engine=engine)
             df = df.dropna(axis=0, how='all').dropna(axis=1, how='all').reset_index(drop=True)
             df.columns = range(df.shape[1])
         except Exception:

@@ -6,7 +6,8 @@ and enforce these rules without exception.
 
 > [!IMPORTANT]
 > **[2026-05-29] Session Isolation, Pathway Synchronization & Tool Grounding Architecture**
-> - **Mandatory Hard Purge**: Every new chat stream or POST chat request executes a mandatory hard purge of the active thread's session context: `SESSION_DATA_CACHE[session_id].clear()`.
+> - **Mandatory Hard Purge & Destructive Memory Purge**: Every new chat stream, POST chat request, or file upload executes a mandatory hard purge of the active thread's session context: `SESSION_DATA_CACHE[session_id].clear()`, followed by immediate garbage collection `gc.collect()` to force RAM release and guarantee zero memory footprint for old sessions.
+> - **Chunked Ingestion & OOM Protection**: Consumes file uploads via a 512KB chunked byte-stream framework (`process_large_file_stream`) with a 20MB hard cap, and uses memory-efficient engines in Pandas (`engine='openpyxl'`) to avoid buffering large matrices in RAM.
 > - **Absolute RAG & File Isolation**: All vector searches in `KnowledgeBase.search` and history retrievals in `get_user_file_history_context` are strictly restricted to `kb.sid = sid` (removing the global/null fallback).
 > - **Immediate Memory-Read Caching Layer**: Replaced the blocking hydration loop in live chat endpoints with an immediate memory-read pipeline. If the session's active data dictionary is initialized in `SESSION_DATA_CACHE`, the handler bypasses the sync check to proceed instantly to LLM generation on the very first turn without forcing resubmission, while strictly preserving 17/18 RAG and file-history isolation.
 > - **Dynamic Tool Grounding Interceptor**: Custom analytical tools (`fit_petrophysical_curve`, etc.) verify input parameters against the active session's spreadsheet cache via `verify_tool_arguments_grounded`. Ungrounded parameters from previous sessions are intercepted and voided.

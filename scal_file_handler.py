@@ -52,7 +52,7 @@ class SCALFileHandler:
 
             for sheet in self.sheet_names:
                 self.raw_data[sheet] = pd.read_excel(
-                    xl, sheet_name=sheet, header=None
+                    xl, sheet_name=sheet, header=None, engine=engine
                 )
 
         elif self.extension == '.csv':
@@ -522,8 +522,8 @@ def extract_absolute_file_truth(temp_file_paths: list) -> str:
                 lines.append("")
 
                 for sheet in sheet_names:
-                    df = pd.read_excel(xl, sheet_name=sheet)
-                    full_df_shape = pd.read_excel(xl, sheet_name=sheet, header=None).shape
+                    df = pd.read_excel(xl, sheet_name=sheet, engine=engine)
+                    full_df_shape = pd.read_excel(xl, sheet_name=sheet, header=None, engine=engine).shape
                     columns = list(df.columns)
                     lines.append(f"  SHEET: \"{sheet}\"")
                     lines.append(f"    COLUMNS ({len(columns)}): {columns}")
