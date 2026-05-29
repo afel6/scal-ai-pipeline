@@ -613,33 +613,19 @@ def get_session_summary_context(sid: str) -> str:
 
 # ── USER FILE HISTORY ─────────────────────────────────────────────────────────
 
-def get_user_file_history_context(email: str, sid: str = None) -> str:
-    """Return formatted ENGINEER FILE HISTORY block for files strictly in this session."""
-    if not email or not sid:
+def get_user_file_history_context(email: str) -> str:
+    """Return formatted ENGINEER FILE HISTORY block for the last 5 user uploads."""
+    if not email:
         return ""
     try:
-        # Get filenames from active session m table to ensure absolute isolation
-        fname_rows = db("SELECT DISTINCT fname FROM m WHERE sid=? AND user_email=? AND fname IS NOT NULL", (sid, email))
-        session_fnames = []
-        for r in fname_rows:
-            if r[0]:
-                for fn in r[0].split(";"):
-                    fn = fn.strip()
-                    if fn:
-                        session_fnames.append(fn)
-        if not session_fnames:
-            return ""
-
-        # Retrieve from user_files but restrict strictly to session_fnames
-        placeholders = ",".join(["?"] * len(session_fnames))
         rows = db(
-            f"SELECT filename, data_type, key_params, created_at FROM user_files "
-            f"WHERE user_email=? AND filename IN ({placeholders}) ORDER BY created_at DESC LIMIT 5",
-            tuple([email] + session_fnames),
+            "SELECT filename, data_type, key_params, created_at FROM user_files "
+            "WHERE user_email=? ORDER BY created_at DESC LIMIT 5",
+            (email,),
         )
         if not rows:
             return ""
-        lines = ["ENGINEER FILE HISTORY (files strictly in this session):"]
+        lines = ["ENGINEER FILE HISTORY (your previously uploaded files):"]
         for i, (fname, dtype, params_json, ts) in enumerate(rows, 1):
             date_str = time.strftime("%Y-%m-%d", time.localtime(ts)) if ts else "unknown"
             params: dict = {}
@@ -659,330 +645,12 @@ def get_user_file_history_context(email: str, sid: str = None) -> str:
 
 
 
-def is_cache_syncing_or_empty(sid: str, msg: str) -> bool:
-    """Check if the user is referencing file data, but the active session cache is empty or syncing."""
-    if not sid or not msg:
-        return False
-    import re
-    is_file_ref = bool(re.search(r'(?i)sheet|sample|value|file|xlsx|csv|xls|docx|table|data|plug|porosity|permeability|swi|sor|pressure|klinkenberg|mD|T1-31', msg))
-    if not is_file_ref:
-        return False
-    
-    # If the active session data dictionary is present, proceed instantly to LLM generation
-    with SESSION_DATA_CACHE_LOCK:
-        if sid in SESSION_DATA_CACHE:
-            if isinstance(SESSION_DATA_CACHE[sid], dict):
-                SESSION_DATA_CACHE[sid]["last_activity"] = time.time()
-            return False
-            
-    # Check if there are any filenames in the messages table for this session
-    fname_rows = db("SELECT DISTINCT fname FROM m WHERE sid=? AND fname IS NOT NULL", (sid,))
-    if not fname_rows:
-        return False
-        
-    return True
-
-
-def verify_tool_arguments_grounded(sid: str, name: str, args: dict) -> bool:
-    """Verify that the input parameters passed to the tool are grounded in the active session's cache or ground truth."""
-    if not sid:
-        return True
-    with SESSION_DATA_CACHE_LOCK:
-        cache = SESSION_DATA_CACHE.get(sid)
-        if not cache:
-            return False
-        labeled = cache.get("labeled_values", {})
-        gt_text = cache.get("ground_truth", "")
-
-    # Extract all numerical lists/values from arguments
-    vals_to_check = []
-    
-    # Extract arrays
-    for k in ["sw", "krw", "kro", "phi", "perm", "depth", "f"]:
-        if k in args and isinstance(args[k], list):
-            vals_to_check.extend(args[k])
-        elif "params" in args and isinstance(args["params"], dict) and k in args["params"] and isinstance(args["params"][k], list):
-            vals_to_check.extend(args["params"][k])
-            
-    # Extract scalars from params
-    if "params" in args and isinstance(args["params"], dict):
-        for k, v in args["params"].items():
-            if isinstance(v, (int, float)) and k not in ["model", "mode", "script"]:
-                vals_to_check.append(v)
-    for k, v in args.items():
-        if isinstance(v, (int, float)) and k not in ["model", "mode", "script"]:
-            vals_to_check.append(v)
-            
-    if not vals_to_check:
-        return True
-        
-    for val in vals_to_check:
-        if val is None or not isinstance(val, (int, float)):
-            continue
-        val_str = f"{float(val):.4f}"
-        val_str_short = str(val)
-        
-        found = False
-        for cv in labeled.values():
-            if isinstance(cv, (int, float)) and abs(cv - val) < 1e-4:
-                found = True
-                break
-        if not found and gt_text:
-            if val_str_short in gt_text or val_str in gt_text:
-                found = True
-                
-        if not found:
-            _logger.warning(f"[Tool Grounding Shield] Intercepted ungrounded value {val} in tool {name} call.")
-            return False
-    return True
-
-def purge_all_historical_assets():
-    """Wipes historical assets (T1-31, xlsx, csv) and clears memory using Path to guarantee absolute state isolation."""
-    from pathlib import Path
-    import gc
-    _logger.info("[STARTUP-PURGE] Executing synchronous background sterilization...")
-
-    # 1. Hard wipe uploads directory
-    upload_dir = Path("./uploads")
-    try:
-        if upload_dir.exists():
-            import shutil
-            shutil.rmtree(str(upload_dir), ignore_errors=True)
-        upload_dir.mkdir(parents=True, exist_ok=True)
-        _logger.info(f"[STARTUP-PURGE] Cleaned and recreated upload directory: {upload_dir}")
-    except Exception as e:
-        _logger.warning(f"[STARTUP-PURGE] Failed to wipe upload directory {upload_dir}: {e}")
-
-    # 2. Hard wipe tmp / temp directory of any files containing 'T1-31' or ending with '.xlsx', '.csv'
-    try:
-        import tempfile
-        temp_dir = Path(tempfile.gettempdir())
-        purged_count = 0
-        if temp_dir.exists():
-            for item in temp_dir.iterdir():
-                try:
-                    if item.is_file():
-                        file_low = item.name.lower()
-                        is_t131 = 't1-31' in file_low
-                        is_excel_or_csv = file_low.endswith('.xlsx') or file_low.endswith('.xls') or file_low.endswith('.csv')
-                        if is_t131 or is_excel_or_csv:
-                            item.unlink(missing_ok=True)
-                            purged_count += 1
-                except Exception:
-                    pass
-        _logger.info(f"[STARTUP-PURGE] Purged {purged_count} orphaned spreadsheet/T1-31 files from {temp_dir}")
-    except Exception as e:
-        _logger.warning(f"[STARTUP-PURGE] Failed to purge temp files: {e}")
-
-    # 3. Clear global cache dictionaries completely
-    with SESSION_DATA_CACHE_LOCK:
-        SESSION_DATA_CACHE.clear()
-    gc.collect()
-    _logger.info("[STARTUP-PURGE] Global SESSION_DATA_CACHE wiped and garbage collector invoked.")
-
-
-def start_session_ttl_monitor():
-    """Starts a background thread to evict idle session caches after 15 minutes of inactivity."""
-    import threading
-    import time
-    import gc
-    from pathlib import Path
-    import tempfile
-
-    def monitor_loop():
-        while True:
-            try:
-                time.sleep(60)  # Check every minute
-                now = time.time()
-                evicted_sessions = []
-                
-                with SESSION_DATA_CACHE_LOCK:
-                    for sid, cache_item in list(SESSION_DATA_CACHE.items()):
-                        last_act = cache_item.get("last_activity") or cache_item.get("timestamp") or now
-                        if now - last_act > 15 * 60:  # 15 minutes idle
-                            evicted_sessions.append(sid)
-                            SESSION_DATA_CACHE.pop(sid, None)
-                
-                if evicted_sessions:
-                    _logger.info(f"[TTL-MONITOR] Evicting {len(evicted_sessions)} idle sessions: {evicted_sessions}")
-                    temp_dir = Path(tempfile.gettempdir())
-                    upload_dir = Path("./uploads")
-                    purged_files = 0
-                    
-                    for sid in evicted_sessions:
-                        for base_dir in [temp_dir, upload_dir]:
-                            if not base_dir.exists():
-                                continue
-                            try:
-                                for item in base_dir.iterdir():
-                                    if item.is_file() and sid in item.name:
-                                        try:
-                                            item.unlink(missing_ok=True)
-                                            purged_files += 1
-                                        except Exception:
-                                            pass
-                            except Exception:
-                                pass
-                    
-                    gc.collect()
-                    if purged_files:
-                        _logger.info(f"[TTL-MONITOR] Cleaned up {purged_files} files from disk associated with evicted sessions.")
-            except Exception as monitor_err:
-                _logger.warning(f"[TTL-MONITOR] Error in monitor loop: {monitor_err}")
-
-    t = threading.Thread(target=monitor_loop, daemon=True)
-    t.start()
-    _logger.info("[TTL-MONITOR] Session TTL background monitor started successfully.")
-
-
-def format_and_truncate_json_table(data) -> str:
-    """Formats a list of dicts/data objects, truncating it to the first 3 and last 3 items,
-    with a programmatic summary line in the middle to prevent LLM response context truncation.
-    """
-    if not isinstance(data, list):
-        return _json.dumps(data, indent=2)
-    
-    total = len(data)
-    if total <= 6:
-        return _json.dumps(data, indent=2)
-        
-    first_3 = data[:3]
-    last_3 = data[-3:]
-    
-    import json as _j
-    first_str = _j.dumps(first_3, indent=2).rstrip().rstrip(']').rstrip()
-    last_str = _j.dumps(last_3, indent=2).lstrip().lstrip('[').lstrip()
-    
-    return f"{first_str},\n  \"[... Total {total} rows verified by Python Backend ...]\",\n{last_str}"
-
-
-def build_python_ledger_table(sid: str) -> str:
-    """Compiles a premium Markdown ledger table purely on the Python backend side
-    based on the active session's cache and returns it as a frozen string block.
-    """
-    if not sid:
-        return ""
-    
-    with SESSION_DATA_CACHE_LOCK:
-        cache = SESSION_DATA_CACHE.get(sid)
-        if not cache:
-            return ""
-        
-        labeled_values = cache.get("labeled_values", {})
-        if not labeled_values:
-            return ""
-        
-        source_file = "SCAL_AI_Diagnostic_Test.xlsx"
-        if cache.get("filename"):
-            source_file = cache.get("filename")
-        else:
-            try:
-                rows = db("SELECT DISTINCT fname FROM m WHERE sid=? AND fname IS NOT NULL ORDER BY ts DESC", (sid,))
-                if rows:
-                    source_file = rows[0][0]
-            except Exception:
-                pass
-
-    premium_map = {
-        "micp_testa": ("Max Hg Saturation & Threshold Pressure", "Row 14 Col 2 / Row 1 Col 4"),
-        "ff_testb": ("Cementation Exponent m labeled value", "Row 1 Col 4"),
-        "kw_testc": ("Initial & Final KL (mD) arrays", "Row 1 Col 4 / Row 14 Col 2"),
-        "centrifuge_testd": ("Swi (lab reported) labeled value", "Row 1 Col 4"),
-        "imbibition_teste": ("Sor (lab reported) labeled value", "Row 1 Col 4"),
-        "phi_obp_testf": ("OBP, Porosity, and Permeability data arrays", "Column Headers"),
-        "ri_testg": ("Saturation Exponent n (Slope = -1.98)", "Row 1 Col 4")
-    }
-
-    rows = []
-    seen = set()
-    
-    for k in labeled_values.keys():
-        k_clean = str(k).lower().replace(" ", "").replace("_", "")
-        matched_ws = None
-        for pm_key in premium_map:
-            if pm_key in k_clean or k_clean in pm_key:
-                matched_ws = pm_key
-                break
-        
-        if matched_ws:
-            p_range, p_coords = premium_map[matched_ws]
-            ws_display = matched_ws.upper()
-            row_key = (ws_display, p_range, p_coords)
-            if row_key not in seen:
-                seen.add(row_key)
-                rows.append(row_key)
-                
-    if not rows:
-        for k in labeled_values.keys():
-            if any(x in str(k).lower() for x in ["test", "sheet", "phi", "ri", "imbibition", "centrifuge", "kw", "ff", "micp"]):
-                ws_display = str(k).upper()
-                p_range = "Verified Parameter Range"
-                p_coords = "Cell Value"
-                row_key = (ws_display, p_range, p_coords)
-                if row_key not in seen:
-                    seen.add(row_key)
-                    rows.append(row_key)
-
-    if not rows:
-        for pm_key, (p_range, p_coords) in premium_map.items():
-            ws_display = pm_key.upper()
-            rows.append((ws_display, p_range, p_coords))
-
-    rows.sort(key=lambda x: x[0])
-
-    table_lines = [
-        "",
-        "### 🔒 Data Integrity Status",
-        "The output has been verified against the secure `SESSION_DATA_CACHE` with programmatic confidence.",
-        "",
-        f"**📄 Source File:** `{source_file}`  ",
-        f"**⚙️ Extraction Engine:** `Deterministic Analytical Parser`  ",
-        "",
-        "| 📋 Worksheet | 📊 Verified Data Range Source | 📍 Row/Col Coordinates |",
-        "| :--- | :--- | :--- |"
-    ]
-
-    for ws, dr, coords in rows:
-        table_lines.append(f"| {ws} | {dr} | {coords} |")
-
-    return "\n".join(table_lines) + "\n"
-
-
-def strip_prompt_and_tool_leakage(text: str) -> str:
-
-    """Implement a strict regex post-processing filter to strip raw python function signatures, internal thinking blocks, and JSON tool schemas."""
-    if not text:
-        return text
-    import re
-    # 1. Strip <thinking>...</thinking> blocks
-    text = re.sub(r'(?i)<thinking>.*?</thinking>', '', text, flags=re.DOTALL)
-    text = re.sub(r'(?i)<thinking>.*$', '', text, flags=re.DOTALL)
-    
-    # 2. Strip JSON tool definitions (e.g. { "name": "...", "description": "..." })
-    tool_pattern = r'(?i)\{\s*"name"\s*:\s*"[^"]+"\s*,\s*"description"\s*:\s*".*?"\s*\}'
-    text = re.sub(tool_pattern, '', text, flags=re.DOTALL)
-    
-    # 3. Strip raw python function schemas/signatures
-    py_func_pattern = r'(?m)^def\s+[a-zA-Z0-9_]+\s*\(.*?\)\s*(?:->\s*[a-zA-Z0-9_\[\],\s]+)?:\s*$'
-    text = re.sub(py_func_pattern, '', text)
-    
-    # 4. Strip tool schemas in markdown block format
-    schema_pattern = r'(?i)function_declarations\s*:.*?(?:\n\n|\Z)'
-    text = re.sub(schema_pattern, '', text, flags=re.DOTALL)
-    
-    # Cleanup empty brackets or stray residual tokens
-    text = re.sub(r'\{\s*\}\s*', '', text)
-    
-    return text.strip()
-
-
 def populate_cache_from_ground_truth(sid: str, gt_text: str):
     if not sid or not gt_text:
         return
     with SESSION_DATA_CACHE_LOCK:
         if sid not in SESSION_DATA_CACHE:
             SESSION_DATA_CACHE[sid] = {}
-        SESSION_DATA_CACHE[sid]["last_activity"] = time.time()
         if "labeled_values" not in SESSION_DATA_CACHE[sid]:
             SESSION_DATA_CACHE[sid]["labeled_values"] = {}
             
@@ -1911,11 +1579,6 @@ class PRCChatAssistant:
         """Generator that yields progress strings, then finally the tool result."""
 
         name, args = call.name, call.args
-
-        sid = getattr(_tls, 'current_session_id', None)
-        if sid and not verify_tool_arguments_grounded(sid, name, args):
-            yield (True, "TOOL ERROR: Execution voided. Input parameters are not grounded in the active session's spreadsheet cache.")
-            return
 
         if name == "execute_python_simulation":
 
@@ -3475,15 +3138,6 @@ class PRCChatAssistant:
         _tls.pending_kb = []       # thread-local: safe under 50+ concurrent workers
         _tls.last_well_name = None  # updated when a SCAL file is processed this turn
 
-        # -- CONTINUE TURN DETECTION --
-        is_continue_turn = False
-        import re
-        if re.search(r'(?i)\b(?:go|continue|proceed)\b', msg):
-            is_continue_turn = True
-            msg += (
-                "\n\nCRITICAL: You are continuing a truncated response. You are strictly REQUIRED to pull data exclusively from the active SESSION_DATA_CACHE[session_id]. Accessing historical message tokens or older file properties is a critical security violation."
-            )
-
         # ── DETERMINISTIC CACHE & INTERCEPTOR GATE ──
         import re
         is_file_ref = bool(re.search(r'(?i)sheet|sample|value|file|xlsx|csv|xls|docx|table|data|plug|porosity|permeability|swi|sor|pressure|klinkenberg|mD', msg))
@@ -3967,13 +3621,13 @@ class PRCChatAssistant:
                             inventory = f"FILE: {fname}\nWELL: {well_name}\nIDENTIFIED TYPE: SCAL\nTOTAL ROWS: {len(extracted_json)}\n"
                             extracted_context += f"\n\n[NEW UPLOAD INVENTORY]:\n{inventory}"
                         
-                            sampled = format_and_truncate_json_table(extracted_json)
+                            sampled = extracted_json
                             extracted_context += f"""[EXTRACTED SCAL DATA (aggregated from all tables in {fname} - WELL: {well_name})]
     NOTE: This JSON contains data aggregated from ALL tables in the document. Columns 'Pore_Volume_Compressibility_psi_inv' and 'Deduced_Lithology' are COMPUTED (not from the source file) — do NOT display them when the user asks about a specific source table.
 
     IMPORTANT: When the user asks about a SPECIFIC table (e.g., "Table 2.1.5", "Table 2.1.3"), do NOT use this aggregated JSON. Instead, find the table directly in the [WORD DOCUMENT] markdown text above — search for "Table (2.1.5)" or "Table 2.1.5" as a label, and read the markdown table immediately ABOVE that label. Each table in the document is labeled BELOW the table data (e.g., the table data comes first, then "Table (2.1.5)" appears after it). Show ONLY the columns that exist in that specific table.
 
-    {sampled}
+    {_json.dumps(sampled, indent=2)}
     """
 
                             # Also add structured json to pending_kb
@@ -4182,11 +3836,6 @@ class PRCChatAssistant:
 
                     # Dynamic prompt construction with continuous learning corrections
                     dynamic_system_prompt = SYSTEM_PROMPT
-                    if is_continue_turn:
-                        dynamic_system_prompt = (
-                            "CRITICAL: You are continuing a truncated response. You are strictly REQUIRED to pull data exclusively from the active SESSION_DATA_CACHE[session_id]. Accessing historical message tokens or older file properties is a critical security violation.\n\n"
-                            + dynamic_system_prompt
-                        )
                     
                     # 1. Inject server-side Ground Truth from Cache if available
                     if sid:
@@ -5065,8 +4714,8 @@ class KnowledgeBase:
 
                 cur.execute(
                     f"SELECT COUNT(*) FROM kb_vectors JOIN kb ON kb.id = kb_vectors.chunk_id "
-                    f"WHERE kb.sid = {ph}",
-                    (sid,),
+                    f"WHERE (kb.sid = {ph} OR (kb.sid IS NULL AND kb.user_email = {ph}))",
+                    (sid, email),
                 )
 
                 vec_count = cur.fetchone()[0]
@@ -5086,8 +4735,8 @@ class KnowledgeBase:
                     rows = db(
                         f"SELECT kb.source, kb.chunk, kb_vectors.embedding FROM kb_vectors "
                         f"JOIN kb ON kb.id = kb_vectors.chunk_id "
-                        f"WHERE kb.sid = {ph}",
-                        (sid,),
+                        f"WHERE (kb.sid = {ph} OR (kb.sid IS NULL AND kb.user_email = {ph}))",
+                        (sid, email),
                     )
 
                     if rows:
@@ -5150,11 +4799,11 @@ class KnowledgeBase:
             # ph is still in scope from the vec_count query above — no second _get_conn() needed
             clause = " OR ".join([f"LOWER(chunk) LIKE {ph}" for _ in words])
 
-            params = tuple([sid] + [f"%{w}%" for w in words])
+            params = tuple([sid, email] + [f"%{w}%" for w in words])
 
             rows = db(
                 f"SELECT source, chunk FROM kb "
-                f"WHERE kb.sid = {ph} AND ({clause}) LIMIT {top_k}",
+                f"WHERE (sid = {ph} OR (sid IS NULL AND user_email = {ph})) AND ({clause}) LIMIT {top_k}",
                 params,
             )
 
@@ -5334,14 +4983,6 @@ def init_db() -> None:
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     init_db()
-    try:
-        purge_all_historical_assets()
-    except Exception as pe:
-        _logger.error(f"Startup purge failed: {pe}")
-    try:
-        start_session_ttl_monitor()
-    except Exception as me:
-        _logger.error(f"Failed to start TTL monitor: {me}")
     # Increase default thread pool size to support 50+ concurrent engineers (blocking I/O)
     loop = asyncio.get_running_loop()
     executor = ThreadPoolExecutor(max_workers=100)
@@ -5382,17 +5023,15 @@ async def _global_exception_handler(request: Request, exc: Exception):
 
 _CORS_ORIGINS: list[str] = [
     o.strip()
-    for o in os.getenv("ALLOWED_ORIGINS", "").split(",")
-    if o.strip() and o.strip() != "*"
-]
+    for o in os.getenv("ALLOWED_ORIGINS", "*").split(",")
+    if o.strip()
+] or ["*"]
 
 app.add_middleware(
 
     CORSMiddleware,
 
     allow_origins=_CORS_ORIGINS,
-
-    allow_origin_regex=r"https?://.*",
 
     allow_credentials=True,
 
@@ -5788,16 +5427,20 @@ async def update_session_title(sid: str, email: str = Form(...), title: str = Fo
 
 
 @app.delete("/api/session/{sid}")
-def delete_session(sid: str, email: str = None):
-    _verify_session_owner(sid, email)
-    db("DELETE FROM m WHERE sid=?", (sid,))
-    db("DELETE FROM sessions WHERE sid=?", (sid,))
-    db("DELETE FROM physics_audits WHERE session_id=?", (sid,))
-    KnowledgeBase.delete_session_data(sid)
-    with SESSION_DATA_CACHE_LOCK:
-        SESSION_DATA_CACHE.pop(sid, None)
-    return {"status": "ok"}
 
+def delete_session(sid: str, email: str = None):
+
+    _verify_session_owner(sid, email)
+
+    db("DELETE FROM m WHERE sid=?", (sid,))
+
+    db("DELETE FROM sessions WHERE sid=?", (sid,))
+
+    db("DELETE FROM physics_audits WHERE session_id=?", (sid,))
+
+    KnowledgeBase.delete_session_data(sid)
+
+    return {"status": "ok"}
 
 
 
@@ -5816,15 +5459,11 @@ async def chat_stream(
 ):
 
     if session_id in ("null", "undefined", "", None):
+
         sid = str(uuid.uuid4())
-        import gc
-        with SESSION_DATA_CACHE_LOCK:
-            if sid not in SESSION_DATA_CACHE:
-                SESSION_DATA_CACHE[sid] = {}
-            SESSION_DATA_CACHE[sid].clear()
-            SESSION_DATA_CACHE[sid]["labeled_values"] = {}
-        gc.collect()
+
     else:
+
         sid = session_id
 
     email = user_email.lower().strip() if user_email else None
@@ -5862,37 +5501,41 @@ async def chat_stream(
 
             try:
 
-                # 1. Log User Message
-                db("INSERT INTO m (sid,role,text,ts,user_email) VALUES (?,?,?,?,?)", 
-                   (sid, "user", message, time.time(), email))
+                # 1. Search Knowledge Base
 
-                # 2. Session Management
-                if _PG_AVAILABLE:
-                    db("INSERT INTO sessions (sid, title, user_email, updated_at) VALUES (?, 'New Study', ?, ?) "
-                       "ON CONFLICT (sid) DO UPDATE SET updated_at = EXCLUDED.updated_at",
-                       (sid, email, time.time()))
-                else:
-                    db("INSERT OR IGNORE INTO sessions (sid, title, user_email, created_at, updated_at) VALUES (?, 'New Study', ?, ?, ?)",
-                       (sid, email, time.time(), time.time()))
-                    db("UPDATE sessions SET updated_at=? WHERE sid=?", (time.time(), sid))
-
-                # 3. Blocking cache sync check
-                if is_cache_syncing_or_empty(sid, message):
-                    sync_notice = "Syncing file data cache... Please wait a moment and resubmit your query."
-                    db("INSERT INTO m (sid,role,text,ts,user_email) VALUES (?,?,?,?,?)",
-                       (sid, "model", sync_notice, time.time(), email))
-                    _enqueue({"type": "token", "text": sync_notice})
-                    _enqueue({"type": "done"})
-                    return
-
-                # 4. Search Knowledge Base
                 kb_ctx = KnowledgeBase.search(message, sid=sid, email=email)
 
-                file_history_ctx = get_user_file_history_context(email, sid)
+                file_history_ctx = get_user_file_history_context(email)
                 summary_ctx = get_session_summary_context(sid)
                 prefix = "\n\n".join(filter(None, [file_history_ctx, summary_ctx]))
                 if prefix:
                     kb_ctx = prefix + "\n\n" + kb_ctx if kb_ctx else prefix
+
+                # 2. Log User Message
+
+                db("INSERT INTO m (sid,role,text,ts,user_email) VALUES (?,?,?,?,?)", 
+
+                   (sid, "user", message, time.time(), email))
+
+                
+
+                # 3. Session Management
+
+                if _PG_AVAILABLE:
+
+                    db("INSERT INTO sessions (sid, title, user_email, updated_at) VALUES (?, 'New Study', ?, ?) "
+
+                       "ON CONFLICT (sid) DO UPDATE SET updated_at = EXCLUDED.updated_at",
+
+                       (sid, email, time.time()))
+
+                else:
+
+                    db("INSERT OR IGNORE INTO sessions (sid, title, user_email, created_at, updated_at) VALUES (?, 'New Study', ?, ?, ?)",
+
+                       (sid, email, time.time(), time.time()))
+
+                    db("UPDATE sessions SET updated_at=? WHERE sid=?", (time.time(), sid))
 
 
 
@@ -5938,22 +5581,8 @@ async def chat_stream(
                     # Phase 0b cleanup: strip <thinking> blocks and placeholder artifacts
                     full_reply = strip_thinking_blocks(full_reply)
                     full_reply = strip_placeholder_artifacts(full_reply)
-                    
-                    # Regex to find and strip any LLM-drafted ledger blocks or status tables
-                    full_reply = re.sub(r'(?i)(?:Source File|Worksheet|Data Range|Extraction Engine)\s*:[^\n]+\n?', '', full_reply)
-                    full_reply = re.sub(r'(?i)###\s*🔒\s*Data\s*Integrity\s*Status.*?(?:\n\n|\Z)', '', full_reply, flags=re.DOTALL)
-                    full_reply = re.sub(r'(?i)\|?\s*Worksheet\s*\|\s*Verified\s*Data\s*Range\s*Source.*?(?:\n\n|\Z)', '', full_reply, flags=re.DOTALL)
-                    
                     full_reply = process_provenance_tokens(full_reply, sid)
-                    full_reply = strip_prompt_and_tool_leakage(full_reply)
-                    
-                    # Force Python-side table compilation
-                    ledger_table = build_python_ledger_table(sid)
-                    if ledger_table:
-                        full_reply = full_reply.strip() + "\n\n" + ledger_table
-                        # Stream the ledger table to the UI in real-time
-                        _enqueue({"type": "token", "text": "\n\n" + ledger_table})
-                        
+                    full_reply = compress_traceability_ledger(full_reply)
                     full_reply = _extract_and_log_corrections(sid, email, full_reply)
 
                     db("INSERT INTO m (sid,role,text,ts,user_email) VALUES (?,?,?,?,?)",
@@ -6058,9 +5687,6 @@ async def chat_stream(
                             # 2. Clean Up Citation Clutter
                             filenames = get_filenames_from_cache(sid)
                             output_text = clean_citation_clutter(output_text, filenames)
-                            
-                            # 3. Suppress prompt/tool schema leakage
-                            output_text = strip_prompt_and_tool_leakage(output_text)
                             
                             yield f"data: {_json.dumps({'type': 'token', 'text': output_text})}\n\n"
                         continue
@@ -6170,17 +5796,7 @@ async def handle(
         _tls.breadcrumbs = []
         _add_breadcrumb("Chat request received")
 
-        is_new_session = session_id in ("null", "undefined", "", None) or not session_id
         sid      = session_id or str(uuid.uuid4())
-        valid_files = [f for f in files if getattr(f, "filename", "")]
-        if is_new_session or valid_files:
-            import gc
-            with SESSION_DATA_CACHE_LOCK:
-                if sid not in SESSION_DATA_CACHE:
-                    SESSION_DATA_CACHE[sid] = {}
-                SESSION_DATA_CACHE[sid].clear()
-                SESSION_DATA_CACHE[sid]["labeled_values"] = {}
-            gc.collect()
 
         email    = user_email.lower().strip() if user_email else None
 
@@ -6206,24 +5822,14 @@ async def handle(
         _MAX_UPLOAD_BYTES = 20 * 1024 * 1024  # 20 MB
 
         for file in valid_files:
-            ext = Path(file.filename.lower()).suffix
-            temp_file = tempfile.NamedTemporaryFile(delete=False, suffix=ext)
-            temp_file_path = temp_file.name
-            temp_file.close()
-            
-            try:
-                await process_large_file_stream(file, temp_file_path, _MAX_UPLOAD_BYTES)
-                with open(temp_file_path, "rb") as tf:
-                    b = tf.read()
-            except Exception as se:
-                try: Path(temp_file_path).unlink(missing_ok=True)
-                except Exception: pass
-                raise se
-            finally:
-                try: Path(temp_file_path).unlink(missing_ok=True)
-                except Exception: pass
+
+            b = await file.read(_MAX_UPLOAD_BYTES + 1)
+
+            if len(b) > _MAX_UPLOAD_BYTES:
+                raise HTTPException(status_code=413, detail=f"File '{file.filename}' exceeds the 20 MB limit.")
 
             if b:
+
                 f_parts.append((b, file.content_type, file.filename))
 
                 # Persist a file record for cross-session history (key_params filled later by background task)
@@ -6250,7 +5856,7 @@ async def handle(
 
         kb_ctx = await KnowledgeBase.search_async(message, sid=sid, email=email)
 
-        file_history_ctx = get_user_file_history_context(email, sid)
+        file_history_ctx = get_user_file_history_context(email)
         summary_ctx = get_session_summary_context(sid)
         prefix = "\n\n".join(filter(None, [file_history_ctx, summary_ctx]))
         if prefix:
@@ -6292,18 +5898,6 @@ async def handle(
         # â"€â"€ Security Guard: Verify session ownership before any data access â"€â"€â"€â"€â"€â"€â"€
 
         _verify_session_owner(sid, email)
-
-        # Check cache synchronization first
-        if is_cache_syncing_or_empty(sid, message):
-            sync_notice = "Syncing file data cache... Please wait a moment and resubmit your query."
-            await async_db("INSERT INTO m (sid,role,text,ts,user_email) VALUES (?,?,?,?,?)",
-               (sid, "model", sync_notice, time.time(), email))
-            return {
-                "status":          "success",
-                "session_id":      sid,
-                "reply":           sync_notice,
-                "is_report_ready": False,
-            }
 
 
 
@@ -6435,22 +6029,10 @@ async def handle(
         resp_text = resp if isinstance(resp, str) else str(resp) if resp is not None else ""
         resp_text = strip_thinking_blocks(resp_text)
         resp_text = strip_placeholder_artifacts(resp_text)
-        
-        # Regex to find and strip any LLM-drafted ledger blocks or status tables
-        resp_text = re.sub(r'(?i)(?:Source File|Worksheet|Data Range|Extraction Engine)\s*:[^\n]+\n?', '', resp_text)
-        resp_text = re.sub(r'(?i)###\s*🔒\s*Data\s*Integrity\s*Status.*?(?:\n\n|\Z)', '', resp_text, flags=re.DOTALL)
-        resp_text = re.sub(r'(?i)\|?\s*Worksheet\s*\|\s*Verified\s*Data\s*Range\s*Source.*?(?:\n\n|\Z)', '', resp_text, flags=re.DOTALL)
-        
         resp_text = process_provenance_tokens(resp_text, sid)
         filenames = get_filenames_from_cache(sid)
         resp_text = clean_citation_clutter(resp_text, filenames)
-        resp_text = strip_prompt_and_tool_leakage(resp_text)
-        
-        # Force Python-side table compilation
-        ledger_table = build_python_ledger_table(sid)
-        if ledger_table:
-            resp_text = resp_text.strip() + "\n\n" + ledger_table
-            
+        resp_text = compress_traceability_ledger(resp_text)
         resp_text = _extract_and_log_corrections(sid, email, resp_text)
         await async_db("INSERT INTO m (sid,role,text,ts,user_email) VALUES (?,?,?,?,?)",
 
