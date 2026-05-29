@@ -49,7 +49,7 @@ from petrophysical_curves import Endpoints, KrCurveFitter
 
 from physics_validator import PhysicsGuard
 
-from scal_file_handler import SCALFileHandler, extract_file_data, _extract_pdf as _sfh_extract_pdf, _extract_docx as _sfh_extract_docx, strip_thinking_blocks, strip_placeholder_artifacts, clean_citation_clutter, validate_extraction_against_inventory, extract_absolute_file_truth, validate_permeability_column_binding
+from scal_file_handler import SCALFileHandler, extract_file_data, _extract_pdf as _sfh_extract_pdf, _extract_docx as _sfh_extract_docx, strip_thinking_blocks, strip_placeholder_artifacts, clean_citation_clutter, validate_extraction_against_inventory, extract_absolute_file_truth, validate_permeability_column_binding, compress_traceability_ledger
 from file_reader import read_file, to_prompt_string, build_gemini_message
 
 from report_generator import PRCReportEngine
@@ -642,6 +642,220 @@ def get_user_file_history_context(email: str) -> str:
     except Exception as e:
         _logger.warning(f"[UserFiles] History read failed for {email}: {e}")
         return ""
+
+
+
+def populate_cache_from_ground_truth(sid: str, gt_text: str):
+    if not sid or not gt_text:
+        return
+    with SESSION_DATA_CACHE_LOCK:
+        if sid not in SESSION_DATA_CACHE:
+            SESSION_DATA_CACHE[sid] = {}
+        if "labeled_values" not in SESSION_DATA_CACHE[sid]:
+            SESSION_DATA_CACHE[sid]["labeled_values"] = {}
+            
+        import re
+        import ast
+        
+        # Split by SHEET:
+        sheets = gt_text.split("  SHEET: ")
+        for sheet_part in sheets[1:]:
+            lines = sheet_part.split("\n")
+            if not lines:
+                continue
+            sheet_name_match = re.match(r'^["\']?(.*?)["\']?$', lines[0].strip())
+            if not sheet_name_match:
+                continue
+            sheet_name = sheet_name_match.group(1)
+            
+            # Find columns line
+            cols = []
+            for line in lines[1:]:
+                if "COLUMNS (" in line:
+                    col_str = line.split("):")[-1].strip()
+                    try:
+                        cols = ast.literal_eval(col_str)
+                    except Exception:
+                        cols = [c.strip().strip("'\"[]") for c in col_str.split(",")]
+                    break
+            
+            # Find all ROW lines
+            for line in lines[1:]:
+                if "    ROW " in line:
+                    row_vals_str = line.split(":")[-1].strip()
+                    try:
+                        row_vals = ast.literal_eval(row_vals_str)
+                    except Exception:
+                        continue
+                    
+                    # Zip columns and values
+                    for col, val in zip(cols, row_vals):
+                        if val is not None and isinstance(val, (int, float)):
+                            col_clean = col.strip().lower()
+                            SESSION_DATA_CACHE[sid]["labeled_values"][col_clean] = val
+                            sheet_key = f"{sheet_name}.{col}".lower().replace(" ", "_")
+                            SESSION_DATA_CACHE[sid]["labeled_values"][sheet_key] = val
+
+
+def calculate_derived_value(formula_id: str, inputs_str: str, session_id: str) -> float:
+    # Parse inputs, e.g. "a=1.0,phi=0.15,m=1.85" or "phi=0.15"
+    inputs = {}
+    for part in inputs_str.split(","):
+        if "=" in part:
+            k, v = part.split("=")
+            try:
+                inputs[k.strip().lower()] = float(v.strip())
+            except Exception:
+                pass
+            
+    # Helper to get parameter from inputs or fallback to cache
+    def get_param(name: str, default: float = None) -> float:
+        name_lower = name.lower()
+        if name_lower in inputs:
+            return inputs[name_lower]
+        # Fallback to cache lookup
+        with SESSION_DATA_CACHE_LOCK:
+            cache = SESSION_DATA_CACHE.get(session_id, {})
+            labeled = cache.get("labeled_values", {})
+            if name_lower in labeled:
+                return float(labeled[name_lower])
+            for ck, cv in labeled.items():
+                if name_lower in ck:
+                    return float(cv)
+        if default is not None:
+            return default
+        raise ValueError(f"Missing parameter: {name}")
+
+    formula_id = formula_id.lower()
+    if formula_id == "archie_f":
+        a = get_param("a", 1.0)
+        phi = get_param("phi")
+        m = get_param("m")
+        if phi > 1.0:
+            phi /= 100.0
+        return a * (phi ** -m)
+        
+    elif formula_id == "archie_sw":
+        n = get_param("n")
+        ri = get_param("ri", None)
+        if ri is not None:
+            return (1.0 / ri) ** (1.0 / n)
+        ro = get_param("ro", None)
+        rt = get_param("rt", None)
+        if ro is not None and rt is not None:
+            return (ro / rt) ** (1.0 / n)
+        # Fallback Sw = (a * Rw / (Rt * phi**m))**(1/n)
+        a = get_param("a", 1.0)
+        rw = get_param("rw")
+        rt = get_param("rt")
+        phi = get_param("phi")
+        m = get_param("m")
+        if phi > 1.0: phi /= 100.0
+        return (a * rw / (rt * (phi ** m))) ** (1.0 / n)
+        
+    elif formula_id == "displacement_efficiency":
+        sor = get_param("sor")
+        swi = get_param("swi")
+        if sor > 1.0: sor /= 100.0
+        if swi > 1.0: swi /= 100.0
+        return 1.0 - (sor / (1.0 - swi))
+        
+    else:
+        raise ValueError(f"Unknown formula: {formula_id}")
+
+
+def process_provenance_tokens(llm_response_text: str, session_id: str) -> str:
+    if not llm_response_text:
+        return llm_response_text
+
+    # 1. Parse Cache Lookups: {{val:cache_key}}
+    def replace_cache(match):
+        cache_key = match.group(1).strip()
+        cache_key_lower = cache_key.lower()
+        
+        val = None
+        with SESSION_DATA_CACHE_LOCK:
+            cache = SESSION_DATA_CACHE.get(session_id, {})
+            labeled = cache.get("labeled_values", {})
+            if cache_key_lower in labeled:
+                val = labeled[cache_key_lower]
+            else:
+                for k, v in labeled.items():
+                    if cache_key_lower in k:
+                        val = v
+                        break
+                        
+        if val is None:
+            with SESSION_DATA_CACHE_LOCK:
+                gt = cache.get("ground_truth", "")
+            if gt:
+                import re
+                match_gt = re.search(rf'(?i){re.escape(cache_key)}.*?[:=]\s*(\d+(?:\.\d+)?)', gt)
+                if match_gt:
+                    val = match_gt.group(1)
+                    
+        if val is not None:
+            try:
+                val_float = float(val)
+                if val_float.is_integer():
+                    val_str = str(int(val_float))
+                else:
+                    val_str = f"{val_float:.3f}"
+            except Exception:
+                val_str = str(val)
+            return f"{val_str} | CACHED | HIGH"
+        return "[unverified — absent from cache]"
+
+    processed = re.sub(r'\{\{val:([^|}]+)\}\}', replace_cache, llm_response_text)
+
+    # 2. Parse Derived Values: {{val:formula_id|inputs}}
+    def replace_derived(match):
+        formula_id = match.group(1).strip()
+        inputs_str = match.group(2).strip()
+        try:
+            val = calculate_derived_value(formula_id, inputs_str, session_id)
+            if val is not None:
+                return f"{val:.3f} | DERIVED | HIGH {inputs_str}"
+        except Exception as e:
+            _logger.warning(f"[Provenance] Formula {formula_id} failed: {e}")
+        return f"[unverified — math error on {formula_id}]"
+
+    processed = re.sub(r'\{\{val:([^|]+)\|([^}]+)\}\}', replace_derived, processed)
+
+    # Support {{cite:cache_key}}
+    def replace_cite(match):
+        cache_key = match.group(1).strip()
+        return f"*{cache_key}*"
+    processed = re.sub(r'\{\{cite:([^}]+)\}\}', replace_cite, processed)
+
+    # 3. Unverified Safety Catch inside markdown tables
+    lines = processed.split("\n")
+    in_table = False
+    for idx, line in enumerate(lines):
+        if re.match(r'^\s*\|(?:\s*:-*:\s*|:-*\s*|[-:\s]*\|)+$', line):
+            in_table = True
+            continue
+        
+        if in_table:
+            if not line.strip().startswith("|"):
+                in_table = False
+                continue
+                
+            cells = line.split("|")
+            modified_cells = []
+            for cell_idx, cell in enumerate(cells):
+                if cell_idx == 0 or cell_idx == len(cells) - 1:
+                    modified_cells.append(cell)
+                    continue
+                    
+                cell_strip = cell.strip()
+                if re.match(r'^\s*-?\d+(?:\.\d+)?\s*$', cell_strip) and not any(tag in cell for tag in ["CACHED", "DERIVED", "unverified"]):
+                    modified_cells.append(" [unverified — no provenance marker] ")
+                else:
+                    modified_cells.append(cell)
+            lines[idx] = "|".join(modified_cells)
+            
+    return "\n".join(lines)
 
 
 # ── SCAL DOC-GEN HELPER ──────────────────────────────────────────────────────
@@ -1546,6 +1760,38 @@ class PRCChatAssistant:
         
 
         yield (True, result)
+
+
+
+    def _filter_duplicate_plots(self, tool_calls_in_turn: list) -> list[str]:
+        """
+        Filters out intermediate plots of the same model type, preserving only the last plot payload
+        for each curve-fitting type to prevent visual clutter in the chat UI.
+        """
+        formatted_outputs = []
+        last_call_index = {}
+        
+        # Track the last index of the tool call for each model/type
+        for idx, (fc, raw, fmt) in enumerate(tool_calls_in_turn):
+            if fc.name == "fit_petrophysical_curve":
+                model = fc.args.get("model")
+                if model:
+                    last_call_index[model] = idx
+                    
+        for idx, (fc, raw, fmt) in enumerate(tool_calls_in_turn):
+            if fc.name == "fit_petrophysical_curve":
+                model = fc.args.get("model")
+                # If this is not the last call for this model, strip the __PRC_PLOT__ block
+                if model and last_call_index.get(model) != idx:
+                    import re
+                    cleaned_fmt = re.sub(r'__PRC_PLOT__\n.*?\n\n', '', fmt, flags=re.DOTALL)
+                    formatted_outputs.append(cleaned_fmt)
+                else:
+                    formatted_outputs.append(fmt)
+            else:
+                formatted_outputs.append(fmt)
+                
+        return formatted_outputs
 
 
 
@@ -3019,6 +3265,7 @@ class PRCChatAssistant:
                                             "ground_truth": mandatory_ground_truth,
                                             "timestamp": time.time()
                                         }
+                                    populate_cache_from_ground_truth(sid, mandatory_ground_truth)
                                 _logger.info(f"[Phase 0b] Deterministic MANDATORY_GROUND_TRUTH_INVENTORY generated for {fname}")
                             except Exception as mgt_err:
                                 _logger.warning(f"[Phase 0b] extract_absolute_file_truth failed for {fname}: {mgt_err}")
@@ -5297,7 +5544,8 @@ async def chat_stream(
                     # Phase 0b cleanup: strip <thinking> blocks and placeholder artifacts
                     full_reply = strip_thinking_blocks(full_reply)
                     full_reply = strip_placeholder_artifacts(full_reply)
-
+                    full_reply = process_provenance_tokens(full_reply, sid)
+                    full_reply = compress_traceability_ledger(full_reply)
                     full_reply = _extract_and_log_corrections(sid, email, full_reply)
 
                     db("INSERT INTO m (sid,role,text,ts,user_email) VALUES (?,?,?,?,?)",
@@ -5744,8 +5992,10 @@ async def handle(
         resp_text = resp if isinstance(resp, str) else str(resp) if resp is not None else ""
         resp_text = strip_thinking_blocks(resp_text)
         resp_text = strip_placeholder_artifacts(resp_text)
+        resp_text = process_provenance_tokens(resp_text, sid)
         filenames = get_filenames_from_cache(sid)
         resp_text = clean_citation_clutter(resp_text, filenames)
+        resp_text = compress_traceability_ledger(resp_text)
         resp_text = _extract_and_log_corrections(sid, email, resp_text)
         await async_db("INSERT INTO m (sid,role,text,ts,user_email) VALUES (?,?,?,?,?)",
 
@@ -6142,6 +6392,7 @@ def sync_document_generation_task(
                             "ground_truth": mandatory_ground_truth,
                             "timestamp": time.time()
                         }
+                    populate_cache_from_ground_truth(session_id, mandatory_ground_truth)
                 _logger.info(f"[Phase 0b BG] Deterministic MANDATORY_GROUND_TRUTH_INVENTORY generated for {filename}")
             except Exception as mgt_err:
                 _logger.warning(f"[Phase 0b BG] extract_absolute_file_truth failed for {filename}: {mgt_err}")
