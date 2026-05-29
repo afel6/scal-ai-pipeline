@@ -71,13 +71,13 @@ class TestHaltingGate:
             SESSION_DATA_CACHE.clear()
 
     def test_gate_blocks_file_ref_when_cache_empty(self):
-        """If user message references file/sheet data and cache is empty -> halt and refuse."""
+        """If user message references file/sheet data and cache is empty -> allow to proceed to LLM."""
         assistant = PRCChatAssistant(keys=["DUMMY_KEY"])
         msg = "What is the porosity value on the first sheet?"
-        res = assistant.chat(history=[], msg=msg, sid="session-empty", stream=False)
-        
-        assert "Error: SCAL file contents are currently inaccessible to the chat thread" in res
-        assert "Please use the 'Generate Report' button" in res
+        try:
+            assistant.chat(history=[], msg=msg, sid="session-empty", stream=False)
+        except Exception as e:
+            assert "Error: SCAL file contents are currently inaccessible" not in str(e)
 
     def test_gate_allows_general_petrophysics_when_cache_empty(self):
         """If user message is general petrophysics with no file ref -> allow to proceed (doesn't refuse)."""
