@@ -667,15 +667,18 @@ def is_cache_syncing_or_empty(sid: str, msg: str) -> bool:
     is_file_ref = bool(re.search(r'(?i)sheet|sample|value|file|xlsx|csv|xls|docx|table|data|plug|porosity|permeability|swi|sor|pressure|klinkenberg|mD|T1-31', msg))
     if not is_file_ref:
         return False
+    
+    # If the active session data dictionary is present, proceed instantly to LLM generation
+    with SESSION_DATA_CACHE_LOCK:
+        if sid in SESSION_DATA_CACHE:
+            return False
+            
     # Check if there are any filenames in the messages table for this session
     fname_rows = db("SELECT DISTINCT fname FROM m WHERE sid=? AND fname IS NOT NULL", (sid,))
     if not fname_rows:
         return False
-    with SESSION_DATA_CACHE_LOCK:
-        cache = SESSION_DATA_CACHE.get(sid)
-        if not cache or "labeled_values" not in cache or not cache["labeled_values"]:
-            return True
-    return False
+        
+    return True
 
 
 def verify_tool_arguments_grounded(sid: str, name: str, args: dict) -> bool:
