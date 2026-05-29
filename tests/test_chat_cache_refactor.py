@@ -70,14 +70,23 @@ class TestHaltingGate:
         with SESSION_DATA_CACHE_LOCK:
             SESSION_DATA_CACHE.clear()
 
+    _REFUSAL_MARKER = "cache is empty"
+
     def test_gate_blocks_file_ref_when_cache_empty(self):
-        """If user message references file/sheet data and cache is empty -> allow to proceed to LLM."""
+        """File/sheet reference + empty cache + no upload -> HARD REFUSAL (no LLM call)."""
         assistant = PRCChatAssistant(keys=["DUMMY_KEY"])
         msg = "What is the porosity value on the first sheet?"
-        try:
-            assistant.chat(history=[], msg=msg, sid="session-empty", stream=False)
-        except Exception as e:
-            assert "Error: SCAL file contents are currently inaccessible" not in str(e)
+        result = assistant.chat(history=[], msg=msg, sid="session-empty", stream=False)
+        assert isinstance(result, str)
+        assert self._REFUSAL_MARKER in result.lower()
+
+    def test_gate_blocks_file_ref_when_cache_empty_streaming(self):
+        """Same refusal on the streaming path (generator yields the refusal)."""
+        assistant = PRCChatAssistant(keys=["DUMMY_KEY"])
+        msg = "Extract the Swi from the uploaded spreadsheet."
+        gen = assistant.chat(history=[], msg=msg, sid="session-empty", stream=True)
+        out = "".join(list(gen))
+        assert self._REFUSAL_MARKER in out.lower()
 
     def test_gate_allows_general_petrophysics_when_cache_empty(self):
         """If user message is general petrophysics with no file ref -> allow to proceed (doesn't refuse)."""
@@ -89,10 +98,10 @@ class TestHaltingGate:
         # Instead, it proceeds to Gemini API client generation which will fail with a different error
         # (e.g. ValueError or API key error), which confirms the gate let it pass!
         try:
-            assistant.chat(history=[], msg=msg, sid="session-empty", stream=False)
+            result = assistant.chat(history=[], msg=msg, sid="session-empty", stream=False)
+            assert self._REFUSAL_MARKER not in (result or "").lower()
         except Exception as e:
-            # Check that it did NOT fail with the hard refuse string!
-            assert "Error: SCAL file contents are currently inaccessible" not in str(e)
+            assert self._REFUSAL_MARKER not in str(e).lower()
 
     def test_gate_allows_file_ref_when_cache_populated(self):
         """If user message references file data but cache is populated -> allow to proceed."""
@@ -107,9 +116,10 @@ class TestHaltingGate:
             
         msg = "Extract porosity from sheet 1."
         try:
-            assistant.chat(history=[], msg=msg, sid=sid, stream=False)
+            result = assistant.chat(history=[], msg=msg, sid=sid, stream=False)
+            assert self._REFUSAL_MARKER not in (result or "").lower()
         except Exception as e:
-            assert "Error: SCAL file contents are currently inaccessible" not in str(e)
+            assert self._REFUSAL_MARKER not in str(e).lower()
 
     def test_gate_allows_file_ref_with_active_upload(self):
         """If user message references file data and actively uploads a file (f_parts) -> allow to proceed."""
@@ -119,9 +129,10 @@ class TestHaltingGate:
         # Simulate active upload in f_parts
         f_parts = [(b"fake bytes", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", "test.xlsx")]
         try:
-            assistant.chat(history=[], msg=msg, f_parts=f_parts, sid="session-empty", stream=False)
+            result = assistant.chat(history=[], msg=msg, f_parts=f_parts, sid="session-empty", stream=False)
+            assert self._REFUSAL_MARKER not in (result or "").lower()
         except Exception as e:
-            assert "Error: SCAL file contents are currently inaccessible" not in str(e)
+            assert self._REFUSAL_MARKER not in str(e).lower()
 
 
 # ────────────────────────────────────────────────────────

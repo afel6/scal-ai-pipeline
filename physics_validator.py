@@ -206,52 +206,94 @@ class PhysicsGuard:
 
     def validate_archie(self, x, y, model_type="RI") -> "PhysicsGuard":
         """
-        Validation for Resistivity Index (RI) or Formation Factor (FF).
-        RI vs Sw: Monotone non-increasing, RI(Sw=1)=1
-        FF vs Phi: Monotone non-increasing, FF(Phi=1) should be low
+        Validate a measured Archie dataset (arrays, not fitted scalars).
+
+          RI model: y = RI vs x = Sw  → RI = b·Sw^-n  (RI falls as Sw rises; RI ≥ 1)
+          FF model: y = FF vs x = φ   → FF = a·φ^-m   (FF falls as φ rises; FF ≥ 1)
+
+        Rules (HIGH unless noted):
+          RI: RI_MONOTONICITY, RI_RANGE (≥1), RI_ENDPOINT (RI(Sw=1)≈1, MEDIUM)
+          FF: FF_MONOTONICITY, FF_RANGE (≥1)
         """
         x_a = np.asarray(x, dtype=float)
         y_a = np.asarray(y, dtype=float)
+        if x_a.size == 0 or y_a.size == 0:
+            return self
+
         idx = np.argsort(x_a)
-        x_s, y_s = x_a[idx], y_a[idx]
+        x_s = x_a[idx]
+        y_s = y_a[idx]
+        mt  = (model_type or "RI").upper()
 
-        if model_type == "RI":
-            # Sw increases -> RI should decrease
+        if mt == "FF":
             n_viol = int(np.sum(np.diff(y_s) > 1e-4))
-            self._check(n_viol == 0, "RI_MONOTONICITY", f"Resistivity Index increases at {n_viol} point(s) as saturation increases.")
-            self._check(bool(np.all(y_s >= 1.0 - 1e-4)), "RI_RANGE", "Resistivity Index cannot be less than 1.0.")
-            # RI(Sw=1) should be near 1.0
-            if x_s[-1] > 0.99:
-                self._check(y_s[-1] < 1.1, "RI_ENDPOINT", f"RI at Sw=1 is {y_s[-1]:.2f}, should be 1.0.", severity="MEDIUM")
-        else: # FF
-            # Phi increases -> FF should decrease
+            self._check(
+                n_viol == 0,
+                "FF_MONOTONICITY",
+                f"Formation Factor increases at {n_viol} point(s) as porosity increases — "
+                "violates FF = a·φ^-m (FF must fall as φ rises).",
+            )
+            self._check(
+                bool(np.all(y_s >= 1.0 - 1e-6)),
+                "FF_RANGE",
+                f"Formation Factor below 1.0 (min={float(y_s.min()):.4f}) — non-physical; "
+                "FF = R0/Rw ≥ 1 for any porosity < 1.",
+            )
+        else:  # RI
             n_viol = int(np.sum(np.diff(y_s) > 1e-4))
-            self._check(n_viol == 0, "FF_MONOTONICITY", f"Formation Factor increases at {n_viol} point(s) as porosity increases.")
-            self._check(bool(np.all(y_s >= 1.0 - 1e-4)), "FF_RANGE", "Formation Factor cannot be less than 1.0.")
-
+            self._check(
+                n_viol == 0,
+                "RI_MONOTONICITY",
+                f"Resistivity Index increases at {n_viol} point(s) as Sw increases — "
+                "violates RI = b·Sw^-n (RI must fall as Sw rises).",
+            )
+            self._check(
+                bool(np.all(y_s >= 1.0 - 1e-6)),
+                "RI_RANGE",
+                f"Resistivity Index below 1.0 (min={float(y_s.min()):.4f}) — non-physical; "
+                "RI = Rt/R0 ≥ 1 for Sw ≤ 1.",
+            )
+            ri_end = float(y_s[-1])  # RI at the highest Sw
+            self._check(
+                ri_end <= 1.1,
+                "RI_ENDPOINT",
+                f"RI at maximum Sw = {ri_end:.4f} exceeds 1.1 — RI must normalize to "
+                "1.0 at full brine saturation (Sw = 1).",
+                severity="MEDIUM",
+            )
         return self
 
     def validate_pc(self, sw, pc, cycle: str = "drainage") -> "PhysicsGuard":
-        """Validation for general Capillary Pressure (Centrifuge/Porous Plate).
+        """
+        Validate a capillary pressure curve.
 
-        cycle='drainage'   (default) — Pc must be positive; negative values flagged.
-        cycle='imbibition' — Pc is legitimately ≤ 0; PC_RANGE check is skipped.
+          PC_MONOTONICITY — Pc must be non-increasing as Sw increases (both cycles).
+          PC_RANGE        — drainage Pc must be ≥ 0; negative Pc is non-physical in
+                            drainage. For imbibition, negative Pc is correct and NOT flagged.
         """
         sw_a = np.asarray(sw, dtype=float)
         pc_a = np.asarray(pc, dtype=float)
+        if sw_a.size == 0 or pc_a.size == 0:
+            return self
+
         idx  = np.argsort(sw_a)
-        sw_s, pc_s = sw_a[idx], pc_a[idx]
+        pc_s = pc_a[idx]
 
-        # Sw increases → Pc should decrease (applies to both drainage and imbibition)
         n_viol = int(np.sum(np.diff(pc_s) > 1e-4))
-        self._check(n_viol == 0, "PC_MONOTONICITY",
-                    f"Capillary Pressure increases at {n_viol} point(s) as water saturation increases.")
+        self._check(
+            n_viol == 0,
+            "PC_MONOTONICITY",
+            f"Capillary pressure increases at {n_viol} point(s) as Sw increases — "
+            "Pc must fall monotonically along the saturation axis.",
+        )
 
-        # Sign check — imbibition Pc is negative by convention; skip for that cycle
-        if cycle.lower() != "imbibition":
-            self._check(bool(np.all(pc_s >= -0.1)), "PC_RANGE",
-                        f"Capillary Pressure must be positive (found min={pc_s.min():.2f}).")
-
+        if str(cycle).lower() == "drainage":
+            self._check(
+                bool(np.all(pc_s >= -1e-6)),
+                "PC_RANGE",
+                f"Drainage capillary pressure goes negative (min={float(pc_s.min()):.4f}) — "
+                "non-physical; drainage Pc ≥ 0 (negative Pc only occurs in imbibition).",
+            )
         return self
 
     def validate_archie_parameters(self, a: float, m: float, b: float, n: float) -> "PhysicsGuard":

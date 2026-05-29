@@ -697,8 +697,152 @@ def populate_cache_from_ground_truth(sid: str, gt_text: str):
                             SESSION_DATA_CACHE[sid]["labeled_values"][sheet_key] = val
 
 
-def calculate_derived_value(formula_id: str, inputs_str: str, session_id: str) -> float:
-    # Parse inputs, e.g. "a=1.0,phi=0.15,m=1.85" or "phi=0.15"
+def cache_excel_data_vectors(sid: str, filepath: str):
+    """Parses Excel/CSV sheets using pandas and caches raw numeric vectors (lists of floats)
+    in SESSION_DATA_CACHE[sid]["flat_vectors"] and SESSION_DATA_CACHE[sid]["raw_excel_data"].
+    """
+    if not sid or not filepath:
+        return
+    import pandas as pd
+    from pathlib import Path
+    import numpy as np
+    ext = Path(filepath).suffix.lower()
+    
+    with SESSION_DATA_CACHE_LOCK:
+        if sid not in SESSION_DATA_CACHE:
+            SESSION_DATA_CACHE[sid] = {}
+        if "flat_vectors" not in SESSION_DATA_CACHE[sid]:
+            SESSION_DATA_CACHE[sid]["flat_vectors"] = {}
+        if "raw_excel_data" not in SESSION_DATA_CACHE[sid]:
+            SESSION_DATA_CACHE[sid]["raw_excel_data"] = {}
+            
+    sheets_dict = {}
+    try:
+        if ext in ('.xlsx', '.xlsm', '.xls', '.ods'):
+            xl = pd.ExcelFile(filepath)
+            for sheet in xl.sheet_names:
+                try:
+                    df = pd.read_excel(xl, sheet_name=sheet, header=None)
+                    sheets_dict[sheet] = df
+                except Exception:
+                    pass
+            xl.close()
+        elif ext == '.csv':
+            try:
+                from file_reader import smart_read_csv
+                df = smart_read_csv(filepath, header=None)
+                sheets_dict["Sheet1"] = df
+            except Exception:
+                pass
+    except Exception as e:
+        _logger.warning(f"[CacheVectors] Failed to read {filepath}: {e}")
+        return
+
+    # Process each sheet to find numeric columns
+    for sheet_name, df in sheets_dict.items():
+        if df.empty:
+            continue
+        n_rows, n_cols = df.shape
+        if n_rows < 2 or n_cols < 1:
+            continue
+            
+        data_start_row = None
+        for i in range(n_rows):
+            row_vals = df.iloc[i].tolist()
+            num_count = sum(1 for v in row_vals if pd.notna(v) and isinstance(v, (int, float)) and not isinstance(v, bool))
+            if num_count >= 1:
+                data_start_row = i
+                break
+                
+        if data_start_row is None:
+            data_start_row = 1
+            
+        headers = []
+        for col_idx in range(n_cols):
+            parts = []
+            for r in range(max(0, data_start_row)):
+                cell_val = df.iloc[r, col_idx]
+                cell_str = str(cell_val).strip() if pd.notna(cell_val) else ""
+                if cell_str and cell_str.lower() != "nan":
+                    parts.append(cell_str)
+            headers.append(" ".join(parts) if parts else f"col_{col_idx}")
+            
+        seen = {}
+        unique_headers = []
+        for h in headers:
+            h_clean = h.strip()
+            if not h_clean:
+                h_clean = "unnamed"
+            if h_clean in seen:
+                seen[h_clean] += 1
+                unique_headers.append(f"{h_clean}_{seen[h_clean]}")
+            else:
+                seen[h_clean] = 1
+                unique_headers.append(h_clean)
+        headers = unique_headers
+
+        col_vectors = {h: [] for h in headers}
+        for r in range(data_start_row, n_rows):
+            for col_idx in range(n_cols):
+                if col_idx >= len(headers):
+                    continue
+                h = headers[col_idx]
+                val_raw = df.iloc[r, col_idx]
+                if pd.isna(val_raw):
+                    col_vectors[h].append(None)
+                else:
+                    try:
+                        v = float(val_raw)
+                        if np.isnan(v):
+                            col_vectors[h].append(None)
+                        else:
+                            col_vectors[h].append(v)
+                    except (ValueError, TypeError):
+                        col_vectors[h].append(None)
+                        
+        valid_cols = {}
+        with SESSION_DATA_CACHE_LOCK:
+            if sheet_name not in SESSION_DATA_CACHE[sid]["raw_excel_data"]:
+                SESSION_DATA_CACHE[sid]["raw_excel_data"][sheet_name] = {}
+                
+            for h, vals in col_vectors.items():
+                clean_vals = [v for v in vals if v is not None]
+                if len(clean_vals) >= 2:
+                    valid_cols[h] = clean_vals
+                    SESSION_DATA_CACHE[sid]["raw_excel_data"][sheet_name][h] = clean_vals
+                    flat_key = f"{sheet_name}.{h}".lower().replace(" ", "_")
+                    SESSION_DATA_CACHE[sid]["flat_vectors"][flat_key] = clean_vals
+                    SESSION_DATA_CACHE[sid]["flat_vectors"][h.lower()] = clean_vals
+                    
+        _logger.info(f"[CacheVectors] Cached {len(valid_cols)} columns from sheet {sheet_name}")
+
+
+def find_cached_vector(sid: str, aliases: list) -> list:
+    """Fuzzy matches keys in flat_vectors to aliases and returns the first matched list of floats."""
+    if not sid:
+        return []
+    with SESSION_DATA_CACHE_LOCK:
+        flat = SESSION_DATA_CACHE.get(sid, {}).get("flat_vectors", {})
+        for alias in aliases:
+            a_clean = alias.lower().replace(" ", "").replace("_", "")
+            for k, vals in flat.items():
+                k_clean = k.lower().replace(" ", "").replace("_", "")
+                if a_clean == k_clean or a_clean in k_clean or k_clean in a_clean:
+                    return vals
+    return []
+
+
+class _MissingParam(Exception):
+    """Raised when a required parameter is absent from BOTH the inputs and the
+    active session cache. No generic constant is ever substituted."""
+
+
+_PARAM_MISSING = object()  # sentinel: distinguishes "no default" from "default is None"
+
+
+def calculate_derived_value(formula_id: str, inputs_str: str, session_id: str):
+    import re
+    # Parse inputs, e.g. "phi=0.15,m=1.85" (NO generic-constant fallbacks)
     inputs = {}
     for part in inputs_str.split(","):
         if "=" in part:
@@ -709,7 +853,7 @@ def calculate_derived_value(formula_id: str, inputs_str: str, session_id: str) -
                 pass
             
     # Helper to get parameter from inputs or fallback to cache
-    def get_param(name: str, default: float = None) -> float:
+    def get_param(name: str, default=_PARAM_MISSING) -> float:
         name_lower = name.lower()
         if name_lower in inputs:
             return inputs[name_lower]
@@ -720,15 +864,17 @@ def calculate_derived_value(formula_id: str, inputs_str: str, session_id: str) -
             if name_lower in labeled:
                 return float(labeled[name_lower])
             for ck, cv in labeled.items():
-                if name_lower in ck:
+                # whole-token (word-boundary) match only — never substring,
+                # so 'm' cannot bind to 'rm' or 'cementation_m'.
+                if name_lower in re.split(r'[^a-z0-9]+', str(ck).lower()):
                     return float(cv)
-        if default is not None:
+        if default is not _PARAM_MISSING:
             return default
-        raise ValueError(f"Missing parameter: {name}")
+        raise _MissingParam(name)
 
     formula_id = formula_id.lower()
     if formula_id == "archie_f":
-        a = get_param("a", 1.0)
+        a = get_param("a")
         phi = get_param("phi")
         m = get_param("m")
         if phi > 1.0:
@@ -745,7 +891,7 @@ def calculate_derived_value(formula_id: str, inputs_str: str, session_id: str) -
         if ro is not None and rt is not None:
             return (ro / rt) ** (1.0 / n)
         # Fallback Sw = (a * Rw / (Rt * phi**m))**(1/n)
-        a = get_param("a", 1.0)
+        a = get_param("a")
         rw = get_param("rw")
         rt = get_param("rt")
         phi = get_param("phi")
@@ -816,6 +962,8 @@ def process_provenance_tokens(llm_response_text: str, session_id: str) -> str:
             val = calculate_derived_value(formula_id, inputs_str, session_id)
             if val is not None:
                 return f"{val:.3f} | DERIVED | HIGH {inputs_str}"
+        except _MissingParam:
+            return "[unverified — absent from cache]"
         except Exception as e:
             _logger.warning(f"[Provenance] Formula {formula_id} failed: {e}")
         return f"[unverified — math error on {formula_id}]"
@@ -856,9 +1004,6 @@ def process_provenance_tokens(llm_response_text: str, session_id: str) -> str:
             lines[idx] = "|".join(modified_cells)
             
     result_text = "\n".join(lines)
-    # Strict Provenance Filter: If output contains unverified data or citations, block and return refusal string
-    if "[unverified" in result_text or "unverified —" in result_text:
-        return "Error: SCAL file contents are currently inaccessible to the chat thread. Please use the 'Generate Report' button for verified parameters."
     return result_text
 
 
@@ -2112,30 +2257,47 @@ class PRCChatAssistant:
 
             if name == "fit_petrophysical_curve" and args.get("model") == "ri":
 
-                sw_raw = args.get("sw", [])
+                sid = getattr(_tls, 'current_session_id', None)
 
-                ri_raw = args.get("ri", [])
+                # SYNC: fit on the EXACT raw cached column vectors the report engine uses.
+                # LLM-supplied args are only a fallback when the session cache is empty.
+                sw_raw, ri_raw = [], []
+                if sid:
+                    sw_raw = find_cached_vector(sid, ["sw", "water saturation", "saturation"])
+                    ri_raw = find_cached_vector(sid, ["ri", "resistivity index", "index"])
+                if not sw_raw or not ri_raw:
+                    sw_raw = sw_raw or args.get("sw", [])
+                    ri_raw = ri_raw or args.get("ri", [])
 
                 sample = args.get("sample_name", "Core")
 
-                if len(sw_raw) > 1 and len(ri_raw) > 1:
+                if len(sw_raw) > 1 and len(ri_raw) > 1 and len(sw_raw) == len(ri_raw):
 
                     sw_a = np.array(sw_raw, dtype=float)
-
                     ri_a = np.array(ri_raw, dtype=float)
+                    # Sort by Sw WITHOUT severing the measured Sw<->RI pairing
+                    # (the prior independent re-sort of RI fabricated the lab scatter).
+                    idx_sort = np.argsort(sw_a)
+                    sw_a = sw_a[idx_sort]
+                    ri_a = ri_a[idx_sort]
 
                     mask     = (sw_a > 0) & (ri_a > 0)
+                    n_arch   = float(-np.polyfit(np.log(sw_a[mask]), np.log(ri_a[mask]), 1)[0])
 
-                    log_sw   = np.log(sw_a[mask])
-
-                    log_ri   = np.log(ri_a[mask])
-
-                    n_arch   = float(-np.polyfit(log_sw, log_ri, 1)[0])
-
-                    n_arch   = max(1.5, min(n_arch, 3.0))
+                    # Physics boundary: Archie n in [1.5, 3.0]. Do NOT clamp-and-synthesize.
+                    # Intercept gracefully so the text answer and the chart can never disagree.
+                    if not (1.5 <= n_arch <= 3.0):
+                        _audit_fail = PhysicsGuard().validate_archie(sw_a, ri_a, "RI").generate_health_score()
+                        _log_physics_audit(getattr(_tls, 'current_session_id', 'ANONYMOUS'), "ri",
+                                           _audit_fail, getattr(_tls, 'last_file_name', None))
+                        return (
+                            f"⚠️ Physics boundary check failed for the Resistivity Index fit: "
+                            f"the fitted Archie saturation exponent n={n_arch:.3f} falls outside the valid "
+                            f"reservoir-rock range [1.5, 3.0]. No RI chart was generated, to avoid emitting "
+                            f"fabricated data points. Please verify the raw Sw / RI columns for sample '{sample}'."
+                        )
 
                     sw_fit   = np.linspace(float(sw_a.min()), 1.0, 80)
-
                     ri_fit   = sw_fit ** (-n_arch)
 
                     plot_ri  = {
@@ -2186,6 +2348,24 @@ class PRCChatAssistant:
 
                     )
 
+                    if sid:
+
+                        with SESSION_DATA_CACHE_LOCK:
+
+                            if sid not in SESSION_DATA_CACHE:
+
+                                SESSION_DATA_CACHE[sid] = {}
+
+                            if "labeled_values" not in SESSION_DATA_CACHE[sid]:
+
+                                SESSION_DATA_CACHE[sid]["labeled_values"] = {}
+
+                            SESSION_DATA_CACHE[sid]["labeled_values"]["n"] = n_arch
+
+                            SESSION_DATA_CACHE[sid]["labeled_values"]["n_arch"] = n_arch
+
+                            SESSION_DATA_CACHE[sid]["labeled_values"]["saturation_exponent"] = n_arch
+
 
 
                     return (
@@ -2200,28 +2380,48 @@ class PRCChatAssistant:
 
             if name == "fit_petrophysical_curve" and args.get("model") == "ff":
 
-                phi_raw = args.get("porosity", [])
+                sid = getattr(_tls, 'current_session_id', None)
 
-                ff_raw  = args.get("ff", [])
+                # SYNC: fit on the EXACT raw cached column vectors the report engine uses.
+                # LLM-supplied args are only a fallback when the session cache is empty.
+                phi_raw, ff_raw = [], []
+                if sid:
+                    phi_raw = find_cached_vector(sid, ["porosity", "phi"])
+                    ff_raw  = find_cached_vector(sid, ["ff", "formation factor"])
+                if not phi_raw or not ff_raw:
+                    phi_raw = phi_raw or args.get("porosity", [])
+                    ff_raw  = ff_raw or args.get("ff", [])
 
                 sample  = args.get("sample_name", "Core")
 
-                if len(phi_raw) > 1 and len(ff_raw) > 1:
+                if len(phi_raw) > 1 and len(ff_raw) > 1 and len(phi_raw) == len(ff_raw):
 
                     phi_a   = np.array(phi_raw, dtype=float)
-
                     ff_a    = np.array(ff_raw,  dtype=float)
+                    # Sort by porosity WITHOUT severing the measured phi<->FF pairing.
+                    idx_sort = np.argsort(phi_a)
+                    phi_a = phi_a[idx_sort]
+                    ff_a = ff_a[idx_sort]
 
                     mask    = (phi_a > 0) & (ff_a > 0)
-
                     coeffs  = np.polyfit(np.log(phi_a[mask]), np.log(ff_a[mask]), 1)
+                    m_arch  = float(-coeffs[0])
+                    a_arch  = float(np.exp(coeffs[1]))
 
-                    m_arch  = float(max(1.3, min(-coeffs[0], 3.5)))
-
-                    a_arch  = float(max(0.3, min(np.exp(coeffs[1]), 2.5)))
+                    # Physics boundary: cementation m in [1.3, 3.5], tortuosity a in [0.3, 2.5].
+                    # Intercept gracefully rather than clamping into range and synthesizing a curve.
+                    if not (1.3 <= m_arch <= 3.5 and 0.3 <= a_arch <= 2.5):
+                        _audit_fail = PhysicsGuard().validate_archie(phi_a, ff_a, "FF").generate_health_score()
+                        _log_physics_audit(getattr(_tls, 'current_session_id', 'ANONYMOUS'), "ff",
+                                           _audit_fail, getattr(_tls, 'last_file_name', None))
+                        return (
+                            f"⚠️ Physics boundary check failed for the Formation Factor fit: "
+                            f"fitted m={m_arch:.3f}, a={a_arch:.3f} fall outside valid reservoir-rock ranges "
+                            f"(m∈[1.3,3.5], a∈[0.3,2.5]). No FF chart was generated, to avoid emitting "
+                            f"fabricated data points. Please verify the raw porosity / FF columns for sample '{sample}'."
+                        )
 
                     phi_fit = np.linspace(float(phi_a.min()), float(phi_a.max()), 80)
-
                     ff_fit  = a_arch / (phi_fit ** m_arch)
 
                     plot_ff = {
@@ -2273,6 +2473,17 @@ class PRCChatAssistant:
                     )
 
 
+
+                    if sid:
+                        with SESSION_DATA_CACHE_LOCK:
+                            if sid not in SESSION_DATA_CACHE:
+                                SESSION_DATA_CACHE[sid] = {}
+                            if "labeled_values" not in SESSION_DATA_CACHE[sid]:
+                                SESSION_DATA_CACHE[sid]["labeled_values"] = {}
+                            SESSION_DATA_CACHE[sid]["labeled_values"]["m"] = m_arch
+                            SESSION_DATA_CACHE[sid]["labeled_values"]["a"] = a_arch
+                            SESSION_DATA_CACHE[sid]["labeled_values"]["cementation_exponent"] = m_arch
+                            SESSION_DATA_CACHE[sid]["labeled_values"]["tortuosity_factor"] = a_arch
 
                     return (
 
@@ -3183,7 +3394,6 @@ class PRCChatAssistant:
 
 
         for data_bytes, mime, fname in f_parts:
-
             safe_mime = (mime or "application/octet-stream").lower()
             ext = Path(fname).suffix.lower() if fname else ".xlsx"
             is_spreadsheet = any(x in safe_mime for x in ["spreadsheet", "excel", "csv", "sheet"]) or ext in [".xlsx", ".xls", ".csv"]
@@ -3198,482 +3408,69 @@ class PRCChatAssistant:
                     tmp_path = tf.name
 
                 try:
-                    # 1. Ingestion: high-fidelity layout-aware text/markdown parsing
-                    import re
-                    target_table_match = re.search(r'(?i)table\s*([\d\.]+)', msg)
-                    
-                    targets = []
-                    if target_table_match:
-                        targets.append(f"Table {target_table_match.group(1)}")
-                    
-                    # Add geomechanics indicators to avoid blinders
-                    geomech_keywords = ["young", "poisson", "compressibility", "geomech", "modulus"]
-                    for kw in geomech_keywords:
-                        if kw in msg.lower():
-                            if kw == "young":
-                                targets.append("Young's Modulus")
-                            elif kw == "poisson":
-                                targets.append("Poisson's Ratio")
-                            elif kw == "compressibility":
-                                targets.append("Compressibility")
-                            else:
-                                targets.append("Geomechanics")
-                    
-                    # Default geomechanics and SCAL keywords to always check if we are reading a DOCX
-                    if is_docx:
-                        targets.extend(["Young's Modulus", "Poisson's Ratio", "Compressibility"])
-                        if not target_table_match:
-                            targets.extend(["Permeability", "Porosity"])
-                    
-                    # Deduplicate targets
-                    target_identifier = list(dict.fromkeys(targets)) if targets else None
-                    
-                    # FIX: For DOCX files, extract ALL tables without proximity filtering.
-                    # Table numbers (e.g., "Table 2.1.1") in DOCX are often in text boxes
-                    # or image captions that python-docx can't read as paragraph text,
-                    # causing the proximity search to find 0 matches and grab wrong tables.
-                    # The full DOCX markdown easily fits in Gemini's context window (~600 lines),
-                    # and the extraction prompt already tells Gemini which table to extract.
-                    if is_docx or is_spreadsheet:
-                        fr_data = read_file(tmp_path, target_identifier=None)
-                    else:
-                        fr_data = read_file(tmp_path, target_identifier=target_identifier)
-                    fr_text, _ = to_prompt_string(fr_data)
-                    
-                    if fr_text:
-                        label = "SPREADSHEET" if is_spreadsheet else "WORD DOCUMENT"
-                        extracted_context += f"\n\n[{label}: {fname}]\n{fr_text}\n"
-                        
-                        # Mirror exact Word report pipeline: extract SCAL summary and append to context
-                        try:
-                            scal_res = extract_file_data(tmp_path)
-                            if scal_res.get("data_type") not in (None, "UNKNOWN") and scal_res.get("extracted"):
-                                _summary = _scal_doc_summary(scal_res["extracted"])
-                                if _summary:
-                                    extracted_context += f"\n{_summary}\n"
-                                    _logger.info(f"[Chat] SCAL summary added for {fname} ({scal_res['data_type']})")
-                        except Exception as _se:
-                            _logger.warning(f"[Chat] SCAL extraction failed for {fname}: {_se}")
-
-                        # 2. LLM Extraction Node: extract structured SCAL data using extraction prompt
-                        extraction_prompt_path = str(Path(__file__).parent / "prompts" / "extraction_system_prompt.md")
-                        with open(extraction_prompt_path, "r", encoding="utf-8") as f:
-                            system_instruction = f.read()
-
-                        # 2. Context Injection: The ENTIRE Markdown output must be injected directly into the LLM's context window as a single variable.
-                        # Do not use chunking, RAG, or snippet-based retrieval.
-                        
-                        # Phase 0b: Generate GROUND TRUTH structural inventory from the actual file
-                        phase0b_inventory = None
-                        phase0b_inventory_text = ""
-                        mandatory_ground_truth = ""
-                        if is_spreadsheet or is_docx:
-                            try:
-                                # Deterministic pre-parser: raw pd.ExcelFile, zero SCALFileHandler dependency
-                                mandatory_ground_truth = extract_absolute_file_truth(
-                                    [(tmp_path, fname)]
-                                )
-                                if sid:
-                                    with SESSION_DATA_CACHE_LOCK:
-                                        SESSION_DATA_CACHE[sid] = {
-                                            "ground_truth": mandatory_ground_truth,
-                                            "timestamp": time.time()
-                                        }
-                                    populate_cache_from_ground_truth(sid, mandatory_ground_truth)
-                                    # Enforce strict blocking cache completion assertion
-                                    assert sid in SESSION_DATA_CACHE and "labeled_values" in SESSION_DATA_CACHE[sid] and len(SESSION_DATA_CACHE[sid]["labeled_values"]) > 0, "Cache hydration failed: labeled_values is empty or unpopulated"
-                                _logger.info(f"[Phase 0b] Deterministic MANDATORY_GROUND_TRUTH_INVENTORY generated for {fname}")
-                            except Exception as mgt_err:
-                                _logger.warning(f"[Phase 0b] extract_absolute_file_truth failed or assertion failed for {fname}: {mgt_err}")
-                        
+                    # Force chat handler to call the EXACT same extraction function used by the report:
+                    mandatory_ground_truth = extract_absolute_file_truth([(tmp_path, fname)])
+                    if sid:
+                        with SESSION_DATA_CACHE_LOCK:
+                            SESSION_DATA_CACHE[sid] = {
+                                "ground_truth": mandatory_ground_truth,
+                                "timestamp": time.time()
+                            }
+                        populate_cache_from_ground_truth(sid, mandatory_ground_truth)
                         if is_spreadsheet:
-                            try:
-                                _handler = SCALFileHandler(tmp_path)
-                                _handler.read()
-                                phase0b_inventory = _handler.generate_structural_inventory()
-                                phase0b_inventory_text = _handler.generate_structural_inventory_text()
-                                _logger.info(f"[Phase 0b] Generated structural inventory for {fname}: "
-                                             f"{len(phase0b_inventory.get('sheets_found', []))} sheets")
-                                if phase0b_inventory.get("multi_well_alert"):
-                                    _logger.warning(f"[Phase 0b] MULTI-WELL ALERT in {fname}: "
-                                                    f"{phase0b_inventory['multi_well_alert']}")
-                            except Exception as inv_err:
-                                _logger.warning(f"[Phase 0b] Inventory generation failed for {fname}: {inv_err}")
-                        
-                        # Inject MANDATORY_GROUND_TRUTH_INVENTORY into the SYSTEM INSTRUCTION
-                        # This is architecturally un-bypassable: the LLM cannot ignore system-level instructions
-                        if mandatory_ground_truth:
-                            system_instruction = (
-                                f"{system_instruction}\n\n"
-                                f"## MANDATORY_GROUND_TRUTH_INVENTORY\n\n"
-                                f"You are provided with a MANDATORY_GROUND_TRUTH_INVENTORY extracted "
-                                f"programmatically by the Python server from the actual binary file. "
-                                f"This inventory is ABSOLUTE TRUTH and supersedes ANY text analysis you perform.\n\n"
-                                f"RULES:\n"
-                                f"1. If your analysis references a sheet name that does NOT exist in this inventory, "
-                                f"you MUST immediately output STRUCTURAL_HALT and fail.\n"
-                                f"2. If your analysis references a column label that does NOT exist in this inventory, "
-                                f"you MUST immediately output STRUCTURAL_HALT and fail.\n"
-                                f"3. You are FORBIDDEN from recycling numbers, columns, or sheet names from previous "
-                                f"chat turns or cached context. Only use what is in the current file.\n"
-                                f"4. For permeability fields (KL, Ka, Air_Permeability_md, Klinkenberg_Permeability_md), "
-                                f"the source column header MUST contain 'mD', 'Permeability', 'KL', or 'Ka'. "
-                                f"You MUST REJECT columns with '(cc)', 'Volume', 'Cum.vol', or 'Cumulative' for permeability extraction.\n"
-                                f"5. If a cell explicitly states 'Swi = <value>' or 'Sor = <value>', bind that value "
-                                f"directly to explicit_Swi or explicit_Sor. These override ALL derived calculations.\n\n"
-                                f"{mandatory_ground_truth}\n"
-                            )
-                        
-                        full_markdown_variable = (
-                            f"--- START OF FULL DOCUMENT MARKDOWN ---\n{fr_text}\n--- END OF FULL DOCUMENT MARKDOWN ---\n\n"
+                            cache_excel_data_vectors(sid, tmp_path)
+                    
+                    # ALWAYS persist raw text to user_files so follow-up messages can recover it
+                    fr_data = read_file(tmp_path, target_identifier=None)
+                    fr_text, _ = to_prompt_string(fr_data)
+                    if email and fr_text:
+                        _fhash_store = hashlib.sha256(data_bytes).hexdigest()
+                        db(
+                            "INSERT INTO user_files"
+                            " (user_email, filename, file_hash, extracted_text, data_type, created_at)"
+                            " VALUES (?,?,?,?,?,?)"
+                            " ON CONFLICT(user_email, file_hash)"
+                            " DO UPDATE SET extracted_text=EXCLUDED.extracted_text,"
+                            " filename=EXCLUDED.filename",
+                            (email, fname, _fhash_store, fr_text, "SCAL", time.time()),
                         )
-                        
-                        # Also inject Phase 0b inventory text into user prompt for cross-validation
-                        if phase0b_inventory_text:
-                            full_markdown_variable += (
-                                f"--- GROUND TRUTH: PHASE 0b STRUCTURAL INVENTORY (generated by Python parser) ---\n"
-                                f"{phase0b_inventory_text}\n"
-                                f"--- END GROUND TRUTH ---\n"
-                                f"IMPORTANT: The inventory above was generated by the Python file parser from the actual binary file. "
-                                f"Your Phase 0b output MUST match this exactly. If your output diverges, you are hallucinating.\n\n"
-                            )
-                        
-                        full_markdown_variable += (
-                            f"USER REQUEST: {msg}\n\n"
-                            f"CRITICAL: Only extract the specific table(s) or data requested by the user above. "
-                            f"If the user specifies a specific table (e.g., 'Table 2.1.1'), only extract the rows for that table. "
-                            f"Do not extract rows from other tables or other core plug sweeps.\n\n"
-                            f"MANDATORY PHASE 0b — PROOF OF READ:\n"
-                            f"Before ANY extraction, you MUST output a structural file inventory proving you have inspected the actual file.\n"
-                            f"You are FORBIDDEN from relying on remembered file structures or historical context.\n\n"
-                            f"MANDATORY PROTOCOLS FOR EXTRACTION:\n"
-                            f"0b. You must execute and return Phase 0b (PROOF OF READ: filename, sheets_found, per-sheet header/shape/first 2 rows inventory, multi_well_alert).\n"
-                            f"1. You must execute and return Protocol 1 (FILE-OPEN PROOF: sheet names and raw column headers target sheet inventory).\n"
-                            f"2. You must execute and return Protocol 2 (HEADER & UNIT DOUBLE-CHECK: print literal column headers/units for every extracted data value).\n"
-                            f"3. You must execute and return Protocol 3 (LABELED-VALUE ABSOLUTE PRIORITY: extract explicitly stated Swi/Sor laboratory values and list them under overridden_endpoints).\n"
-                            f"Your JSON output MUST match the structured schema format: a single object containing 'phase_0b_proof_of_read', 'protocol_1_file_open_proof', 'protocol_2_header_unit_double_check', 'protocol_3_labeled_value_absolute_priority', and the final rows array as 'extracted_data'.\n\n"
-                            f"STRUCTURAL HALT: If you cite a sheet name or column header NOT in your own Phase 0b inventory, HALT and output a STRUCTURAL_HALT error."
-                        )
-                        
-                        contents = [
-                            genai_types.Content(
-                                role="user",
-                                parts=[genai_types.Part.from_text(text=full_markdown_variable)]
-                            )
-                        ]
-                        config = genai_types.GenerateContentConfig(
-                            system_instruction=system_instruction,
-                            response_mime_type="application/json"
-                        )
-                        try:
-                            # Primary attempt with 2.5-flash using built-in exponential backoff
-                            response = _call_gemini_with_retry(
-                                client=self._client,
-                                model="gemini-2.5-flash",
-                                contents=contents,
-                                config=config,
-                                max_retries=3,
-                                base_delay=2
-                            )
-                        except Exception as e:
-                            _logger.warning(f"[Fallback] gemini-2.5-flash overloaded (503): {e}. Falling back to gemini-2.5-pro...")
-                            try:
-                                # Fallback to 2.5-pro if flash is overloaded globally
-                                response = _call_gemini_with_retry(
-                                    client=self._client,
-                                    model="gemini-2.5-pro",
-                                    contents=contents,
-                                    config=config,
-                                    max_retries=3,
-                                    base_delay=2
-                                )
-                            except Exception as e2:
-                                raise ValueError(f"CRITICAL: Both primary (flash) and fallback (pro) models are UNAVAILABLE. {e2}")
-                        
-                        response_text = response.text or ""
-                        
-                        # Strip markdown code blocks if present
-                        clean_text = response_text.strip()
-                        if clean_text.startswith("```"):
-                            lines = clean_text.splitlines()
-                            if lines[0].startswith("```"):
-                                lines = lines[1:]
-                            if lines[-1].startswith("```"):
-                                lines = lines[:-1]
-                            clean_text = "\n".join(lines).strip()
-                        
-                        # Strip any <thinking> blocks from response
-                        clean_text = strip_thinking_blocks(clean_text)
-                            
-                        def salvage_and_clean_json(text_to_parse: str) -> list:
-                            parsed = None
-                            try:
-                                parsed = _json.loads(text_to_parse)
-                            except Exception:
-                                clean_t = text_to_parse.strip()
-                                last_brace = clean_t.rfind('}')
-                                if last_brace != -1:
-                                    if clean_t.startswith("{"):
-                                        for suffix in ["}", "]}", "]} }", "] }"]:
-                                            try:
-                                                parsed = _json.loads(clean_t[:last_brace + 1] + suffix)
-                                                break
-                                            except Exception:
-                                                continue
-                                    else:
-                                        try:
-                                            parsed = _json.loads(clean_t[:last_brace + 1] + ']')
-                                        except Exception:
-                                            pass
-                            
-                            if parsed is None:
-                                raise ValueError("Could not parse or salvage valid JSON from LLM extraction response.")
-                            
-                            # Phase 0b: Check for STRUCTURAL_HALT from LLM
-                            if isinstance(parsed, dict) and "STRUCTURAL_HALT" in parsed:
-                                halt_msg = parsed["STRUCTURAL_HALT"]
-                                _logger.error(f"[Phase 0b] STRUCTURAL HALT: {halt_msg}")
-                                raise ValueError(f"STRUCTURAL_HALT: LLM detected hallucinated reference — {halt_msg}")
-                            
-                            # Phase 0b: Python-side structural validation against ground truth
-                            if isinstance(parsed, dict) and phase0b_inventory:
-                                violations = validate_extraction_against_inventory(parsed, phase0b_inventory)
-                                if violations:
-                                    for v in violations:
-                                        _logger.error(f"[Phase 0b] {v}")
-                                    raise ValueError(
-                                        f"STRUCTURAL_HALT: Python-side validation caught {len(violations)} "
-                                        f"hallucinated reference(s): {'; '.join(violations[:3])}"
-                                    )
-                            
-                            # Permeability column binding validation
-                            if isinstance(parsed, dict):
-                                perm_violations = validate_permeability_column_binding(parsed)
-                                if perm_violations:
-                                    for pv in perm_violations:
-                                        _logger.error(f"[Phase 0b] {pv}")
-                                    raise ValueError(
-                                        f"PERM_COLUMN_HALT: {len(perm_violations)} permeability "
-                                        f"data-shuffling error(s): {'; '.join(perm_violations[:3])}"
-                                    )
-                                
-                            if isinstance(parsed, dict) and "extracted_data" in parsed:
-                                _logger.info("[Pipeline] Successfully parsed Phase 0b + mandatory protocols and structured data.")
-                                overrides = parsed.get("protocol_3_labeled_value_absolute_priority", {}).get("overridden_endpoints", {})
-                                data_list = parsed.get("extracted_data", [])
-                                if isinstance(data_list, list) and isinstance(overrides, dict):
-                                    for row in data_list:
-                                        if isinstance(row, dict):
-                                            for ok, ov in overrides.items():
-                                                if ov is not None:
-                                                    if ok.lower() == "swi":
-                                                        row["explicit_Swi"] = float(ov)
-                                                    elif ok.lower() == "sor":
-                                                        row["explicit_Sor"] = float(ov)
-                                return data_list
-                            return parsed if isinstance(parsed, list) else []
-
-                        try:
-                            extracted_json = salvage_and_clean_json(clean_text)
-                        except Exception as je:
-                            raise ValueError(f"Failed to parse Gemini extraction output as JSON: {je}\nResponse was: {response_text[:500]}...")
-
-                        def merge_and_deduplicate_sweeps(samples):
-                            if not samples: return samples
-                            sweeps = []
-                            current_sweep = []
-                            last_p = None
-                            for s in samples:
-                                p = s.get("Pressure_psi")
-                                if p is not None:
-                                    if last_p is not None and p <= last_p:
-                                        if current_sweep: sweeps.append(current_sweep)
-                                        current_sweep = []
-                                current_sweep.append(s)
-                                last_p = p
-                            if current_sweep: sweeps.append(current_sweep)
-                            
-                            merged_sweeps = []
-                            for sweep in sweeps:
-                                matched = False
-                                for ms in merged_sweeps:
-                                    if len(sweep) == len(ms):
-                                        match = True
-                                        for i in range(len(sweep)):
-                                            if sweep[i].get("Pressure_psi") != ms[i].get("Pressure_psi") or sweep[i].get("Porosity_percent") != ms[i].get("Porosity_percent"):
-                                                match = False
-                                                break
-                                        if match:
-                                            for i in range(len(sweep)):
-                                                for k, v in sweep[i].items():
-                                                    if v is not None and ms[i].get(k) is None:
-                                                        ms[i][k] = v
-                                            matched = True
-                                            break
-                                if not matched:
-                                    merged_sweeps.append(sweep)
-                                    
-                            result = []
-                            for ms in merged_sweeps:
-                                result.extend(ms)
-                            return result
-
-                        extracted_json = merge_and_deduplicate_sweeps(extracted_json)
-
-                        # 3. Validation Node: physical bounds & sequence checking
-                        validation_result = data_validator.validate_scal_data(extracted_json)
-                        
-                        if validation_result["status"] == "error":
-                            # Log warnings but DO NOT crash — the raw document text
-                            # is already in extracted_context and Hviel can read directly from it.
-                            _logger.warning("[Pipeline] VALIDATION WARNINGS (NON-FATAL)")
-                            for err in validation_result["errors"]:
-                                _logger.warning(f"[Pipeline] Validation: {err}")
-                            _logger.warning("[Pipeline] Continues with raw document — Hviel will read tables directly.")
-                            # Skip enrichment steps but don't crash
-                            # The raw [WORD DOCUMENT] text is already in extracted_context
-                            
-                        else:
-                            _logger.info("[Pipeline] Executing Step 3: Pure-Physics Calculations (prc_physics.py)...")
-                            from prc_physics import calculate_compressibility_sweep
-                            try:
-                                extracted_json = calculate_compressibility_sweep(extracted_json)
-                                _logger.info("[Pipeline] Enriched JSON sweep data with Pore Compressibility and Lithology.")
-                            except Exception as pe:
-                                _logger.warning(f"[Pipeline] Error during deterministic physics calculation: {pe}")
-                            
-                            # 4. Master Engineer Analysis (LLM) + Deterministic Dashboard Architect
-                            active_key = self._keys[self._current_idx] if hasattr(self, "_keys") and hasattr(self, "_current_idx") else os.getenv("GEMINI_API_KEY", "DUMMY_KEY")
-                            master_eng = MasterEngineerNode(api_key=active_key)
-                        
-                            _logger.info("[Pipeline] Running geomechanics & dashboard nodes...")
-                            engineer_report = master_eng.analyze_scal_data(extracted_json)
-
-                            # 5. DETERMINISTIC Dashboard Architect (no LLM — pure Python code emission)
-                            #    Auto-detects test type, routes scalars→gauges, arrays→curves
-                            _logger.info("[Pipeline] Triggering Universal Dashboard Architect (deterministic)...")
-                            detected_type = detect_test_type(extracted_json)
-                            _logger.info(f"[Pipeline] Auto-detected test type: {detected_type}")
-
-                            well_name_dash = "PROVISIONAL WELL"
-                            if isinstance(fr_data, dict):
-                                well_name_dash = fr_data.get("well_name") or fr_data.get("well") or "PROVISIONAL WELL"
-
-                            # Get PhysicsGuard audit from the last row if available
-                            _dash_audit = None
-                            if extracted_json and isinstance(extracted_json[-1], dict):
-                                _dash_audit = extracted_json[-1].pop("_cp_physics_audit", None)
-
-                            base_dir = Path(__file__).parent
-                            dash_output_path = str(base_dir / "outputs" / "app_dashboard.py")
-
-                            streamlit_code = generate_universal_dashboard(
-                                validated_json=extracted_json,
-                                well_name=well_name_dash,
-                                test_type=detected_type,
-                                physics_audit=_dash_audit,
-                                output_path=dash_output_path,
-                            )
-                            _logger.info(f"[Pipeline] Dashboard generated: {dash_output_path} ({len(streamlit_code)} chars)")
-                        
-                            # Generate static plots as fallback/reference
-                            outputs_dir = visualizer.generate_plots(extracted_json, streamlit_code=streamlit_code)
-                        
-                            # Save the engineer's report to outputs/reservoir_report.md
-                            report_path = str(Path(outputs_dir) / "reservoir_report.md")
-                            with open(report_path, "w", encoding="utf-8") as f:
-                                f.write(engineer_report)
-                            _logger.info(f"[Pipeline] Geomechanical report saved: {report_path}")
-                        
-                            _logger.info(f"[Pipeline] Validation success: {len(extracted_json)} samples, type={detected_type}")
-                            if validation_result.get("warnings"):
-                                for warn in validation_result["warnings"]:
-                                    _logger.warning(f"[Pipeline] Diagnostic: {warn}")
-                            _logger.info(f"[Pipeline] Outputs generated under: {outputs_dir}")
-
-                            # Populate well info and other stats for the assistant context
-                            well_name = "PROVISIONAL WELL"
-                            if isinstance(fr_data, dict):
-                                well_name = fr_data.get("well_name") or fr_data.get("well") or "PROVISIONAL WELL"
-                            _tls.last_well_name = well_name
-                        
-                            inventory = f"FILE: {fname}\nWELL: {well_name}\nIDENTIFIED TYPE: SCAL\nTOTAL ROWS: {len(extracted_json)}\n"
-                            extracted_context += f"\n\n[NEW UPLOAD INVENTORY]:\n{inventory}"
-                        
-                            sampled = extracted_json
-                            extracted_context += f"""[EXTRACTED SCAL DATA (aggregated from all tables in {fname} - WELL: {well_name})]
-    NOTE: This JSON contains data aggregated from ALL tables in the document. Columns 'Pore_Volume_Compressibility_psi_inv' and 'Deduced_Lithology' are COMPUTED (not from the source file) — do NOT display them when the user asks about a specific source table.
-
-    IMPORTANT: When the user asks about a SPECIFIC table (e.g., "Table 2.1.5", "Table 2.1.3"), do NOT use this aggregated JSON. Instead, find the table directly in the [WORD DOCUMENT] markdown text above — search for "Table (2.1.5)" or "Table 2.1.5" as a label, and read the markdown table immediately ABOVE that label. Each table in the document is labeled BELOW the table data (e.g., the table data comes first, then "Table (2.1.5)" appears after it). Show ONLY the columns that exist in that specific table.
-
-    {_json.dumps(sampled, indent=2)}
-    """
-
-                            # Also add structured json to pending_kb
-                            chunks = KnowledgeBase.chunk_text(_json.dumps(extracted_json), fname)
-                            _tls.pending_kb.extend(chunks)
-
-                        # ALWAYS persist raw text to user_files (outside if/else) so follow-up messages can recover it
-                        if email and fr_text:
-                            try:
-                                _fhash_store = hashlib.sha256(data_bytes).hexdigest()
-                                db(
-                                    "INSERT INTO user_files"
-                                    " (user_email, filename, file_hash, extracted_text, data_type, created_at)"
-                                    " VALUES (?,?,?,?,?,?)"
-                                    " ON CONFLICT(user_email, file_hash)"
-                                    " DO UPDATE SET extracted_text=EXCLUDED.extracted_text,"
-                                    " filename=EXCLUDED.filename",
-                                    (email, fname, _fhash_store, fr_text, "SCAL", time.time()),
-                                )
-                            except Exception as _ue:
-                                _logger.warning(f"[DocGen] Could not store extracted_text for {fname}: {_ue}")
-
-                except Exception as e:
-                    _logger.warning(f"SCAL Ingestion/Extraction Pipeline Warning: {e}")
-                    # DO NOT re-raise — let the chat continue with raw document text.
-                    # The raw [WORD DOCUMENT] markdown was already added to extracted_context
-                    # at line 2640, so Hviel can still read ALL tables directly.
-                    _logger.warning(f"[Pipeline] Extraction pipeline encountered an issue: {e}")
-                    _logger.warning("[Pipeline] Falling back to raw document mode — Hviel will read tables directly.")
-
                 finally:
                     try: Path(tmp_path).unlink(missing_ok=True)
                     except: pass
 
             elif "pdf" in safe_mime:
-                # Extract PDF locally — avoids 30-120s Gemini Files API upload
                 try:
                     text = _sfh_extract_pdf(data_bytes)
-                    if text.strip():
-                        extracted_context += f"\n\n[PDF DOCUMENT: {fname}]\n{text[:50000]}\n"
-                        chunks = KnowledgeBase.chunk_text(text, fname)
-                        _tls.pending_kb.extend(chunks)
+                    if text.strip() and email:
+                        _fhash_store = hashlib.sha256(data_bytes).hexdigest()
+                        db(
+                            "INSERT INTO user_files"
+                            " (user_email, filename, file_hash, extracted_text, data_type, created_at)"
+                            " VALUES (?,?,?,?,?,?)"
+                            " ON CONFLICT(user_email, file_hash)"
+                            " DO UPDATE SET extracted_text=EXCLUDED.extracted_text,"
+                            " filename=EXCLUDED.filename",
+                            (email, fname, _fhash_store, text, "PDF", time.time()),
+                        )
                 except Exception as e:
                     _logger.warning(f"[PDF Extract] {fname}: {e}")
 
-            elif "wordprocessingml" in safe_mime:
-                # Extract DOCX locally — avoids Files API upload latency
-                try:
-                    text = _sfh_extract_docx(data_bytes)
-                    if text.strip():
-                        extracted_context += f"\n\n[WORD DOCUMENT: {fname}]\n{text[:50000]}\n"
-                        chunks = KnowledgeBase.chunk_text(text, fname)
-                        _tls.pending_kb.extend(chunks)
-                except Exception as e:
-                    _logger.warning(f"[DOCX Extract] {fname}: {e}")
-
-            elif "text/plain" in safe_mime:
-                # Extract TXT locally — avoids Files API upload latency
+            elif "text/plain" in safe_mime or ext in (".txt", ".text"):
                 try:
                     content = data_bytes.decode("utf-8", errors="ignore")
-                    if content.strip():
-                        extracted_context += f"\n\n[TEXT FILE: {fname}]\n{content[:50000]}\n"
-                        chunks = KnowledgeBase.chunk_text(content, fname)
-                        _tls.pending_kb.extend(chunks)
+                    if content.strip() and email:
+                        _fhash_store = hashlib.sha256(data_bytes).hexdigest()
+                        db(
+                            "INSERT INTO user_files"
+                            " (user_email, filename, file_hash, extracted_text, data_type, created_at)"
+                            " VALUES (?,?,?,?,?,?)"
+                            " ON CONFLICT(user_email, file_hash)"
+                            " DO UPDATE SET extracted_text=EXCLUDED.extracted_text,"
+                            " filename=EXCLUDED.filename",
+                            (email, fname, _fhash_store, content, "TXT", time.time()),
+                        )
                 except Exception as e:
                     _logger.warning(f"[TXT Extract] {fname}: {e}")
-
 
 
         # ── DIRECTLY HYDRATE THE CHAT PROMPT WITH TRUE CACHE ──
@@ -3686,8 +3483,6 @@ class PRCChatAssistant:
                     has_cached_data = True
                     cached_gt = SESSION_DATA_CACHE[sid].get("ground_truth", "")
                     labeled_values = SESSION_DATA_CACHE[sid].get("labeled_values", {})
-
-        no_file_metadata = not (has_cached_data and cached_gt)
 
         # Inject the full un-truncated database structures directly into the context payload
         if has_cached_data:
@@ -3727,6 +3522,30 @@ class PRCChatAssistant:
                         _logger.info(f"[Chat] Recovered stored document text for {_sfname} ({len(stored[0][0])} chars)")
             except Exception as _dbe:
                 _logger.warning(f"[Chat] Could not retrieve stored document context: {_dbe}")
+
+        # ── HARD REFUSAL GATE (zero-hallucination data isolation) ─────────────
+        # If the user asks for file/sheet/column/sample data but this session has NO
+        # grounded data (empty cache, no recovered document, no active upload this turn),
+        # refuse outright. We never let the model answer SCAL specifics from general
+        # knowledge. General petrophysics questions (no data reference) pass through.
+        import re as _re_gate
+        _scal_data_ref = _re_gate.compile(
+            r"(?i)\b(?:sheets?|worksheets?|columns?|rows?|cells?|samples?|core\s*plugs?|"
+            r"spreadsheet|excel|uploaded|extract|tabulate|the\s+file|the\s+data|"
+            r"the\s+report|the\s+table|values?)\b"
+        )
+        if (not extracted_context) and (not f_parts) and msg and _scal_data_ref.search(msg):
+            _refusal = (
+                "⚠️ I can't answer that from this session. No SCAL file data is currently "
+                "loaded in this conversation (the session cache is empty), so I have no "
+                "verified worksheet, column, or parameter values to read from. I will not "
+                "estimate or infer petrophysical values from general knowledge.\n\n"
+                "Please upload the relevant Excel/CSV file (or use the Generate Report flow) "
+                "so every reported number is grounded in your actual data."
+            )
+            def _gen_refusal():
+                yield _refusal
+            return _gen_refusal() if stream else _refusal
 
         # Strict Context Shielding
 
@@ -3841,26 +3660,25 @@ class PRCChatAssistant:
                     if sid:
                         with SESSION_DATA_CACHE_LOCK:
                             cached_entry = SESSION_DATA_CACHE.get(sid)
-                        if cached_entry and cached_entry.get("ground_truth"):
-                            gt_text = cached_entry["ground_truth"]
-                            dynamic_system_prompt = (
-                                f"## MANDATORY_GROUND_TRUTH_INVENTORY (SESSION DATA CACHE)\n\n"
-                                f"You are provided with a MANDATORY_GROUND_TRUTH_INVENTORY extracted "
-                                f"programmatically by the Python server from the actual binary file uploaded in this session.\n"
-                                f"This inventory is ABSOLUTE TRUTH. You MUST read and cite only values/sheets/columns listed below.\n\n"
-                                f"{gt_text}\n\n"
-                                f"=========================================\n\n"
-                                f"{dynamic_system_prompt}"
-                            )
+                        if cached_entry:
+                            gt_text = cached_entry.get("ground_truth", "")
+                            labeled_vals = cached_entry.get("labeled_values", {})
+                            flat_vecs = cached_entry.get("flat_vectors", {})
                             
-                    # 2. Append no-file Metadata Flag if cache empty
-                    if no_file_metadata:
-                        dynamic_system_prompt += (
-                            "\n\n[METADATA FLAG]: No SCAL or document file data is available in this session. "
-                            "The user has not uploaded any file or the session cache is empty. Proceed with "
-                            "general petrophysics knowledge and explicitly state this constraint if appropriate."
-                        )
-
+                            extra_prompt = "## MANDATORY_GROUND_TRUTH_INVENTORY (SESSION DATA CACHE)\n\n"
+                            extra_prompt += "You are provided with a MANDATORY_GROUND_TRUTH_INVENTORY and cached data structures extracted programmatically by the Python server from the actual binary file uploaded in this session.\n"
+                            extra_prompt += "This data is ABSOLUTE TRUTH. You MUST read and cite only values/sheets/columns listed below.\n\n"
+                            
+                            if gt_text:
+                                extra_prompt += f"{gt_text}\n\n"
+                            if labeled_vals:
+                                extra_prompt += f"### CACHED LABELED VALUES:\n{_json.dumps(labeled_vals, indent=2)}\n\n"
+                            if flat_vecs:
+                                extra_prompt += f"### CACHED FLAT VECTORS:\n{_json.dumps(flat_vecs, indent=2)}\n\n"
+                                
+                            extra_prompt += "=========================================\n\n"
+                            dynamic_system_prompt = extra_prompt + dynamic_system_prompt
+                            
                     if sid or email:
                         try:
                             corrs = db("SELECT original_issue, corrected_value FROM user_corrections WHERE session_id=? OR user_email=? ORDER BY timestamp ASC", (sid or "", email or ""))
@@ -5812,14 +5630,7 @@ async def handle(
         is_new_session = session_id in ("null", "undefined", "", None) or not session_id
         valid_files = [f for f in files if getattr(f, "filename", "")]
         if is_new_session or valid_files:
-            import gc
-            with SESSION_DATA_CACHE_LOCK:
-                if sid not in SESSION_DATA_CACHE:
-                    SESSION_DATA_CACHE[sid] = {}
-                session_id_evict = sid
-                SESSION_DATA_CACHE[session_id_evict].clear()
-                SESSION_DATA_CACHE[session_id_evict]["labeled_values"] = {}
-            gc.collect()
+            evict_session(sid)
 
         email    = user_email.lower().strip() if user_email else None
 
@@ -6373,6 +6184,38 @@ TASKS_DB: dict[str, dict] = {}
 SESSION_DATA_CACHE_LOCK: threading.Lock = threading.Lock()
 SESSION_DATA_CACHE: dict[str, dict] = {}
 
+
+def evict_session(session_id: str) -> None:
+    """Single source of truth for destructive session eviction.
+
+    Clears the session's cache dict in place (dropping ground truth, labeled
+    values, and flat vectors), resets it to a clean empty shell, and forces an
+    explicit garbage-collection pass so no ghost memory survives across sessions.
+    Wired into chat init, file upload, and the explicit /api/clear-session route
+    so eviction logic can never drift between call sites again.
+    """
+    if not session_id:
+        return
+    import gc
+    with SESSION_DATA_CACHE_LOCK:
+        if session_id not in SESSION_DATA_CACHE:
+            SESSION_DATA_CACHE[session_id] = {}
+        SESSION_DATA_CACHE[session_id].clear()
+        SESSION_DATA_CACHE[session_id]["labeled_values"] = {}
+    gc.collect()
+
+
+@app.post("/api/clear-session")
+async def clear_session(session_id: str = Form(...)):
+    """Explicit destructive eviction of a session's cached SCAL data.
+    Enforces absolute isolation: clears the dict and forces gc.collect()."""
+    import re as _re
+    if not _re.match(r"^(report-)?[a-zA-Z0-9\-]+$", session_id):
+        raise HTTPException(status_code=400, detail="Invalid session_id format")
+    evict_session(session_id)
+    return {"status": "cleared", "session_id": session_id}
+
+
 def purge_all_historical_assets():
     """Wipes historical assets (T1-31, xlsx, csv) and clears memory using Path to guarantee absolute state isolation."""
     from pathlib import Path
@@ -6552,6 +6395,8 @@ def sync_document_generation_task(
                             "timestamp": time.time()
                         }
                     populate_cache_from_ground_truth(session_id, mandatory_ground_truth)
+                    if is_spreadsheet:
+                        cache_excel_data_vectors(session_id, temp_file_path)
                 _logger.info(f"[Phase 0b BG] Deterministic MANDATORY_GROUND_TRUTH_INVENTORY generated for {filename}")
             except Exception as mgt_err:
                 _logger.warning(f"[Phase 0b BG] extract_absolute_file_truth failed for {filename}: {mgt_err}")
@@ -7003,14 +6848,7 @@ async def analyze_scal(
         sid = session_id or str(uuid.uuid4())
 
         # Destructive memory eviction protocol on new file ingestion
-        import gc
-        with SESSION_DATA_CACHE_LOCK:
-            if sid not in SESSION_DATA_CACHE:
-                SESSION_DATA_CACHE[sid] = {}
-            session_id_evict = sid
-            SESSION_DATA_CACHE[session_id_evict].clear()
-            SESSION_DATA_CACHE[session_id_evict]["labeled_values"] = {}
-        gc.collect()
+        evict_session(sid)
 
         email = user_email.lower().strip() if user_email else None
         msg = (message or "Analyze petrophysical data from uploaded file.").strip()
