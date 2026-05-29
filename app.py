@@ -737,40 +737,39 @@ def verify_tool_arguments_grounded(sid: str, name: str, args: dict) -> bool:
     return True
 
 def purge_all_historical_assets():
-    """Wipes historical assets (T1-31, xlsx, csv) and clears memory to guarantee absolute state isolation."""
-    import os
-    import shutil
+    """Wipes historical assets (T1-31, xlsx, csv) and clears memory using Path to guarantee absolute state isolation."""
+    from pathlib import Path
     import gc
-    import tempfile
     _logger.info("[STARTUP-PURGE] Executing synchronous background sterilization...")
 
     # 1. Hard wipe uploads directory
-    upload_dir = "./uploads"
+    upload_dir = Path("./uploads")
     try:
-        if os.path.exists(upload_dir):
-            shutil.rmtree(upload_dir)
-        os.makedirs(upload_dir, exist_ok=True)
+        if upload_dir.exists():
+            import shutil
+            shutil.rmtree(str(upload_dir), ignore_errors=True)
+        upload_dir.mkdir(parents=True, exist_ok=True)
         _logger.info(f"[STARTUP-PURGE] Cleaned and recreated upload directory: {upload_dir}")
     except Exception as e:
         _logger.warning(f"[STARTUP-PURGE] Failed to wipe upload directory {upload_dir}: {e}")
 
     # 2. Hard wipe tmp / temp directory of any files containing 'T1-31' or ending with '.xlsx', '.csv'
     try:
-        temp_dir = tempfile.gettempdir()
+        import tempfile
+        temp_dir = Path(tempfile.gettempdir())
         purged_count = 0
-        for root, _, files in os.walk(temp_dir):
-            for file in files:
-                file_low = file.lower()
-                is_t131 = 't1-31' in file_low
-                is_excel_or_csv = file_low.endswith('.xlsx') or file_low.endswith('.xls') or file_low.endswith('.csv')
-                if is_t131 or is_excel_or_csv:
-                    file_path = os.path.join(root, file)
-                    try:
-                        if os.path.isfile(file_path):
-                            os.unlink(file_path)
+        if temp_dir.exists():
+            for item in temp_dir.rglob("*"):
+                try:
+                    if item.is_file():
+                        file_low = item.name.lower()
+                        is_t131 = 't1-31' in file_low
+                        is_excel_or_csv = file_low.endswith('.xlsx') or file_low.endswith('.xls') or file_low.endswith('.csv')
+                        if is_t131 or is_excel_or_csv:
+                            item.unlink(missing_ok=True)
                             purged_count += 1
-                    except Exception:
-                        pass
+                except Exception:
+                    pass
         _logger.info(f"[STARTUP-PURGE] Purged {purged_count} orphaned spreadsheet/T1-31 files from {temp_dir}")
     except Exception as e:
         _logger.warning(f"[STARTUP-PURGE] Failed to purge temp files: {e}")
@@ -787,7 +786,7 @@ def start_session_ttl_monitor():
     import threading
     import time
     import gc
-    import os
+    from pathlib import Path
     import tempfile
 
     def monitor_loop():
@@ -806,25 +805,22 @@ def start_session_ttl_monitor():
                 
                 if evicted_sessions:
                     _logger.info(f"[TTL-MONITOR] Evicting {len(evicted_sessions)} idle sessions: {evicted_sessions}")
-                    temp_dir = tempfile.gettempdir()
-                    upload_dir = "./uploads"
+                    temp_dir = Path(tempfile.gettempdir())
+                    upload_dir = Path("./uploads")
                     purged_files = 0
                     
                     for sid in evicted_sessions:
                         for base_dir in [temp_dir, upload_dir]:
-                            if not os.path.exists(base_dir):
+                            if not base_dir.exists():
                                 continue
                             try:
-                                for root, _, files in os.walk(base_dir):
-                                    for file in files:
-                                        if sid in file:
-                                            file_path = os.path.join(root, file)
-                                            try:
-                                                if os.path.isfile(file_path):
-                                                    os.unlink(file_path)
-                                                    purged_files += 1
-                                            except Exception:
-                                                pass
+                                for item in base_dir.rglob("*"):
+                                    if item.is_file() and sid in item.name:
+                                        try:
+                                            item.unlink(missing_ok=True)
+                                            purged_files += 1
+                                        except Exception:
+                                            pass
                             except Exception:
                                 pass
                     
