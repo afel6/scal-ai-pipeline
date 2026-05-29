@@ -12,6 +12,7 @@
 
 
 
+from pathlib import Path
 import os, io, uuid, time, re, hmac, hashlib, secrets as _secrets
 import json as _json, logging, threading, asyncio
 import anyio
@@ -149,7 +150,7 @@ _ADMIN_TOKEN_TTL: int              = 900  # 15 min
 
 DATABASE_URL  = os.getenv("DATABASE_URL", "").strip()
 
-DB_PATH       = os.path.join(os.getenv("DB_DIR", "."), "chat_history.db")
+DB_PATH       = str(Path(os.getenv("DB_DIR", ".")) / "chat_history.db")
 
 
 
@@ -714,7 +715,7 @@ def _chunk_with_overlap(text: str, chunk_words: int = 500, overlap_words: int = 
 
 def _extract_text_for_library(file_bytes: bytes, filename: str) -> str:
     """Extract plain text from PDF, DOCX, or plain text file bytes."""
-    ext = os.path.splitext(filename.lower())[1]
+    ext = Path(filename.lower()).suffix
     if ext == ".pdf":
         return _sfh_extract_pdf(file_bytes)
     if ext in (".docx", ".doc"):
@@ -734,7 +735,7 @@ def _ingest_library_file(file_bytes: bytes, filename: str, uploader_email: str) 
     if existing:
         return {"duplicate": True, "existing_file": existing[0][0]}
 
-    ext = os.path.splitext(filename.lower())[1].lstrip(".")
+    ext = Path(filename.lower()).suffix.lstrip(".")
     data_type = ext.upper() or "UNKNOWN"
 
     text = _extract_text_for_library(file_bytes, filename)
@@ -2833,11 +2834,8 @@ class PRCChatAssistant:
             finally:
 
                 try:
-
-                    os.unlink(tmp)
-
-                except OSError:
-
+                    Path(tmp).unlink(missing_ok=True)
+                except Exception:
                     pass
 
 
@@ -2916,7 +2914,7 @@ class PRCChatAssistant:
         for data_bytes, mime, fname in f_parts:
 
             safe_mime = (mime or "application/octet-stream").lower()
-            ext = os.path.splitext(fname)[1].lower() if fname else ".xlsx"
+            ext = Path(fname).suffix.lower() if fname else ".xlsx"
             is_spreadsheet = any(x in safe_mime for x in ["spreadsheet", "excel", "csv", "sheet"]) or ext in [".xlsx", ".xls", ".csv"]
             is_docx = "wordprocessingml" in safe_mime or ext in [".docx", ".doc"]
             
@@ -2978,11 +2976,7 @@ class PRCChatAssistant:
                         # The full markdown is injected directly.
 
                         # 2. LLM Extraction Node: extract structured SCAL data using extraction prompt
-                        extraction_prompt_path = os.path.join(
-                            os.path.dirname(os.path.abspath(__file__)),
-                            "prompts",
-                            "extraction_system_prompt.md"
-                        )
+                        extraction_prompt_path = str(Path(__file__).parent / "prompts" / "extraction_system_prompt.md")
                         with open(extraction_prompt_path, "r", encoding="utf-8") as f:
                             system_instruction = f.read()
 
@@ -3281,8 +3275,8 @@ class PRCChatAssistant:
                             if extracted_json and isinstance(extracted_json[-1], dict):
                                 _dash_audit = extracted_json[-1].pop("_cp_physics_audit", None)
 
-                            base_dir = os.path.dirname(os.path.abspath(__file__))
-                            dash_output_path = os.path.join(base_dir, "outputs", "app_dashboard.py")
+                            base_dir = Path(__file__).parent
+                            dash_output_path = str(base_dir / "outputs" / "app_dashboard.py")
 
                             streamlit_code = generate_universal_dashboard(
                                 validated_json=extracted_json,
@@ -3297,7 +3291,7 @@ class PRCChatAssistant:
                             outputs_dir = visualizer.generate_plots(extracted_json, streamlit_code=streamlit_code)
                         
                             # Save the engineer's report to outputs/reservoir_report.md
-                            report_path = os.path.join(outputs_dir, "reservoir_report.md")
+                            report_path = str(Path(outputs_dir) / "reservoir_report.md")
                             with open(report_path, "w", encoding="utf-8") as f:
                                 f.write(engineer_report)
                             _logger.info(f"[Pipeline] Geomechanical report saved: {report_path}")
@@ -3355,7 +3349,7 @@ class PRCChatAssistant:
                     _logger.warning("[Pipeline] Falling back to raw document mode — Hviel will read tables directly.")
 
                 finally:
-                    try: os.unlink(tmp_path)
+                    try: Path(tmp_path).unlink(missing_ok=True)
                     except: pass
 
             elif "pdf" in safe_mime:
@@ -3417,7 +3411,7 @@ class PRCChatAssistant:
                         (email, _sfname),
                     )
                     if stored and stored[0][0]:
-                        _ext = os.path.splitext(_sfname)[1].lower()
+                        _ext = Path(_sfname).suffix.lower()
                         _label = "SPREADSHEET" if _ext in (".xlsx", ".xls", ".csv") else "WORD DOCUMENT" if _ext == ".docx" else "DOCUMENT"
                         extracted_context += f"\n\n[{_label}: {_sfname}]\n{stored[0][0]}\n"
                         _logger.info(f"[Chat] Recovered stored document text for {_sfname} ({len(stored[0][0])} chars)")
@@ -3953,7 +3947,7 @@ class PRCChatAssistant:
         _debug_imbi_data = {}
 
         for data_bytes, mime, fname in (f_parts or []):
-            ext = os.path.splitext(fname)[1].lower() if fname else ".xlsx"
+            ext = Path(fname).suffix.lower() if fname else ".xlsx"
             if not ext:
                 ext = ".xlsx"
             try:
@@ -3990,8 +3984,8 @@ class PRCChatAssistant:
                         _logger.warning(f"[DocGen] SCAL extraction failed for {fname}: {_se}")
                 finally:
                     try:
-                        os.unlink(tmp_path)
-                    except OSError:
+                        Path(tmp_path).unlink(missing_ok=True)
+                    except Exception:
                         pass
             except Exception as _fe:
                 _logger.warning(f"[DocGen] File read failed for {fname}: {_fe}")
@@ -5345,12 +5339,13 @@ def sanitize_filename(filename: str) -> str:
     if not filename:
         return "unnamed_file"
     # Take only the base name (no directory components)
-    basename = os.path.basename(filename)
+    basename = Path(filename).name
     basename = basename.replace('\\', '/').split('/')[-1] # enforce base name regardless of OS separator
     # Remove directory traversal sequences (e.g. "../" or "..\\")
     basename = re.sub(r'\.\.+', '.', basename)
     # Filter characters: allow letters, numbers, spaces, dots, dashes, underscores
-    name, ext = os.path.splitext(basename)
+    path_obj = Path(basename)
+    name, ext = path_obj.stem, path_obj.suffix
     name = re.sub(r'[^\w\s\.-]', '', name)
     ext = re.sub(r'[^\w\.-]', '', ext)
     sanitized = f"{name}{ext}".strip()
@@ -5365,7 +5360,7 @@ def verify_file_signature(file_bytes: bytes, filename: str) -> bool:
     if not file_bytes:
         return True
     
-    ext = os.path.splitext(filename.lower())[1]
+    ext = Path(filename.lower()).suffix
     
     if ext in ('.xlsx', '.xlsm', '.docx'):
         # ZIP magic bytes: 'PK\x03\x04'
@@ -5452,7 +5447,7 @@ async def handle(
                 # Persist a file record for cross-session history (key_params filled later by background task)
                 try:
                     fhash = hashlib.sha256(b).hexdigest()
-                    fext  = os.path.splitext(file.filename.lower())[1].lstrip(".")
+                    fext  = Path(file.filename.lower()).suffix.lstrip(".")
                     ftype = fext.upper() or "UNKNOWN"
                     if _PG_AVAILABLE:
                         db(
@@ -5549,7 +5544,7 @@ async def handle(
 
                 filepath = await asyncio.get_running_loop().run_in_executor(None, _build_file)
 
-                basename = os.path.basename(filepath)
+                basename = Path(filepath).name
 
                 dl_url   = f"/api/download/{basename}"
 
@@ -5659,7 +5654,7 @@ async def handle(
             background_tasks.add_task(_save_summary_background, sid, email, resp_text, valid_files[0].filename)
             try:
                 import tempfile
-                ext = os.path.splitext(valid_files[0].filename or "")[1].lower() or ".xlsx"
+                ext = Path(valid_files[0].filename or "").suffix.lower() or ".xlsx"
                 with tempfile.NamedTemporaryFile(delete=False, suffix=ext) as tf:
                     tf.write(f_parts[0][0])
                     tmp_filepath = tf.name
@@ -5668,8 +5663,8 @@ async def handle(
                     _logger.info("[AutoGrader] Console Report")
                     _logger.info(result["report"])
                 finally:
-                    try: os.unlink(tmp_filepath)
-                    except OSError: pass
+                    try: Path(tmp_filepath).unlink(missing_ok=True)
+                    except Exception: pass
             except Exception as ge:
                 _logger.warning(f"[AutoGrader] Failed to execute console grade: {ge}")
 
@@ -5684,8 +5679,7 @@ async def handle(
             "breadcrumbs": getattr(_tls, "breadcrumbs", [])
         }
         try:
-            import os
-            os.makedirs("outputs", exist_ok=True)
+            Path("outputs").mkdir(parents=True, exist_ok=True)
             with open("outputs/crash_diagnostics.json", "w", encoding="utf-8") as diag_f:
                 import json as _json_diag
                 _json_diag.dump(diag, diag_f, indent=2)
@@ -5900,30 +5894,28 @@ async def kb_delete(
 
 @app.get("/api/skills/list")
 async def list_skills_endpoint():
-    skills_dir = os.path.join(os.path.dirname(__file__), "hermes_skills_library")
+    skills_dir = Path(__file__).parent / "hermes_skills_library"
     skills_list = []
     
-    if not os.path.exists(skills_dir):
+    if not skills_dir.exists():
         return {"skills": []}
         
     try:
-        categories = [d for d in os.listdir(skills_dir) if os.path.isdir(os.path.join(skills_dir, d))]
-        for cat in categories:
-            cat_path = os.path.join(skills_dir, cat)
-            skill_folders = [sf for sf in os.listdir(cat_path) if os.path.isdir(os.path.join(cat_path, sf))]
-            for sf in skill_folders:
-                skill_path = os.path.join(cat_path, sf)
-                skill_md_path = os.path.join(skill_path, "SKILL.md")
-                if os.path.exists(skill_md_path):
-                    meta = _parse_skill_md(skill_md_path)
-                    name = meta.get("name") or sf.replace("-", " ").title()
-                    desc = meta.get("description") or ""
-                    desc = re.sub(r'\s+', ' ', desc).strip()
-                    skills_list.append({
-                        "category": cat.replace("-", " ").title(),
-                        "name": name,
-                        "desc": desc
-                    })
+        for cat_dir in skills_dir.iterdir():
+            if cat_dir.is_dir():
+                for skill_dir in cat_dir.iterdir():
+                    if skill_dir.is_dir():
+                        skill_md_path = skill_dir / "SKILL.md"
+                        if skill_md_path.exists():
+                            meta = _parse_skill_md(str(skill_md_path))
+                            name = meta.get("name") or skill_dir.name.replace("-", " ").title()
+                            desc = meta.get("description") or ""
+                            desc = re.sub(r'\s+', ' ', desc).strip()
+                            skills_list.append({
+                                "category": cat_dir.name.replace("-", " ").title(),
+                                "name": name,
+                                "desc": desc
+                            })
     except Exception as e:
         _logger.error(f"[Skills List] Failed to list skills: {e}")
         raise HTTPException(status_code=500, detail=str(e))
@@ -5995,10 +5987,9 @@ def sync_document_generation_task(
     message: str = None
 ):
     try:
-        import os as _os  # Defensive: prevent UnboundLocalError on Render/Linux
         # Progress 0-10%
         TASKS_DB[session_id].update({"status": "processing", "progress": 5})
-        ext = _os.path.splitext(filename.lower())[1]
+        ext = Path(filename.lower()).suffix
         is_docx = ext == ".docx"
         is_spreadsheet = ext in [".xlsx", ".xls", ".csv"]
         
@@ -6039,11 +6030,7 @@ def sync_document_generation_task(
                 _logger.warning(f"[Phase 0b BG] Inventory generation failed for {filename}: {inv_err}")
         
         # Progress 10-30%: Extract structure from Gemini with HA client
-        extraction_prompt_path = _os.path.join(
-            _os.path.dirname(_os.path.abspath(__file__)),
-            "prompts",
-            "extraction_system_prompt.md"
-        )
+        extraction_prompt_path = str(Path(__file__).parent / "prompts" / "extraction_system_prompt.md")
         with open(extraction_prompt_path, "r", encoding="utf-8") as f:
             system_instruction = f.read()
         
@@ -6403,12 +6390,10 @@ def sync_document_generation_task(
                 "error": str(e)
             })
     finally:
-        import os as _os_cleanup  # Defensive: prevent UnboundLocalError
-        if _os_cleanup.path.exists(temp_file_path):
-            try:
-                _os_cleanup.unlink(temp_file_path)
-            except OSError:
-                pass
+        try:
+            Path(temp_file_path).unlink(missing_ok=True)
+        except Exception:
+            pass
 
 
 def async_report_compile_task(session_id: str, well_name: str):
@@ -6490,17 +6475,19 @@ async def analyze_scal(
             raise HTTPException(status_code=400, detail=f"File signature mismatch or invalid format for extension: {filename}")
             
         # Setup isolated temp file paths
-        ext = os.path.splitext(filename.lower())[1]
-        temp_fd, temp_file_path = tempfile.mkstemp(suffix=ext)
-        os.close(temp_fd)
+        ext = Path(filename.lower()).suffix
+        temp_file = tempfile.NamedTemporaryFile(delete=False, suffix=ext)
+        temp_file_path = temp_file.name
+        temp_file.close()
         
         # Safe streaming of file chunked to temp path
         try:
             await process_large_file_stream(file, temp_file_path, _MAX_UPLOAD_BYTES)
         except Exception as se:
-            if os.path.exists(temp_file_path):
-                try: os.unlink(temp_file_path)
-                except: pass
+            try:
+                Path(temp_file_path).unlink(missing_ok=True)
+            except Exception:
+                pass
             raise se
             
         # Initialize task record in TASKS_DB
@@ -6564,8 +6551,8 @@ async def download_report(filename: str):
             raise HTTPException(status_code=400, detail="Null bytes are strictly prohibited.")
             
         # Serve from the reports/ subdirectory with path-containment guard (CWE-22)
-        reports_root = _pathlib.Path(os.getcwd()) / "reports"
-        target = (reports_root / _pathlib.Path(filename).name).resolve()
+        reports_root = Path.cwd() / "reports"
+        target = (reports_root / Path(filename).name).resolve()
 
         if not str(target).startswith(str(reports_root.resolve())):
             raise HTTPException(status_code=403, detail="Access denied")
@@ -6573,7 +6560,7 @@ async def download_report(filename: str):
         if not target.is_file():
             raise HTTPException(status_code=404, detail="Report not found")
 
-        return FileResponse(str(target), filename=_pathlib.Path(filename).name)
+        return FileResponse(str(target), filename=Path(filename).name)
     except HTTPException as he:
         raise he
     except Exception as e:
@@ -6591,7 +6578,7 @@ async def api_grade_response(
     file_bytes = await file.read()
     if not verify_file_signature(file_bytes, file.filename):
         raise HTTPException(status_code=400, detail=f"File signature mismatch or invalid format for extension: {file.filename}")
-    ext = os.path.splitext(file.filename)[1].lower() or ".xlsx"
+    ext = Path(file.filename).suffix.lower() or ".xlsx"
     with tempfile.NamedTemporaryFile(delete=False, suffix=ext) as tf:
         tf.write(file_bytes)
         tmp_path = tf.name
@@ -6608,25 +6595,25 @@ async def api_grade_response(
         _logger.error(f"[Grader] {e}")
         raise HTTPException(status_code=500, detail=str(e))
     finally:
-        try: os.unlink(tmp_path)
-        except OSError: pass
+        try: Path(tmp_path).unlink(missing_ok=True)
+        except Exception: pass
 
 
 
 
 # â"€â"€ FRONTEND SERVING (SPA) â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€
 
-_DIST_DIR = os.path.join(os.path.dirname(__file__), "frontend", "dist")
+_DIST_DIR = str(Path(__file__).parent / "frontend" / "dist")
 
 # Resolved once at startup; used by serve_spa to enforce path containment (CWE-22)
 
-_DIST_DIR_PATH = _pathlib.Path(_DIST_DIR).resolve()
+_DIST_DIR_PATH = Path(_DIST_DIR).resolve()
 
 
 
-if os.path.exists(_DIST_DIR):
+if Path(_DIST_DIR).exists():
 
-    app.mount("/assets", StaticFiles(directory=os.path.join(_DIST_DIR, "assets")), name="assets")
+    app.mount("/assets", StaticFiles(directory=str(Path(_DIST_DIR) / "assets")), name="assets")
 
 
 

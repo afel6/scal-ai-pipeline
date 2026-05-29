@@ -10,7 +10,6 @@ Usage:
     # result contains: data_type, dataframes, summary, raw_text
 """
 
-import os
 import re
 import io
 from pathlib import Path
@@ -25,7 +24,7 @@ class SCALFileHandler:
 
     def __init__(self, file_path: str):
         self.file_path = file_path
-        self.extension = os.path.splitext(file_path)[1].lower()
+        self.extension = Path(file_path).suffix.lower()
         self.sheet_names = []
         self.raw_data = {}      # sheet_name -> DataFrame (raw, no header)
         self.data_type = None   # identified SCAL type
@@ -216,7 +215,7 @@ class SCALFileHandler:
                                             return _val
         
         # ── 2. FILENAME FALLBACK ──
-        _stem = os.path.splitext(os.path.basename(self.file_path))[0]
+        _stem = Path(self.file_path).stem
         # Common well patterns: T1-31, A-12, B_10, etc.
         well_match = re.search(r'([A-Z]{1,3}[-_]?\d{1,4}[A-Z]?)', _stem, re.IGNORECASE)
         if well_match:
@@ -325,7 +324,7 @@ class SCALFileHandler:
           - sheet_inventories: list of per-sheet inventory dicts
           - multi_well_alert: None or {well_id: [sample_ids]} mapping
         """
-        filename = os.path.basename(self.file_path)
+        filename = Path(self.file_path).name
         inventories = []
 
         for sheet_name in self.sheet_names:
@@ -506,9 +505,8 @@ def extract_absolute_file_truth(temp_file_paths: list) -> str:
         "",
     ]
 
-    import os as _os  # Defensive: prevent UnboundLocalError on Render/Linux
     for file_path, original_filename in temp_file_paths:
-        ext = _os.path.splitext(original_filename)[1].lower()
+        ext = Path(original_filename).suffix.lower()
         lines.append(f"═══ FILE: {original_filename} ═══")
 
         try:
@@ -665,7 +663,7 @@ def detect_multi_well_mixing(raw_data: dict, filename: str = "") -> dict | None:
     )
     # Extract primary well from filename
     primary_well = None
-    fn_match = well_pattern.search(os.path.splitext(os.path.basename(filename))[0])
+    fn_match = well_pattern.search(Path(filename).stem)
     if fn_match:
         primary_well = fn_match.group(1).upper()
 
@@ -1063,7 +1061,7 @@ def _classify_track(headers, data):
 
 def robust_extract_scal(filepath):
     result = {
-        "filename": os.path.basename(filepath),
+        "filename": Path(filepath).name,
         "engine_used": None,
         "sheets": [],
         "errors": []

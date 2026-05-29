@@ -1,11 +1,11 @@
-import os
+from pathlib import Path
 import re
 import json
 import numpy as np
 
 def _read_excel(filepath):
     import pandas as pd
-    ext = os.path.splitext(filepath)[1].lower()
+    ext = Path(filepath).suffix.lower()
     engine = "xlrd" if ext == ".xls" else "openpyxl"
     xl = pd.ExcelFile(filepath, engine=engine)
     result = {"type": "excel", "sheets": {}}
@@ -535,7 +535,7 @@ def _read_image(filepath):
     import base64
     with open(filepath, "rb") as f:
         b64 = base64.b64encode(f.read()).decode("utf-8")
-    ext = os.path.splitext(filepath)[1].lower().strip(".")
+    ext = Path(filepath).suffix.lower().strip(".")
     mime = {"jpg": "image/jpeg", "jpeg": "image/jpeg",
             "png": "image/png", "gif": "image/gif",
             "webp": "image/webp"}.get(ext, "image/png")
@@ -751,7 +751,7 @@ def _detect_test_type(filename: str, sheet_names: list, all_text: str) -> str:
 
 def _extract_well(filename: str) -> str:
     """Extract well ID from filename (e.g. 'T1-31', 'CE03-41', 'Well_A12')."""
-    stem = os.path.splitext(os.path.basename(filename))[0]
+    stem = Path(filename).stem
     m = re.search(r'(?:well[_\s\-]*)?([A-Z]{1,3}[-_]?\d{1,5}(?:[-_]\d{1,3})?)',
                   stem, re.IGNORECASE)
     if m:
@@ -1064,9 +1064,9 @@ def _format_scal_for_prompt(scal: dict) -> str:
 # ──────────────────────────────────────────────────────────────────────────────
 
 def read_file(filepath, target_identifier=None):
-    if not os.path.exists(filepath):
+    if not Path(filepath).exists():
         return {"error": f"File not found: {filepath}"}
-    ext = os.path.splitext(filepath)[1].lower()
+    ext = Path(filepath).suffix.lower()
     readers = {
         ".xlsx": _read_excel,
         ".xls":  _read_excel,
@@ -1086,7 +1086,7 @@ def read_file(filepath, target_identifier=None):
         return {"error": f"Unsupported file type: {ext}"}
     try:
         data = reader(filepath)
-        data["filename"] = os.path.basename(filepath)
+        data["filename"] = Path(filepath).name
         # Add structured SCAL extraction for Excel files
         if data.get("type") == "excel":
             try:
@@ -1100,7 +1100,7 @@ def read_file(filepath, target_identifier=None):
                 }
         return data
     except Exception as e:
-        return {"error": str(e), "filename": os.path.basename(filepath)}
+        return {"error": str(e), "filename": Path(filepath).name}
 
 
 def _build_markdown_table(columns_dict, max_rows=500):
