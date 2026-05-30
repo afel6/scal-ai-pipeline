@@ -49,4 +49,8 @@ startup_*.txt
 hermes_skills_library/
 test_centrifuge.xlsx
 pytest_temp/
+temp_pytest/
+
+# Generated SCAL spreadsheet artifacts
+PRC_XLSX_*
 
