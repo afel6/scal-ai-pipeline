@@ -974,6 +974,9 @@ def cache_excel_data_vectors(sid: str, filepath: str):
             if sheet_name not in SESSION_DATA_CACHE[sid]["raw_excel_data"]:
                 SESSION_DATA_CACHE[sid]["raw_excel_data"][sheet_name] = {}
                 
+            # Store the original col_vectors preserving None for row-by-row alignment
+            SESSION_DATA_CACHE[sid]["raw_excel_data"][sheet_name]["__aligned_vectors__"] = col_vectors
+            
             for h, vals in col_vectors.items():
                 clean_vals = [v for v in vals if v is not None]
                 if len(clean_vals) >= 2:
@@ -1001,6 +1004,170 @@ def find_cached_vector(sid: str, aliases: list) -> list:
                 if a_clean == k_clean or a_clean in k_clean or k_clean in a_clean:
                     return vals
     return []
+
+
+def find_aligned_bca_columns(sid: str):
+    """
+    Looks through the session cache raw_excel_data to find aligned Depth, Porosity,
+    and Permeability columns across any sheet using flexible aliases.
+    
+    Returns (phi_list, perm_list, depth_list, sheet_name, porosity_is_percent) 
+    or (None, None, None, None, False)
+    """
+    if not sid:
+        return None, None, None, None, False
+        
+    load_session_cache_from_db(sid)
+    
+    porosity_aliases = ["porosity", "por", "phit", "phi", "porosity (%)", "por (%)"]
+    permeability_aliases = ["k air", "kair", "k_air", "perm", "k (md)", "kh", "ka", "permeability", "k horizontal"]
+    depth_aliases = ["depth", "depth (ft)", "depth (m)", "md", "tvd"]
+    
+    with SESSION_DATA_CACHE_LOCK:
+        raw_excel = SESSION_DATA_CACHE.get(sid, {}).get("raw_excel_data", {})
+        if not raw_excel:
+            return None, None, None, None, False
+            
+        # Try sheets in order
+        for sheet_name, sheet_dict in raw_excel.items():
+            aligned = sheet_dict.get("__aligned_vectors__")
+            if not aligned:
+                # Fallback to checking other keys in sheet_dict directly if __aligned_vectors__ is not present
+                aligned = {k: v for k, v in sheet_dict.items() if isinstance(v, list) and not k.startswith("__")}
+            
+            if not aligned:
+                continue
+                
+            phi_col = None
+            perm_col = None
+            depth_col = None
+            
+            for h in aligned.keys():
+                h_clean = re.sub(r'[\s\-_\.\(\)/\\%]+', '', str(h).lower())
+                if not phi_col:
+                    for alias in porosity_aliases:
+                        a_clean = re.sub(r'[\s\-_\.\(\)/\\%]+', '', str(alias).lower())
+                        if h_clean == a_clean or a_clean in h_clean or h_clean in a_clean:
+                            phi_col = h
+                            break
+                if not perm_col:
+                    for alias in permeability_aliases:
+                        a_clean = re.sub(r'[\s\-_\.\(\)/\\%]+', '', str(alias).lower())
+                        if h_clean == a_clean or a_clean in h_clean or h_clean in a_clean:
+                            perm_col = h
+                            break
+                if not depth_col:
+                    for alias in depth_aliases:
+                        a_clean = re.sub(r'[\s\-_\.\(\)/\\%]+', '', str(alias).lower())
+                        if h_clean == a_clean or a_clean in h_clean or h_clean in a_clean:
+                            depth_col = h
+                            break
+                            
+            if phi_col and perm_col:
+                phi_vals = aligned[phi_col]
+                perm_vals = aligned[perm_col]
+                depth_vals = aligned[depth_col] if depth_col else [float(i+1) for i in range(len(phi_vals))]
+                
+                # Match lengths to prevent shifts
+                max_len = max(len(phi_vals), len(perm_vals), len(depth_vals))
+                phi_vals = phi_vals + [None] * (max_len - len(phi_vals))
+                perm_vals = perm_vals + [None] * (max_len - len(perm_vals))
+                depth_vals = depth_vals + [None] * (max_len - len(depth_vals))
+                
+                clean_phi = []
+                clean_perm = []
+                clean_depth = []
+                
+                for p, k, d in zip(phi_vals, perm_vals, depth_vals):
+                    if p is not None and k is not None:
+                        try:
+                            p_f = float(p)
+                            k_f = float(k)
+                            d_f = float(d) if d is not None else float(len(clean_phi) + 1)
+                            if p_f > 0 and k_f > 0:
+                                clean_phi.append(p_f)
+                                clean_perm.append(k_f)
+                                clean_depth.append(d_f)
+                        except (ValueError, TypeError):
+                            continue
+                            
+                if len(clean_phi) >= 2:
+                    # Determine if porosity is in percent or fraction
+                    max_p = max(clean_phi)
+                    is_percent = max_p > 1.0
+                    return clean_phi, clean_perm, clean_depth, sheet_name, is_percent
+                    
+    return None, None, None, None, False
+
+
+def find_aligned_columns(sid: str, expected_aliases: dict):
+    """
+    General fuzzy column matcher. expected_aliases is a dict: {param_name: [list_of_aliases]}
+    Returns (aligned_data_dict, sheet_name) or None
+    """
+    if not sid:
+        return None
+        
+    load_session_cache_from_db(sid)
+    
+    with SESSION_DATA_CACHE_LOCK:
+        raw_excel = SESSION_DATA_CACHE.get(sid, {}).get("raw_excel_data", {})
+        if not raw_excel:
+            return None
+            
+        for sheet_name, sheet_dict in raw_excel.items():
+            aligned = sheet_dict.get("__aligned_vectors__")
+            if not aligned:
+                aligned = {k: v for k, v in sheet_dict.items() if isinstance(v, list) and not k.startswith("__")}
+            
+            if not aligned:
+                continue
+                
+            matched_cols = {}
+            for param, aliases in expected_aliases.items():
+                matched_col = None
+                for h in aligned.keys():
+                    h_clean = re.sub(r'[\s\-_\.\(\)/\\%]+', '', str(h).lower())
+                    for alias in aliases:
+                        a_clean = re.sub(r'[\s\-_\.\(\)/\\%]+', '', str(alias).lower())
+                        if h_clean == a_clean or a_clean in h_clean or h_clean in a_clean:
+                            matched_col = h
+                            break
+                    if matched_col:
+                        break
+                if matched_col:
+                    matched_cols[param] = matched_col
+            
+            # If we matched enough required columns
+            required_count = len(expected_aliases) if len(expected_aliases) <= 2 else len(expected_aliases) - 1
+            if len(matched_cols) >= required_count:
+                lengths = [len(aligned[col]) for col in matched_cols.values()]
+                max_len = max(lengths) if lengths else 0
+                
+                aligned_data = {}
+                for param, col in matched_cols.items():
+                    vals = aligned[col]
+                    aligned_data[param] = vals + [None] * (max_len - len(vals))
+                    
+                depth_aliases = ["depth", "depth (ft)", "depth (m)", "md", "tvd"]
+                depth_col = None
+                for h in aligned.keys():
+                    h_clean = re.sub(r'[\s\-_\.\(\)/\\%]+', '', str(h).lower())
+                    for alias in depth_aliases:
+                        a_clean = re.sub(r'[\s\-_\.\(\)/\\%]+', '', str(alias).lower())
+                        if h_clean == a_clean or a_clean in h_clean or h_clean in a_clean:
+                            depth_col = h
+                            break
+                    if depth_col:
+                        break
+                if depth_col:
+                    aligned_data["depth"] = aligned[depth_col] + [None] * (max_len - len(aligned[depth_col]))
+                else:
+                    aligned_data["depth"] = [float(i+1) for i in range(max_len)]
+                    
+                return aligned_data, sheet_name
+                
+    return None
 
 
 class _MissingParam(Exception):
@@ -1980,25 +2147,267 @@ class PRCChatAssistant:
             return
 
         elif name == "calculate_petrophysics_properties":
-
             script = args.get("script")
-
             model = args.get("model")
-
             p = dict(args.get("params") or {})
 
+            if model == "rqi_fzi" or script == "petrophysics.py" and model == "rqi_fzi":
+                phi = p.get("phi")
+                perm = p.get("perm")
+                depth = p.get("depth")
+                k_groups = p.get("k_groups", p.get("k", 3))
+                
+                if not phi or not perm:
+                    sid = getattr(_tls, 'current_session_id', None)
+                    clean_phi, clean_perm, clean_depth, sheet_name, is_percent = find_aligned_bca_columns(sid)
+                    if clean_phi and clean_perm:
+                        phi = clean_phi
+                        perm = clean_perm
+                        depth = clean_depth
+                        if is_percent:
+                            phi = [v / 100.0 for v in phi]
+                        p["phi"] = phi
+                        p["perm"] = perm
+                        p["depth"] = depth
+                        p["k_groups"] = k_groups
+                        _logger.info(f"[FZI/RQI AutoExtract] Auto-extracted {len(phi)} aligned samples from sheet '{sheet_name}'. Porosity percent normalized: {is_percent}")
+                    else:
+                        _logger.warning(f"[FZI/RQI AutoExtract] Could not auto-extract aligned columns for session {sid}.")
+                else:
+                    if phi and max(phi) > 1.0:
+                        phi = [v / 100.0 for v in phi]
+                        p["phi"] = phi
+                        _logger.info(f"[FZI/RQI AutoExtract] Manually passed porosity was in percent (>1.0), normalized to fraction.")
+                
+                p["k_groups"] = k_groups
+
             if script == "petrophysics.py":
+                sid = getattr(_tls, 'current_session_id', None)
+                if sid:
+                    if model == "klinkenberg":
+                        ka = p.get("ka")
+                        if not ka:
+                            res_aligned = find_aligned_columns(sid, {
+                                "ka": ["ka", "k air", "kair", "k_air", "perm", "permeability"],
+                                "pm": ["pm", "mean pressure", "mean press", "p mean", "p_mean", "pressure"]
+                            })
+                            if res_aligned:
+                                aligned_data, sheet_name = res_aligned
+                                p["ka"] = [v for v in aligned_data["ka"] if v is not None]
+                                p["pm"] = [v if v is not None else 14.7 for v in aligned_data["pm"]]
+                                p["depth"] = [v for v in aligned_data["depth"] if v is not None]
+                                _logger.info(f"[Klinkenberg AutoExtract] Extracted from '{sheet_name}'")
+                                
+                    elif model == "retort_saturation":
+                        vw = p.get("v_w_raw")
+                        vo = p.get("v_o")
+                        vp = p.get("v_p")
+                        if not vw or not vo or not vp:
+                            res_aligned = find_aligned_columns(sid, {
+                                "v_w_raw": ["v_w_raw", "vw_raw", "vw raw", "retort water", "water raw", "water volume", "water vol"],
+                                "v_o": ["v_o", "vo", "retort oil", "oil volume", "oil vol"],
+                                "v_p": ["v_p", "vp", "pore volume", "pore vol", "pv"]
+                            })
+                            if res_aligned:
+                                aligned_data, sheet_name = res_aligned
+                                p["v_w_raw"] = []
+                                p["v_o"] = []
+                                p["v_p"] = []
+                                p["depth"] = []
+                                for idx in range(len(aligned_data["v_w_raw"])):
+                                    w_val = aligned_data["v_w_raw"][idx]
+                                    o_val = aligned_data["v_o"][idx]
+                                    p_val = aligned_data["v_p"][idx]
+                                    if w_val is not None and o_val is not None and p_val is not None:
+                                        p["v_w_raw"].append(w_val)
+                                        p["v_o"].append(o_val)
+                                        p["v_p"].append(p_val)
+                                        p["depth"].append(aligned_data["depth"][idx])
+                                _logger.info(f"[Retort AutoExtract] Extracted from '{sheet_name}'")
+                                
+                    elif model == "dean_stark":
+                        vw = p.get("v_w")
+                        wpre = p.get("w_pre")
+                        wpost = p.get("w_post")
+                        vp = p.get("v_p")
+                        if not vw or not wpre or not wpost or not vp:
+                            res_aligned = find_aligned_columns(sid, {
+                                "v_w": ["v_w", "vw", "dean stark water", "ds water", "extracted water", "water volume", "water vol"],
+                                "w_pre": ["w_pre", "wpre", "pre-weight", "initial weight", "weight pre", "dry weight pre"],
+                                "w_post": ["w_post", "wpost", "post-weight", "dry weight post", "weight post", "weight dry"],
+                                "v_p": ["v_p", "vp", "pore volume", "pore vol", "pv"]
+                            })
+                            if res_aligned:
+                                aligned_data, sheet_name = res_aligned
+                                p["v_w"] = []
+                                p["w_pre"] = []
+                                p["w_post"] = []
+                                p["v_p"] = []
+                                p["depth"] = []
+                                for idx in range(len(aligned_data["v_w"])):
+                                    w_val = aligned_data["v_w"][idx]
+                                    pre_val = aligned_data["w_pre"][idx]
+                                    post_val = aligned_data["w_post"][idx]
+                                    p_val = aligned_data["v_p"][idx]
+                                    if w_val is not None and pre_val is not None and post_val is not None and p_val is not None:
+                                        p["v_w"].append(w_val)
+                                        p["w_pre"].append(pre_val)
+                                        p["w_post"].append(post_val)
+                                        p["v_p"].append(p_val)
+                                        p["depth"].append(aligned_data["depth"][idx])
+                                _logger.info(f"[Dean-Stark AutoExtract] Extracted from '{sheet_name}'")
+
+                    elif model == "boyles_law_porosity":
+                        p1 = p.get("p1")
+                        p2 = p.get("p2")
+                        vb = p.get("v_b")
+                        v1 = p.get("v1", 100.0)
+                        v_added = p.get("v_added", 80.0)
+                        if not p1 or not p2 or not vb:
+                            res_aligned = find_aligned_columns(sid, {
+                                "p1": ["p1", "pressure 1", "press 1", "initial pressure", "p_1"],
+                                "p2": ["p2", "pressure 2", "press 2", "final pressure", "expansion pressure", "p_2"],
+                                "v_b": ["v_b", "vb", "bulk volume", "bulk vol"]
+                            })
+                            if res_aligned:
+                                aligned_data, sheet_name = res_aligned
+                                p["p1"] = []
+                                p["p2"] = []
+                                p["v_b"] = []
+                                p["depth"] = []
+                                for idx in range(len(aligned_data["p1"])):
+                                    p1_val = aligned_data["p1"][idx]
+                                    p2_val = aligned_data["p2"][idx]
+                                    vb_val = aligned_data["v_b"][idx]
+                                    if p1_val is not None and p2_val is not None and vb_val is not None:
+                                        p["p1"].append(p1_val)
+                                        p["p2"].append(p2_val)
+                                        p["v_b"].append(vb_val)
+                                        p["depth"].append(aligned_data["depth"][idx])
+                                p["v1"] = v1
+                                p["v_added"] = v_added
+                                _logger.info(f"[Boyle's Law AutoExtract] Extracted from '{sheet_name}'")
+
+                    elif model == "amott_wettability":
+                        dsw_s = p.get("dsw_s")
+                        dsw_d = p.get("dsw_d")
+                        dso_s = p.get("dso_s")
+                        dso_d = p.get("dso_d")
+                        if not dsw_s or not dsw_d or not dso_s or not dso_d:
+                            res_aligned = find_aligned_columns(sid, {
+                                "dsw_s": ["dsw_s", "dsws", "spontaneous water", "imbibition water spontaneous", "dsw_spont"],
+                                "dsw_d": ["dsw_d", "dswd", "forced water", "displacement water forced", "dsw_forced"],
+                                "dso_s": ["dso_s", "dsos", "spontaneous oil", "imbibition oil spontaneous", "dso_spont"],
+                                "dso_d": ["dso_d", "dsod", "forced oil", "displacement oil forced", "dso_forced"]
+                            })
+                            if res_aligned:
+                                aligned_data, sheet_name = res_aligned
+                                p["dsw_s"] = []
+                                p["dsw_d"] = []
+                                p["dso_s"] = []
+                                p["dso_d"] = []
+                                p["depth"] = []
+                                for idx in range(len(aligned_data["dsw_s"])):
+                                    w_s = aligned_data["dsw_s"][idx]
+                                    w_d = aligned_data["dsw_d"][idx]
+                                    o_s = aligned_data["dso_s"][idx]
+                                    o_d = aligned_data["dso_d"][idx]
+                                    if w_s is not None and w_d is not None and o_s is not None and o_d is not None:
+                                        p["dsw_s"].append(w_s)
+                                        p["dsw_d"].append(w_d)
+                                        p["dso_s"].append(o_s)
+                                        p["dso_d"].append(o_d)
+                                        p["depth"].append(aligned_data["depth"][idx])
+                                _logger.info(f"[Amott AutoExtract] Extracted from '{sheet_name}'")
+
+                    elif model == "xrd_mineralogy":
+                        minerals = p.get("minerals")
+                        if not minerals:
+                            load_session_cache_from_db(sid)
+                            with SESSION_DATA_CACHE_LOCK:
+                                raw_excel = SESSION_DATA_CACHE.get(sid, {}).get("raw_excel_data", {})
+                            if raw_excel:
+                                for sheet_name, sheet_dict in raw_excel.items():
+                                    aligned = sheet_dict.get("__aligned_vectors__")
+                                    if not aligned:
+                                        aligned = {k: v for k, v in sheet_dict.items() if isinstance(v, list) and not k.startswith("__")}
+                                    if not aligned:
+                                        continue
+                                        
+                                    matched_minerals = {}
+                                    mineral_keywords = ["quartz", "feldspar", "calcite", "dolomite", "smectite", "illite", "kaolinite", "chlorite", "anhydrite", "pyrite", "clay"]
+                                    for h, vals in aligned.items():
+                                        h_clean = str(h).lower()
+                                        for keyword in mineral_keywords:
+                                            if keyword in h_clean:
+                                                matched_minerals[keyword] = [v if v is not None else 0.0 for v in vals]
+                                                break
+                                    if matched_minerals:
+                                        p["minerals"] = matched_minerals
+                                        depth_col = None
+                                        for h in aligned.keys():
+                                            if "depth" in str(h).lower() or "md" in str(h).lower():
+                                                depth_col = h
+                                                break
+                                        if depth_col:
+                                            p["depth"] = [v for v in aligned[depth_col] if v is not None]
+                                        else:
+                                            p["depth"] = [float(i+1) for i in range(len(list(matched_minerals.values())[0]))]
+                                        _logger.info(f"[XRD AutoExtract] Extracted {len(matched_minerals)} minerals from '{sheet_name}'")
+                                        break
+
+                    elif model == "nmr_t2_distribution":
+                        t2_times = p.get("t2_times")
+                        amplitudes = p.get("amplitudes")
+                        if not t2_times or not amplitudes:
+                            res_aligned = find_aligned_columns(sid, {
+                                "t2_times": ["t2_times", "t2", "bins", "t2 time", "relaxation time", "t2 ms"],
+                                "amplitudes": ["amplitudes", "amplitude", "amp", "distribution", "porosity distribution"]
+                            })
+                            if res_aligned:
+                                aligned_data, sheet_name = res_aligned
+                                p["t2_times"] = [v for v in aligned_data["t2_times"] if v is not None]
+                                p["amplitudes"] = [v for v in aligned_data["amplitudes"] if v is not None]
+                                p["depth"] = [v for v in aligned_data["depth"] if v is not None]
+                                p["cutoff_ms"] = p.get("cutoff_ms", 33.0)
+                                _logger.info(f"[NMR AutoExtract] Extracted from '{sheet_name}'")
+
+                    elif model == "ct_scan":
+                        hu_values = p.get("hu_values")
+                        if not hu_values:
+                            res_aligned = find_aligned_columns(sid, {
+                                "hu_values": ["hu_values", "hu", "ct", "ct number", "hounsfield", "density_hu"]
+                            })
+                            if res_aligned:
+                                aligned_data, sheet_name = res_aligned
+                                p["hu_values"] = [v for v in aligned_data["hu_values"] if v is not None]
+                                p["depth"] = [v for v in aligned_data["depth"] if v is not None]
+                                _logger.info(f"[CT Scan AutoExtract] Extracted from '{sheet_name}'")
+
+                    elif model == "supplementary":
+                        sg = p.get("sg")
+                        w_init = p.get("w_init")
+                        if not sg and not w_init:
+                            res_aligned = find_aligned_columns(sid, {
+                                "sg": ["sg", "specific gravity", "oil gravity sg", "oil sg", "density sg"],
+                                "w_init": ["w_init", "initial weight", "dry weight", "w_dry"],
+                                "w_acid": ["w_acid", "acid weight", "insoluble weight", "w_insoluble"]
+                            })
+                            if res_aligned:
+                                aligned_data, sheet_name = res_aligned
+                                p["depth"] = [v for v in aligned_data["depth"] if v is not None]
+                                if "sg" in aligned_data and any(v is not None for v in aligned_data["sg"]):
+                                    p["sg"] = [v for v in aligned_data["sg"] if v is not None]
+                                if "w_init" in aligned_data and "w_acid" in aligned_data:
+                                    p["w_init"] = [v for v in aligned_data["w_init"] if v is not None]
+                                    p["w_acid"] = [v for v in aligned_data["w_acid"] if v is not None]
+                                _logger.info(f"[Supplementary AutoExtract] Extracted from '{sheet_name}'")
 
                 subdir = "scalskills/scripts"
-
                 args_list = [model, _json.dumps(p)]
-
             else:
-
                 subdir = ""
-
                 p["mode"] = model
-
                 args_list = [_json.dumps(p)]
 
                 
@@ -3120,28 +3529,217 @@ class PRCChatAssistant:
             # with per-sample rows and HU summary. Format it as a visible markdown
             # table so the LLM can present results conversationally.
             if name == "calculate_petrophysics_properties" and tr.get("status") == "success" and tr.get("samples"):
+                model = args.get("model")
                 lines = []
-                lines.append(f"\n\n**RQI / FZI Calculation — {tr.get('total_samples', '?')} Samples, 3 Hydraulic Units**\n")
-                lines.append("| # | Depth | Porosity (%) | Perm (mD) | phi_z | RQI (um) | FZI (um) | HU | Quality |")
-                lines.append("|---|-------|-------------|-----------|-------|----------|----------|----|---------|")
-                for s in tr["samples"]:
-                    lines.append(
-                        f"| {s['sample']} | {s['depth']:.2f} | {s['phi_pct']:.4f} | {s['perm_md']:.4f} "
-                        f"| {s['phi_z']:.6f} | {s['rqi']:.4f} | {s['fzi']:.4f} | {s['hu']} | {s['hu_quality']} |"
-                    )
-                lines.append("")
-                lines.append("**Hydraulic Unit Summary**\n")
-                lines.append("| HU | Quality | Count | Avg Phi (%) | Avg K (mD) | Avg FZI (um) | FZI Range |")
-                lines.append("|----|---------|-------|-------------|------------|--------------|-----------|")
-                for h in tr.get("summary", []):
-                    lines.append(
-                        f"| {h['hu']} | {h['quality']} | {h['count']} | {h['avg_phi_pct']:.2f} | {h['avg_k_md']:.2f} "
-                        f"| {h['avg_fzi']:.4f} | {h['fzi_min']:.4f} - {h['fzi_max']:.4f} |"
-                    )
-                thresh = tr.get("thresholds", {})
-                if thresh:
+                
+                sid = getattr(_tls, 'current_session_id', None)
+                sheet_name = None
+                filename = None
+                if sid:
+                    try:
+                        fnames = get_filenames_from_cache(sid)
+                        if fnames:
+                            filename = fnames[0]
+                    except Exception:
+                        pass
+                
+                if model == "rqi_fzi":
+                    hu_summary = tr.get("summary", [])
+                    num_units = len(hu_summary)
+                    lines.append(f"\n\n**RQI / FZI Calculation — {tr.get('total_samples', '?')} Samples, {num_units} Hydraulic Units**\n")
+                    lines.append("| # | Depth | Porosity (%) | Perm (mD) | phi_z | RQI (um) | FZI (um) | HU | Quality |")
+                    lines.append("|---|-------|-------------|-----------|-------|----------|----------|----|---------|")
+                    for s in tr["samples"]:
+                        lines.append(
+                            f"| {s['sample']} | {s['depth']:.2f} | {s['phi_pct']:.4f} | {s['perm_md']:.4f} "
+                            f"| {s['phi_z']:.6f} | {s['rqi']:.4f} | {s['fzi']:.4f} | {s['hu']} | {s['hu_quality']} |"
+                        )
                     lines.append("")
-                    lines.append(f"**Partition Thresholds:** HU1/HU2 = {thresh.get('hu1_hu2', 'N/A')} FZI | HU2/HU3 = {thresh.get('hu2_hu3', 'N/A')} FZI")
+                    lines.append("**Hydraulic Unit Summary**\n")
+                    lines.append("| HU | Quality | Count | Avg Phi (%) | Avg K (mD) | Avg FZI (um) | FZI Range |")
+                    lines.append("|----|---------|-------|-------------|------------|--------------|-----------|")
+                    for h in hu_summary:
+                        lines.append(
+                            f"| {h['hu']} | {h['quality']} | {h['count']} | {h['avg_phi_pct']:.2f} | {h['avg_k_md']:.2f} "
+                            f"| {h['avg_fzi']:.4f} | {h['fzi_min']:.4f} - {h['fzi_max']:.4f} |"
+                        )
+                    thresh = tr.get("thresholds", {})
+                    if thresh:
+                        lines.append("")
+                        t_parts = []
+                        for idx in range(num_units - 1):
+                            tk = f"hu{idx+1}_hu{idx+2}"
+                            if tk in thresh:
+                                t_parts.append(f"HU{idx+1}/HU{idx+2} = {thresh[tk]} FZI")
+                        if t_parts:
+                            lines.append(f"**Partition Thresholds:** " + " | ".join(t_parts))
+                            
+                elif model == "klinkenberg":
+                    lines.append(f"\n\n**Klinkenberg Permeability Correction — {tr.get('total_samples', '?')} Samples**\n")
+                    lines.append("| # | Depth | Gas Perm Ka (mD) | Mean Pressure (psi) | Corrected Perm KL (mD) | Slippage b (psi) |")
+                    lines.append("|---|-------|------------------|---------------------|------------------------|------------------|")
+                    for s in tr["samples"]:
+                        lines.append(
+                            f"| {s['sample']} | {s['depth']:.2f} | {s['ka_md']:.4f} | {s['pm_psi']:.2f} | {s['kl_md']:.4f} | {s['b_slippage']:.4f} |"
+                        )
+                        
+                elif model == "retort_saturation":
+                    lines.append(f"\n\n**Fluid Saturation (Retort Method, 0.85 H2O Correction) — {tr.get('total_samples', '?')} Samples**\n")
+                    lines.append("| # | Depth | Pore Volume (cc) | Raw Water (cc) | Corrected Water (cc) | Raw Oil (cc) | Corrected Oil (cc) | Sw (%) | So (%) | Sg (%) |")
+                    lines.append("|---|-------|------------------|----------------|----------------------|--------------|--------------------|--------|--------|--------|")
+                    for s in tr["samples"]:
+                        lines.append(
+                            f"| {s['sample']} | {s['depth']:.2f} | {s['vp_cc']:.4f} | {s['vw_raw_cc']:.4f} | {s['vw_corr_cc']:.4f} | "
+                            f"{s['vo_raw_cc']:.4f} | {s['vo_corr_cc']:.4f} | {s['sw_pct']:.1f}% | {s['so_pct']:.1f}% | {s['sg_pct']:.1f}% |"
+                        )
+                        
+                elif model == "dean_stark":
+                    lines.append(f"\n\n**Fluid Saturation (Dean-Stark Toluene Extraction) — {tr.get('total_samples', '?')} Samples**\n")
+                    lines.append("| # | Depth | Pore Volume (cc) | Extracted Water (cc) | Total Weight Loss (g) | Calculated Oil (cc) | Sw (%) | So (%) | Sg (%) |")
+                    lines.append("|---|-------|------------------|----------------------|-----------------------|---------------------|--------|--------|--------|")
+                    for s in tr["samples"]:
+                        lines.append(
+                            f"| {s['sample']} | {s['depth']:.2f} | {s['vp_cc']:.4f} | {s['vw_extracted_cc']:.4f} | {s['w_loss_g']:.4f} | "
+                            f"{s['vo_calc_cc']:.4f} | {s['sw_pct']:.1f}% | {s['so_pct']:.1f}% | {s['sg_pct']:.1f}% |"
+                        )
+                        
+                elif model == "boyles_law_porosity":
+                    lines.append(f"\n\n**Boyle's Law Helium Porosity — {tr.get('total_samples', '?')} Samples**\n")
+                    lines.append("| # | Depth | P1 (psi) | P2 (psi) | Bulk Volume Vb (cc) | Grain Volume Vg (cc) | Pore Volume Vp (cc) | Porosity (%) |")
+                    lines.append("|---|-------|----------|----------|---------------------|----------------------|---------------------|--------------|")
+                    for s in tr["samples"]:
+                        lines.append(
+                            f"| {s['sample']} | {s['depth']:.2f} | {s['p1_psi']:.2f} | {s['p2_psi']:.2f} | "
+                            f"{s['vb_cc']:.4f} | {s['vg_cc']:.4f} | {s['vp_cc']:.4f} | {s['phi_pct']:.2f}% |"
+                        )
+                        
+                elif model == "amott_wettability":
+                    lines.append(f"\n\n**Amott & Amott-Harvey Wettability Index — {tr.get('total_samples', '?')} Samples**\n")
+                    lines.append("| # | Depth | Water Index Iw | Oil Index Io | Amott-Harvey Index IAH | Wettability State |")
+                    lines.append("|---|-------|----------------|--------------|------------------------|-------------------|")
+                    for s in tr["samples"]:
+                        lines.append(
+                            f"| {s['sample']} | {s['depth']:.2f} | {s['iw']:.4f} | {s['io']:.4f} | {s['iah']:.4f} | **{s['wettability_state']}** |"
+                        )
+                        
+                elif model == "xrd_mineralogy":
+                    lines.append(f"\n\n**XRD Mineralogy Analysis — {tr.get('total_samples', '?')} Samples**\n")
+                    lines.append("| # | Depth | Total Sum | Sum Check | Smectite (%) | Clay Warning | Mineral Composition Breakdown |")
+                    lines.append("|---|-------|-----------|-----------|--------------|--------------|--------------------------------|")
+                    for s in tr["samples"]:
+                        sum_status = "✅ 100%" if not s["sum_violation"] else f"❌ {s['total_sum']}%"
+                        smec_status = "⚠️ Clay Risk" if s["smectite_warning"] else "✅ Safe"
+                        comp_str = ", ".join(f"{k}: {v}%" for k, v in s["composition"].items() if v > 0)
+                        lines.append(
+                            f"| {s['sample']} | {s['depth']:.2f} | {s['total_sum']:.2f}% | {sum_status} | {s['smectite_pct']:.2f}% | {smec_status} | {comp_str} |"
+                        )
+                        
+                elif model == "nmr_t2_distribution":
+                    lines.append(f"\n\n**NMR T2 Pore-Volume Partitioning — {tr.get('total_samples', '?')} Samples**\n")
+                    lines.append("| # | Depth | T2 Cutoff (ms) | BVI Bound PV | FFI Free PV | Total NMR Porosity | Free Fluid Ratio |")
+                    lines.append("|---|-------|----------------|--------------|-------------|--------------------|------------------|")
+                    for s in tr["samples"]:
+                        lines.append(
+                            f"| {s['sample']} | {s['depth']:.2f} | {s['cutoff_ms']:.1f} | {s['bvi_bound']:.4f} | {s['ffi_free']:.4f} | "
+                            f"{s['total_nmr_porosity']:.4f} | {s['free_fluid_ratio']:.2%} |"
+                        )
+                        
+                elif model == "ct_scan":
+                    lines.append(f"\n\n**CT Scan Density & Lithology Identification — {tr.get('total_samples', '?')} Samples**\n")
+                    lines.append("| # | Depth | CT Value (HU) | Fractures Identified | Bulk Lithology |")
+                    lines.append("|---|-------|---------------|----------------------|----------------|")
+                    for s in tr["samples"]:
+                        frac_status = "🚨 Open Fracture" if s["fractured_identified"] else "✅ Competent"
+                        lines.append(
+                            f"| {s['sample']} | {s['depth']:.2f} | {s['ct_hu']:.1f} | {frac_status} | **{s['lithology']}** |"
+                        )
+                        
+                elif model == "supplementary":
+                    lines.append(f"\n\n**Supplementary Core Properties — {tr.get('total_samples', '?')} Samples**\n")
+                    has_api = "api_gravity" in tr["samples"][0]
+                    has_sol = "solubility_pct" in tr["samples"][0]
+                    
+                    header = "| # | Depth |"
+                    sep = "|---|-------|"
+                    if has_api:
+                        header += " Specific Gravity | API Gravity |"
+                        sep += "------------------|-------------|"
+                    if has_sol:
+                        header += " Initial Weight (g) | Insoluble (g) | Solubility | Carbonate Class |"
+                        sep += "--------------------|---------------|------------|-----------------|"
+                    lines.append(header)
+                    lines.append(sep)
+                    
+                    for s in tr["samples"]:
+                        row = f"| {s['sample']} | {s['depth']:.2f} |"
+                        if has_api:
+                            row += f" {s['specific_gravity']:.4f} | {s['api_gravity']:.2f}° API |"
+                        if has_sol:
+                            carb_status = "💎 Carbonate" if s["carbonate_rock"] else "🪨 Siliciclastic"
+                            row += f" {s['initial_weight_g']:.4f} | {s['insoluble_weight_g']:.4f} | {s['solubility_pct']:.2f}% | {carb_status} |"
+                        lines.append(row)
+                    
+                    if has_sol:
+                        high_sol = False
+                        for s in tr["samples"]:
+                            if s.get("solubility_pct", 0) > 50.0:
+                                high_sol = True
+                                break
+                        if high_sol:
+                            lines.append("")
+                            lines.append("> ⚠️ **Engineering Note (Acid Solubility > 50%):** High carbonate content detected. Avoid acid-based core cleaning solvents to prevent structural damage, and flag the core for carbonate-specific SCAL protocols.")
+                
+                # Fetch sheet name
+                sheet_name = None
+                try:
+                    expected_dict = {}
+                    if model == "klinkenberg":
+                        expected_dict = {"ka": ["ka"]}
+                    elif model == "retort_saturation":
+                        expected_dict = {"v_w_raw": ["v_w_raw"]}
+                    elif model == "dean_stark":
+                        expected_dict = {"v_w": ["v_w"]}
+                    elif model == "boyles_law_porosity":
+                        expected_dict = {"p1": ["p1"]}
+                    elif model == "amott_wettability":
+                        expected_dict = {"dsw_s": ["dsw_s"]}
+                    elif model == "nmr_t2_distribution":
+                        expected_dict = {"t2_times": ["t2_times"]}
+                    elif model == "ct_scan":
+                        expected_dict = {"hu_values": ["hu_values"]}
+                    elif model == "supplementary":
+                        expected_dict = {"sg": ["sg"], "w_init": ["w_init"]}
+                        
+                    if expected_dict:
+                        _, s_name = find_aligned_columns(sid, expected_dict)
+                        sheet_name = s_name
+                    elif model == "xrd_mineralogy":
+                        load_session_cache_from_db(sid)
+                        with SESSION_DATA_CACHE_LOCK:
+                            raw_excel = SESSION_DATA_CACHE.get(sid, {}).get("raw_excel_data", {})
+                        if raw_excel:
+                            for s_name, sheet_dict in raw_excel.items():
+                                aligned = sheet_dict.get("__aligned_vectors__")
+                                if not aligned:
+                                    aligned = {k: v for k, v in sheet_dict.items() if isinstance(v, list) and not k.startswith("__")}
+                                if aligned and any("quartz" in str(h).lower() or "clay" in str(h).lower() for h in aligned.keys()):
+                                    sheet_name = s_name
+                                    break
+                    else:
+                        _, _, _, s_name, _ = find_aligned_bca_columns(sid)
+                        sheet_name = s_name
+                except Exception:
+                    pass
+                
+                parts = []
+                if filename:
+                    parts.append(f"file '{filename}'")
+                if sheet_name:
+                    parts.append(f"sheet '{sheet_name}'")
+                
+                source_str = " | ".join(parts) if parts else "uploaded spreadsheet"
+                lines.append("")
+                lines.append(f"*Provenance: Aligned vectors from {source_str} | calculations performed programmatically.*")
                 lines.append("")
                 return "\n".join(lines)
 
@@ -6769,9 +7367,8 @@ def get_filenames_from_cache(sid: Optional[str]) -> list[str]:
         gt = cached.get("ground_truth", "")
     if not gt:
         return []
-    import re
     # Find all occurrences of ═══ FILE: <filename> ═══
-    filenames = re.findall(r'═══ FILE:\s*([^\s═]+)\s*═══', gt)
+    filenames = [f.strip() for f in re.findall(r'═══ FILE:\s*([^═]+)\s*═══', gt)]
     return filenames
 
 _REPORT_LATENCY_LIST: list[float] = []
