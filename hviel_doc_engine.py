@@ -606,7 +606,9 @@ class HvielDocEngine:
             return {'success': False, 'error': str(e)}
 
     def _detect_type(self, msg: str) -> str | None:
+        import re
         m = msg.lower()
+        
         # Check for explicit negation commands regarding files/documents
         negation_patterns = [
             'no word', 'no docx', 'no report', 'no document', 'no file',
@@ -615,19 +617,87 @@ class HvielDocEngine:
             'no excel', 'no xlsx', 'no spreadsheet', 'without excel',
             'no powerpoint', 'no pptx', 'no slides', 'no pdf',
             'answer here', 'answer in chat', 'answer them here', 'answere here',
-            'no files', 'no reports', 'no documents'
+            'no files', 'no reports', 'no documents', 'not give', 'not create',
+            'dont generate', "don't generate", 'not generate', 'without any file',
+            'without files', 'stop giving', 'stop generating'
         ]
         if any(pat in m for pat in negation_patterns):
             return None
 
-        if any(w in m for w in ['word', 'docx', 'report', 'document']):
-            return 'docx'
-        if any(w in m for w in ['excel', 'xlsx', 'spreadsheet']):
-            return 'xlsx'
-        if any(w in m for w in ['powerpoint', 'pptx', 'presentation', 'slides']):
-            return 'pptx'
-        if 'pdf' in m:
-            return 'pdf'
+        # Clean punctuation and whitespace for direct short command check
+        cleaned = re.sub(r'[^\w\s]', '', m).strip()
+        words = cleaned.split()
+        
+        # File type keywords - prioritized from specific to general
+        pdf_keywords = ['pdf']
+        xlsx_keywords = ['excel', 'xlsx', 'spreadsheet']
+        pptx_keywords = ['powerpoint', 'pptx', 'presentation', 'slides']
+        docx_keywords = ['word', 'docx', 'report', 'document']
+        
+        all_file_keywords = docx_keywords + xlsx_keywords + pptx_keywords + pdf_keywords
+        
+        # 1. Direct short command check (e.g. "word", "excel please", "docx", "pdf", etc.)
+        # If the user sends a very short message (3 words or fewer) containing a file type keyword,
+        # we treat it as an explicit request.
+        if len(words) <= 3 and any(w in words for w in all_file_keywords):
+            if any(w in words for w in pdf_keywords):
+                return 'pdf'
+            if any(w in words for w in xlsx_keywords):
+                return 'xlsx'
+            if any(w in words for w in pptx_keywords):
+                return 'pptx'
+            if any(w in words for w in docx_keywords):
+                return 'docx'
+                
+        # 2. Action verb check for longer conversational messages
+        strong_generation_verbs = [
+            'generate', 'create', 'compile', 'export', 'download', 
+            'build', 'convert', 'make me', 'generate me', 'create me',
+            'build me', 'give me'
+        ]
+        
+        weak_action_verbs = [
+            'give', 'write', 'make', 'output', 'provide', 'send', 
+            'save', 'extract', 'prepare', 'put in'
+        ]
+        
+        query_indicators = [
+            'why', 'what', 'where', 'who', 'when', 'how', 'which', 
+            'did you', 'do you', 'is there', 'are there', 'why did', 
+            'why is', 'why does', 'what does', 'what is', 'what are', 
+            'explain', 'describe', 'show me', 'list', 'check'
+        ]
+        
+        # Check if the user is asking an informational query
+        is_query = any(re.search(r'\b' + re.escape(q) + r'\b', m) for q in query_indicators)
+        
+        # In queries, restrict action triggers only to strong generation verbs
+        allowed_verbs = strong_generation_verbs
+        if not is_query:
+            allowed_verbs = strong_generation_verbs + weak_action_verbs
+            
+        has_action = False
+        for kw in allowed_verbs:
+            if ' ' in kw:
+                if kw in m:
+                    has_action = True
+                    break
+            else:
+                if re.search(r'\b' + re.escape(kw) + r'\b', m):
+                    has_action = True
+                    break
+                    
+        # Check target type keywords with word boundaries
+        if has_action:
+            if any(re.search(r'\b' + re.escape(w) + r'\b', m) for w in pdf_keywords):
+                return 'pdf'
+            if any(re.search(r'\b' + re.escape(w) + r'\b', m) for w in xlsx_keywords):
+                return 'xlsx'
+            if any(re.search(r'\b' + re.escape(w) + r'\b', m) for w in pptx_keywords):
+                return 'pptx'
+            if any(re.search(r'\b' + re.escape(w) + r'\b', m) for w in docx_keywords):
+                return 'docx'
+                
         return None
 
 
