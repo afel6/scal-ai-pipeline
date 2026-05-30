@@ -837,9 +837,6 @@ class _MissingParam(Exception):
     active session cache. No generic constant is ever substituted."""
 
 
-_PARAM_MISSING = object()  # sentinel: distinguishes "no default" from "default is None"
-
-
 def calculate_derived_value(formula_id: str, inputs_str: str, session_id: str):
     import re
     # Parse inputs, e.g. "phi=0.15,m=1.85" (NO generic-constant fallbacks)
@@ -852,25 +849,33 @@ def calculate_derived_value(formula_id: str, inputs_str: str, session_id: str):
             except Exception:
                 pass
             
-    # Helper to get parameter from inputs or fallback to cache
-    def get_param(name: str, default=_PARAM_MISSING) -> float:
+    # STRICT: no `default` parameter at all. A missing parameter ALWAYS raises
+    # _MissingParam — never substitutes a constant, never fabricates provenance.
+    def get_param(name: str) -> float:
         name_lower = name.lower()
         if name_lower in inputs:
             return inputs[name_lower]
-        # Fallback to cache lookup
+        # Fallback strictly to validated cache lookup only
         with SESSION_DATA_CACHE_LOCK:
             cache = SESSION_DATA_CACHE.get(session_id, {})
             labeled = cache.get("labeled_values", {})
             if name_lower in labeled:
                 return float(labeled[name_lower])
+            # whole-token (word-boundary) match only — never substring,
+            # so 'm' cannot bind to 'rm' or 'cementation_m'.
             for ck, cv in labeled.items():
-                # whole-token (word-boundary) match only — never substring,
-                # so 'm' cannot bind to 'rm' or 'cementation_m'.
                 if name_lower in re.split(r'[^a-z0-9]+', str(ck).lower()):
                     return float(cv)
-        if default is not _PARAM_MISSING:
-            return default
         raise _MissingParam(name)
+
+    def opt(name: str):
+        """Optional input: returns the value if present in inputs/cache, else None
+        (never a fabricated constant). Used only for the archie_sw alternative-input
+        chain (Ri vs Ro/Rt vs Rw)."""
+        try:
+            return get_param(name)
+        except _MissingParam:
+            return None
 
     formula_id = formula_id.lower()
     if formula_id == "archie_f":
@@ -883,11 +888,11 @@ def calculate_derived_value(formula_id: str, inputs_str: str, session_id: str):
         
     elif formula_id == "archie_sw":
         n = get_param("n")
-        ri = get_param("ri", None)
+        ri = opt("ri")
         if ri is not None:
             return (1.0 / ri) ** (1.0 / n)
-        ro = get_param("ro", None)
-        rt = get_param("rt", None)
+        ro = opt("ro")
+        rt = opt("rt")
         if ro is not None and rt is not None:
             return (ro / rt) ** (1.0 / n)
         # Fallback Sw = (a * Rw / (Rt * phi**m))**(1/n)
