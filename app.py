@@ -2263,15 +2263,18 @@ class PRCChatAssistant:
 
                 sid = getattr(_tls, 'current_session_id', None)
 
-                # SYNC: fit on the EXACT raw cached column vectors the report engine uses.
-                # LLM-supplied args are only a fallback when the session cache is empty.
+                # STRICT CACHE-ONLY: fit exclusively on the verified cached column vectors
+                # the report engine uses. NO LLM/inline-arg fallback. No cache -> terminate.
                 sw_raw, ri_raw = [], []
                 if sid:
                     sw_raw = find_cached_vector(sid, ["sw", "water saturation", "saturation"])
                     ri_raw = find_cached_vector(sid, ["ri", "resistivity index", "index"])
                 if not sw_raw or not ri_raw:
-                    sw_raw = sw_raw or args.get("sw", [])
-                    ri_raw = ri_raw or args.get("ri", [])
+                    return (
+                        "⚠️ Resistivity Index fit aborted: no verified Sw / RI vectors are present "
+                        "in the session cache. Upload the SCAL file so the fit runs strictly on "
+                        "cached laboratory data — inline or model-supplied values are not accepted."
+                    )
 
                 sample = args.get("sample_name", "Core")
 
@@ -2386,15 +2389,18 @@ class PRCChatAssistant:
 
                 sid = getattr(_tls, 'current_session_id', None)
 
-                # SYNC: fit on the EXACT raw cached column vectors the report engine uses.
-                # LLM-supplied args are only a fallback when the session cache is empty.
+                # STRICT CACHE-ONLY: fit exclusively on the verified cached column vectors
+                # the report engine uses. NO LLM/inline-arg fallback. No cache -> terminate.
                 phi_raw, ff_raw = [], []
                 if sid:
                     phi_raw = find_cached_vector(sid, ["porosity", "phi"])
                     ff_raw  = find_cached_vector(sid, ["ff", "formation factor"])
                 if not phi_raw or not ff_raw:
-                    phi_raw = phi_raw or args.get("porosity", [])
-                    ff_raw  = ff_raw or args.get("ff", [])
+                    return (
+                        "⚠️ Formation Factor fit aborted: no verified porosity / FF vectors are "
+                        "present in the session cache. Upload the SCAL file so the fit runs strictly "
+                        "on cached laboratory data — inline or model-supplied values are not accepted."
+                    )
 
                 sample  = args.get("sample_name", "Core")
 
@@ -3550,6 +3556,43 @@ class PRCChatAssistant:
             def _gen_refusal():
                 yield _refusal
             return _gen_refusal() if stream else _refusal
+
+        # ── INCOMPLETE-LOAD GATE (fluid-saturation-bound completeness) ────────
+        # Incomplete state = cache IS loaded (has_cached_data) but labeled_values is
+        # missing a critical saturation bound (Swi or Sor). A saturation/displacement
+        # question cannot be answered without those bounds, so refuse rather than fabricate.
+        # Scoped to saturation-dependent queries ON PURPOSE: FF/RI/MICP/poro-perm files
+        # legitimately carry no Swi/Sor, so a blanket refusal would brick those sessions
+        # and make the cache-only RI/FF fitters above unreachable.
+        if has_cached_data and msg:
+            def _cache_has(param: str) -> bool:
+                if param in labeled_values:
+                    return True
+                for _k in labeled_values.keys():
+                    if param in _re_gate.split(r'[^a-z0-9]+', str(_k).lower()):
+                        return True
+                return False
+            _sat_query = _re_gate.search(
+                r"(?i)\b(?:swi|sor|displacement\s+effic|recover|mobile\s+(?:oil|fluid)|"
+                r"residual\s+oil|irreducible\s+water|saturation\s+endpoint)\b",
+                msg,
+            )
+            if _sat_query:
+                _has_swi, _has_sor = _cache_has("swi"), _cache_has("sor")
+                if not (_has_swi and _has_sor):
+                    _missing = ("Swi and Sor" if not (_has_swi or _has_sor)
+                                else ("Swi" if not _has_swi else "Sor"))
+                    _refusal2 = (
+                        f"⚠️ I can't compute that: the session cache is loaded but its verified "
+                        f"parameters are missing the required fluid-saturation bound(s) ({_missing}). "
+                        f"Saturation-dependent results (displacement efficiency, recovery, residual "
+                        f"saturations) cannot be derived without them, and I will not substitute "
+                        f"assumed values. Please re-upload a file whose extraction yields explicit "
+                        f"Swi and Sor."
+                    )
+                    def _gen_refusal2():
+                        yield _refusal2
+                    return _gen_refusal2() if stream else _refusal2
 
         # Strict Context Shielding
 
