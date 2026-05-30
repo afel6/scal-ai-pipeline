@@ -926,8 +926,12 @@ def process_provenance_tokens(llm_response_text: str, session_id: str) -> str:
             if cache_key_lower in labeled:
                 val = labeled[cache_key_lower]
             else:
+                # whole-token match only — never substring. Prevents {{val:grain_density}}
+                # from fabricating a | CACHED | citation off an unrelated key. If the key is
+                # not in the session's cell index, val stays None -> unverified marker below.
+                import re as _re
                 for k, v in labeled.items():
-                    if cache_key_lower in k:
+                    if cache_key_lower in _re.split(r'[^a-z0-9]+', str(k).lower()):
                         val = v
                         break
                         
@@ -936,7 +940,7 @@ def process_provenance_tokens(llm_response_text: str, session_id: str) -> str:
                 gt = cache.get("ground_truth", "")
             if gt:
                 import re
-                match_gt = re.search(rf'(?i){re.escape(cache_key)}.*?[:=]\s*(\d+(?:\.\d+)?)', gt)
+                match_gt = re.search(rf'(?i)\b{re.escape(cache_key)}\b.*?[:=]\s*(\d+(?:\.\d+)?)', gt)
                 if match_gt:
                     val = match_gt.group(1)
                     
