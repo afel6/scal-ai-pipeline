@@ -741,6 +741,8 @@ def populate_cache_from_ground_truth(sid: str, gt_text: str):
                                         SESSION_DATA_CACHE[sid]["labeled_values"]["porosity"] = val
                                     if any(x in cl for x in ["permeability", "perm", "klinkenberg"]):
                                         SESSION_DATA_CACHE[sid]["labeled_values"]["permeability"] = val
+                                    if any(x in cl for x in ["compressibility", "pore_volume_compressibility", "pore_vol_comp"]):
+                                        SESSION_DATA_CACHE[sid]["labeled_values"]["pore_volume_compressibility"] = val
                                         
                                     # Generic slope mapping based on sheet context (slope and well_b represent Archie m and n)
                                     if "slope" in cl or "well_b" in cl:
@@ -5559,14 +5561,25 @@ async def chat_stream(
 ):
 
     if session_id in ("null", "undefined", "", None):
-
         sid = str(uuid.uuid4())
-
     else:
-
         sid = session_id
 
     email = user_email.lower().strip() if user_email else None
+
+    # Synchronously insert session row before starting producer/threads
+    if _PG_AVAILABLE:
+        await async_db(
+            "INSERT INTO sessions (sid, title, user_email, updated_at) VALUES (?, 'New Study', ?, ?) "
+            "ON CONFLICT (sid) DO UPDATE SET updated_at = EXCLUDED.updated_at",
+            (sid, email, time.time())
+        )
+    else:
+        await async_db(
+            "INSERT OR IGNORE INTO sessions (sid, title, user_email, created_at, updated_at) VALUES (?, 'New Study', ?, ?, ?)",
+            (sid, email, time.time(), time.time())
+        )
+        await async_db("UPDATE sessions SET updated_at=? WHERE sid=?", (time.time(), sid))
 
     
 
@@ -5907,6 +5920,20 @@ async def handle(
             evict_session(sid)
 
         email    = user_email.lower().strip() if user_email else None
+
+        # Synchronously insert session row at the start of request
+        if _PG_AVAILABLE:
+            await async_db(
+                "INSERT INTO sessions (sid, title, user_email, updated_at) VALUES (?, 'New Study', ?, ?) "
+                "ON CONFLICT (sid) DO UPDATE SET updated_at = EXCLUDED.updated_at",
+                (sid, email, time.time())
+            )
+        else:
+            await async_db(
+                "INSERT OR IGNORE INTO sessions (sid, title, user_email, created_at, updated_at) VALUES (?, 'New Study', ?, ?, ?)",
+                (sid, email, time.time(), time.time())
+            )
+            await async_db("UPDATE sessions SET updated_at=? WHERE sid=?", (time.time(), sid))
 
         engineer = (engineer_name or "PRC Engineering Staff").strip()
 
@@ -7307,6 +7334,22 @@ async def analyze_scal(
         email = user_email.lower().strip() if user_email else None
         msg = (message or "Analyze petrophysical data from uploaded file.").strip()
         filename = sanitize_filename(file.filename)
+
+        # Synchronously insert session row before report generation
+        if _PG_AVAILABLE:
+            await async_db(
+                "INSERT INTO sessions (sid, title, user_email, updated_at) VALUES (?, 'New Study', ?, ?) "
+                "ON CONFLICT (sid) DO UPDATE SET updated_at = EXCLUDED.updated_at",
+                (sid, email, time.time())
+            )
+        else:
+            await async_db(
+                "INSERT OR IGNORE INTO sessions (sid, title, user_email, created_at, updated_at) VALUES (?, 'New Study', ?, ?, ?)",
+                (sid, email, time.time(), time.time())
+            )
+            await async_db("UPDATE sessions SET updated_at=? WHERE sid=?", (time.time(), sid))
+
+        auto_rename_session_if_new(sid, email, filename=filename, message=msg)
         
         # Path traversal prevention using regex
         if not re.match(r"^(report-)?[a-zA-Z0-9\-]+$", sid):

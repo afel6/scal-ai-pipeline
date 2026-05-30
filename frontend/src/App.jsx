@@ -183,6 +183,10 @@ export default function App() {
 
   // Auto-load most-recent session once, after sessions list populates
   useEffect(() => {
+    if (localStorage.getItem('prc_session_id') === '') {
+      initialLoadGuard.current = true;
+      return;
+    }
     if (initialLoadGuard.current) return;
     if (!user?.email || !sessions.length) return;
     

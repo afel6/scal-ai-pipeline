@@ -26,3 +26,14 @@
   - `[x]` Execute automated chat cache test suite `pytest tests/test_chat_cache_refactor.py` (8/8 PASSED)
   - `[x]` Execute automated async remediation suite `pytest tests/test_async_remediation_hardened.py` (8/8 PASSED)
   - `[x]` Execute petrophysical math suite `pytest tests/test_displacement_efficiency.py` (4/4 PASSED)
+
+- `[x]` Phase 7: Redirect Loop Remediation
+  - `[x]` Lock `initialLoadGuard.current = true` immediately in `frontend/src/App.jsx` if `prc_session_id` in localStorage is empty.
+
+- `[x]` Phase 8: Session Registration & Naming Synchronicity
+  - `[x]` Synchronously insert session row at the start of `/api/chat/stream` before returning StreamingResponse.
+  - `[x]` Synchronously insert session row at the start of `handle` in `POST /api/chat`.
+  - `[x]` Add session registration and auto-renaming to `/api/v1/analyze-scal`.
+
+- `[x]` Phase 9: Compressibility Keyword Standardisation
+  - `[x]` Add `"compressibility"` keyword mapping in `populate_cache_from_ground_truth` to standardise `"pore_volume_compressibility"`.
