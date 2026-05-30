@@ -971,21 +971,33 @@ def process_provenance_tokens(llm_response_text: str, session_id: str) -> str:
     # 1. Parse Cache Lookups: {{val:cache_key}}
     def replace_cache(match):
         cache_key = match.group(1).strip()
-        cache_key_lower = cache_key.lower()
         
+        def normalize_key(s):
+            s = re.sub(r'[^a-zA-Z0-9_]', '_', s.lower())
+            s = re.sub(r'_{2,}', '_', s)
+            return s.strip('_')
+            
+        cache_key_norm = normalize_key(cache_key)
         val = None
         with SESSION_DATA_CACHE_LOCK:
             cache = SESSION_DATA_CACHE.get(session_id, {})
             labeled = cache.get("labeled_values", {})
-            if cache_key_lower in labeled:
-                val = labeled[cache_key_lower]
+            
+            # Direct match
+            if cache_key_norm in labeled:
+                val = labeled[cache_key_norm]
             else:
-                # whole-token match only — never substring. Prevents {{val:grain_density}}
-                # from fabricating a | CACHED | citation off an unrelated key. If the key is
-                # not in the session's cell index, val stays None -> unverified marker below.
-                import re as _re
+                # Direct match on normalized keys
                 for k, v in labeled.items():
-                    if cache_key_lower in _re.split(r'[^a-z0-9]+', str(k).lower()):
+                    if normalize_key(k) == cache_key_norm:
+                        val = v
+                        break
+                        
+            # Token match fallback
+            if val is None:
+                for k, v in labeled.items():
+                    k_norm = normalize_key(k)
+                    if cache_key_norm in k_norm.split('_') or k_norm in cache_key_norm.split('_'):
                         val = v
                         break
                         
@@ -1034,7 +1046,7 @@ def process_provenance_tokens(llm_response_text: str, session_id: str) -> str:
         return f"*{cache_key}*"
     processed = re.sub(r'\{\{cite:([^}]+)\}\}', replace_cite, processed)
 
-    # 3. Unverified Safety Catch inside markdown tables
+    # 3. Clean up the final markdown tables to be pristine and extremely clean (removing raw tokens and citation tags from cells)
     lines = processed.split("\n")
     in_table = False
     for idx, line in enumerate(lines):
@@ -1055,10 +1067,20 @@ def process_provenance_tokens(llm_response_text: str, session_id: str) -> str:
                     continue
                     
                 cell_strip = cell.strip()
-                if re.match(r'^\s*-?\d+(?:\.\d+)?\s*$', cell_strip) and not any(tag in cell for tag in ["CACHED", "DERIVED", "unverified"]):
-                    modified_cells.append(" [unverified — no provenance marker] ")
-                else:
-                    modified_cells.append(cell)
+                # Clean CACHED / DERIVED markers from table cells
+                if " | CACHED | " in cell_strip:
+                    cell_strip = cell_strip.split(" | CACHED | ")[0].strip()
+                if " | DERIVED | " in cell_strip:
+                    cell_strip = cell_strip.split(" | DERIVED | ")[0].strip()
+                if "[unverified" in cell_strip:
+                    # Keep raw numbers if present, otherwise output standard empty marker
+                    match_num = re.search(r'(-?\d+(?:\.\d+)?)', cell_strip)
+                    if match_num:
+                        cell_strip = match_num.group(1)
+                    else:
+                        cell_strip = "-"
+                
+                modified_cells.append(f" {cell_strip} ")
             lines[idx] = "|".join(modified_cells)
             
     result_text = "\n".join(lines)

@@ -692,14 +692,13 @@ def compress_traceability_ledger(text: str) -> str:
     if not text:
         return text
 
-    # Regex to match a single vertical ledger block.
-    # Handles bullet points, bolding on labels (e.g. **Source File:**), backticks, and colons.
+    # Robust, flexible regex matching all 4 fields in any spacing/newlines/hyphen separators:
     block_regex = re.compile(
-        r'(?:^[-\*\s•]*\**Source\s*File\**\s*:\s*`*(?P<source>[^`\n]+?)`*\s*\n)'
-        r'(?:[-\*\s•]*\**Worksheet\**\s*:\s*`*(?P<worksheet>[^`\n]+?)`*\s*\n)'
-        r'(?:[-\*\s•]*\**Data\s*Range\**\s*:\s*`*(?P<range>[^`\n]+?)`*\s*\n)'
-        r'(?:[-\*\s•]*\**Extraction\s*Engine\**\s*:\s*`*(?P<engine>[^`\n]+?)`*(?:\n|$))',
-        re.IGNORECASE | re.MULTILINE
+        r'[-\*\s•]*\**Source\s*File\**\s*:\s*`*(?P<source>.*?)(?=`*\s*\**Worksheet\**\s*:)'
+        r'[-\*\s•]*\**Worksheet\**\s*:\s*`*(?P<worksheet>.*?)(?=`*\s*\**Data\s*Range\**\s*:)'
+        r'[-\*\s•]*\**Data\s*Range\**\s*:\s*`*(?P<range>.*?)(?=`*\s*\**Extraction\s*Engine\**\s*:)'
+        r'[-\*\s•]*\**Extraction\s*Engine\**\s*:\s*`*(?P<engine>[^`\n\-\*]+?)(?:\s*[-#\*•\s]*\s*(?=Source\s*File|$)|\n|$)',
+        re.IGNORECASE | re.DOTALL
     )
 
     matches = list(block_regex.finditer(text))
@@ -740,10 +739,16 @@ def compress_traceability_ledger(text: str) -> str:
         ws_clean = ws.replace("*", "").replace("`", "").strip()
         dr_clean = dr.replace("*", "").replace("`", "").strip()
         
-        ws_key = ws_clean.lower().replace(" ", "").replace("_", "")
-        if ws_key in premium_map:
-            p_range, p_coords = premium_map[ws_key]
-        else:
+        # Normalize worksheet key to ignore spaces, underscores, and hyphens
+        ws_key = ws_clean.lower().replace(" ", "").replace("_", "").replace("-", "")
+        
+        p_range, p_coords = None, None
+        for pk, pv in premium_map.items():
+            if pk.lower().replace(" ", "").replace("_", "").replace("-", "") == ws_key:
+                p_range, p_coords = pv
+                break
+                
+        if p_range is None:
             # Flexible parsing fallbacks for any other sheets
             p_range = dr_clean
             if "headers" in dr_clean.lower() or "columns" in dr_clean.lower():
