@@ -607,6 +607,19 @@ class HvielDocEngine:
 
     def _detect_type(self, msg: str) -> str | None:
         m = msg.lower()
+        # Check for explicit negation commands regarding files/documents
+        negation_patterns = [
+            'no word', 'no docx', 'no report', 'no document', 'no file',
+            'dont give', "don't give", "don't create", 'dont create',
+            'without word', 'without report', 'without document',
+            'no excel', 'no xlsx', 'no spreadsheet', 'without excel',
+            'no powerpoint', 'no pptx', 'no slides', 'no pdf',
+            'answer here', 'answer in chat', 'answer them here', 'answere here',
+            'no files', 'no reports', 'no documents'
+        ]
+        if any(pat in m for pat in negation_patterns):
+            return None
+
         if any(w in m for w in ['word', 'docx', 'report', 'document']):
             return 'docx'
         if any(w in m for w in ['excel', 'xlsx', 'spreadsheet']):
@@ -616,6 +629,7 @@ class HvielDocEngine:
         if 'pdf' in m:
             return 'pdf'
         return None
+
 
     def _ask_claude(self, user_message: str, context: str, file_type: str) -> dict | None:
         """Call Claude API for structured JSON content."""

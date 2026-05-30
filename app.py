@@ -695,6 +695,7 @@ def populate_cache_from_ground_truth(sid: str, gt_text: str):
                             SESSION_DATA_CACHE[sid]["labeled_values"][col_clean] = val
                             sheet_key = f"{sheet_name}.{col}".lower().replace(" ", "_")
                             SESSION_DATA_CACHE[sid]["labeled_values"][sheet_key] = val
+    save_session_cache_to_db(sid)
 
 
 def cache_excel_data_vectors(sid: str, filepath: str):
@@ -815,12 +816,14 @@ def cache_excel_data_vectors(sid: str, filepath: str):
                     SESSION_DATA_CACHE[sid]["flat_vectors"][h.lower()] = clean_vals
                     
         _logger.info(f"[CacheVectors] Cached {len(valid_cols)} columns from sheet {sheet_name}")
+    save_session_cache_to_db(sid)
 
 
 def find_cached_vector(sid: str, aliases: list) -> list:
     """Fuzzy matches keys in flat_vectors to aliases and returns the first matched list of floats."""
     if not sid:
         return []
+    load_session_cache_from_db(sid)
     with SESSION_DATA_CACHE_LOCK:
         flat = SESSION_DATA_CACHE.get(sid, {}).get("flat_vectors", {})
         for alias in aliases:
@@ -3493,6 +3496,7 @@ class PRCChatAssistant:
         cached_gt = ""
         labeled_values = {}
         if sid:
+            load_session_cache_from_db(sid)
             with SESSION_DATA_CACHE_LOCK:
                 if sid in SESSION_DATA_CACHE and SESSION_DATA_CACHE[sid]:
                     has_cached_data = True
@@ -4771,6 +4775,7 @@ def init_db() -> None:
         "CREATE TABLE IF NOT EXISTS api_metrics (id INTEGER PRIMARY KEY AUTOINCREMENT, session_id TEXT, timestamp REAL, model TEXT, prompt_tokens INTEGER, completion_tokens INTEGER, cost_usd REAL)",
 
         "CREATE TABLE IF NOT EXISTS user_corrections (id INTEGER PRIMARY KEY AUTOINCREMENT, session_id TEXT, user_email TEXT, original_issue TEXT, corrected_value TEXT, timestamp REAL)",
+        "CREATE TABLE IF NOT EXISTS session_cache (sid TEXT PRIMARY KEY, ground_truth TEXT, labeled_values TEXT, flat_vectors TEXT, raw_excel_data TEXT, updated_at REAL)",
 
     ]
 
@@ -6254,7 +6259,80 @@ def evict_session(session_id: str) -> None:
             SESSION_DATA_CACHE[session_id] = {}
         SESSION_DATA_CACHE[session_id].clear()
         SESSION_DATA_CACHE[session_id]["labeled_values"] = {}
+    try:
+        db("DELETE FROM session_cache WHERE sid=?", (session_id,))
+    except Exception as _ev_err:
+        _logger.warning(f"[SessionCacheDB] Delete failed during eviction: {_ev_err}")
     gc.collect()
+
+
+def save_session_cache_to_db(sid: str) -> None:
+    """Serializes and persists the in-memory session cache dictionary to the SQLite database
+    to support multi-process, multi-worker, or stateless container deployments (like Render).
+    """
+    if not sid:
+        return
+    try:
+        with SESSION_DATA_CACHE_LOCK:
+            cache_data = SESSION_DATA_CACHE.get(sid)
+            if not cache_data:
+                return
+            gt = cache_data.get("ground_truth", "")
+            lv = _json.dumps(cache_data.get("labeled_values", {}))
+            fv = _json.dumps(cache_data.get("flat_vectors", {}))
+            re_data = _json.dumps(cache_data.get("raw_excel_data", {}))
+            
+        db(
+            "INSERT OR REPLACE INTO session_cache (sid, ground_truth, labeled_values, flat_vectors, raw_excel_data, updated_at) "
+            "VALUES (?, ?, ?, ?, ?, ?)",
+            (sid, gt, lv, fv, re_data, time.time())
+        )
+    except Exception as e:
+        _logger.warning(f"[SessionCacheDB] Save failed for {sid}: {e}")
+
+
+def load_session_cache_from_db(sid: str) -> None:
+    """Restores the session cache from the SQLite database if it's missing from the in-memory dict.
+    Ensures that any Gunicorn/Uvicorn worker process has access to the uploaded file's extracted data.
+    """
+    if not sid:
+        return
+    try:
+        with SESSION_DATA_CACHE_LOCK:
+            if sid in SESSION_DATA_CACHE and SESSION_DATA_CACHE[sid] and SESSION_DATA_CACHE[sid].get("ground_truth"):
+                return
+                
+        rows = db("SELECT ground_truth, labeled_values, flat_vectors, raw_excel_data FROM session_cache WHERE sid=?", (sid,))
+        if not rows:
+            return
+            
+        gt, lv_json, fv_json, re_json = rows[0]
+        try:
+            lv = _json.loads(lv_json) if lv_json else {}
+        except Exception:
+            lv = {}
+        try:
+            fv = _json.loads(fv_json) if fv_json else {}
+        except Exception:
+            fv = {}
+        try:
+            re_data = _json.loads(re_json) if re_json else {}
+        except Exception:
+            re_data = {}
+            
+        with SESSION_DATA_CACHE_LOCK:
+            if sid not in SESSION_DATA_CACHE:
+                SESSION_DATA_CACHE[sid] = {}
+            SESSION_DATA_CACHE[sid]["ground_truth"] = gt
+            SESSION_DATA_CACHE[sid]["labeled_values"] = lv
+            SESSION_DATA_CACHE[sid]["flat_vectors"] = fv
+            SESSION_DATA_CACHE[sid]["raw_excel_data"] = re_data
+            SESSION_DATA_CACHE[sid]["timestamp"] = time.time()
+            
+        _logger.info(f"[SessionCacheDB] Restored cache for {sid} from DB: {len(gt)} chars ground truth, {len(lv)} labeled values.")
+    except Exception as e:
+        _logger.warning(f"[SessionCacheDB] Load failed for {sid}: {e}")
+
 
 
 @app.post("/api/clear-session")
