@@ -654,7 +654,6 @@ def populate_cache_from_ground_truth(sid: str, gt_text: str):
         if "labeled_values" not in SESSION_DATA_CACHE[sid]:
             SESSION_DATA_CACHE[sid]["labeled_values"] = {}
             
-        import re
         import ast
         
         # Split by SHEET:
@@ -1176,7 +1175,6 @@ class _MissingParam(Exception):
 
 
 def calculate_derived_value(formula_id: str, inputs_str: str, session_id: str):
-    import re
     # Parse inputs, e.g. "phi=0.15,m=1.85" (NO generic-constant fallbacks)
     inputs = {}
     for part in inputs_str.split(","):
@@ -1294,7 +1292,6 @@ def process_provenance_tokens(llm_response_text: str, session_id: str) -> str:
             with SESSION_DATA_CACHE_LOCK:
                 gt = cache.get("ground_truth", "")
             if gt:
-                import re
                 match_gt = re.search(rf'(?i)\b{re.escape(cache_key)}\b.*?[:=]\s*(\d+(?:\.\d+)?)', gt)
                 if match_gt:
                     val = match_gt.group(1)
@@ -2578,7 +2575,6 @@ class PRCChatAssistant:
                 model = fc.args.get("model")
                 # If this is not the last call for this model, strip the __PRC_PLOT__ block
                 if model and last_call_index.get(model) != idx:
-                    import re
                     cleaned_fmt = re.sub(r'__PRC_PLOT__\n.*?\n\n', '', fmt, flags=re.DOTALL)
                     formatted_outputs.append(cleaned_fmt)
                 else:
@@ -4338,8 +4334,7 @@ class PRCChatAssistant:
         # grounded data (empty cache, no recovered document, no active upload this turn),
         # refuse outright. We never let the model answer SCAL specifics from general
         # knowledge. General petrophysics questions (no data reference) pass through.
-        import re as _re_gate
-        _scal_data_ref = _re_gate.compile(
+        _scal_data_ref = re.compile(
             r"(?i)\b(?:sheets?|worksheets?|columns?|rows?|cells?|samples?|core\s*plugs?|"
             r"spreadsheet|excel|uploaded|extract|tabulate|the\s+file|the\s+data|"
             r"the\s+report|the\s+table|values?)\b"
@@ -7251,8 +7246,7 @@ def auto_rename_session_if_new(sid: str, email: str, filename: str = None, messa
 async def clear_session(session_id: str = Form(...)):
     """Explicit destructive eviction of a session's cached SCAL data.
     Enforces absolute isolation: clears the dict and forces gc.collect()."""
-    import re as _re
-    if not _re.match(r"^(report-)?[a-zA-Z0-9\-]+$", session_id):
+    if not re.match(r"^(report-)?[a-zA-Z0-9\-]+$", session_id):
         raise HTTPException(status_code=400, detail="Invalid session_id format")
     evict_session(session_id)
     return {"status": "cleared", "session_id": session_id}
