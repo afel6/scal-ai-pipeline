@@ -185,9 +185,16 @@ export default function App() {
   useEffect(() => {
     if (initialLoadGuard.current) return;
     if (!user?.email || !sessions.length) return;
-    const saved = localStorage.getItem('prc_session_id');
-    if (saved) return; // already loaded
+    
+    // Set guard to true immediately to ensure this auto-load NEVER triggers again
     initialLoadGuard.current = true;
+    
+    const saved = localStorage.getItem('prc_session_id');
+    // If a saved session preference exists (even an empty string for New Chat), respect it!
+    if (saved !== null && saved !== 'null' && saved !== 'undefined') {
+      return;
+    }
+    
     handleLoadSession(sessions[0].id);
   }, [user, sessions, handleLoadSession]);
 
@@ -215,10 +222,10 @@ export default function App() {
   // ── rename session ────────────────────────────────────────────────────────
   const handleRenameSession = useCallback(async (sid, newTitle) => {
     if (!sid || !newTitle) return;
-    const form = new URLSearchParams({ title: newTitle });
+    const form = new URLSearchParams({ title: newTitle, email: user?.email || '' });
     await axios.post(`${API_URL}/api/session/${sid}/title`, form);
     await refreshSessions();
-  }, [refreshSessions]);
+  }, [refreshSessions, user]);
 
   // ── admin PIN → backend auth ───────────────────────────────────────────────
   const handleAdminAuth = useCallback(async (pin) => {

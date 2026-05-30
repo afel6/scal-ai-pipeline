@@ -67,8 +67,13 @@ class TestHaltingGate:
 
     @pytest.fixture(autouse=True)
     def clear_cache(self):
+        from app import db
         with SESSION_DATA_CACHE_LOCK:
             SESSION_DATA_CACHE.clear()
+        try:
+            db("DELETE FROM session_cache")
+        except Exception:
+            pass
 
     _REFUSAL_MARKER = "cache is empty"
 

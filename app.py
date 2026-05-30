@@ -673,13 +673,13 @@ def populate_cache_from_ground_truth(sid: str, gt_text: str):
             grid = []
             for line in lines[1:]:
                 if "COLUMNS (" in line:
-                    col_str = line.split("):")[-1].strip()
+                    col_str = line.partition("):")[2].strip()
                     try:
                         cols = ast.literal_eval(col_str)
                     except Exception:
                         cols = [c.strip().strip("'\"[]") for c in col_str.split(",")]
                 elif "    ROW " in line:
-                    row_vals_str = line.split(":")[-1].strip()
+                    row_vals_str = line.partition(":")[2].strip()
                     try:
                         row_vals = ast.literal_eval(row_vals_str)
                         grid.append(row_vals)
@@ -741,7 +741,161 @@ def populate_cache_from_ground_truth(sid: str, gt_text: str):
                                         SESSION_DATA_CACHE[sid]["labeled_values"]["porosity"] = val
                                     if any(x in cl for x in ["permeability", "perm", "klinkenberg"]):
                                         SESSION_DATA_CACHE[sid]["labeled_values"]["permeability"] = val
+                                        
+                                    # Generic slope mapping based on sheet context (slope and well_b represent Archie m and n)
+                                    if "slope" in cl or "well_b" in cl:
+                                        sh_lower = sheet_name.lower()
+                                        if "ri" in sh_lower or "resistivity_index" in sh_lower:
+                                            SESSION_DATA_CACHE[sid]["labeled_values"]["n"] = abs(val)
+                                        elif "ff" in sh_lower or "formation_factor" in sh_lower:
+                                            SESSION_DATA_CACHE[sid]["labeled_values"]["m"] = abs(val)
     save_session_cache_to_db(sid)
+
+
+def _detect_main_table(df):
+    """
+    Scans a pandas DataFrame to find the contiguous row range and headers of the primary data table.
+    Returns (data_start_row, headers) or (None, None).
+    """
+    import pandas as pd
+    import numpy as np
+    n_rows, n_cols = df.shape
+    if n_rows < 2 or n_cols < 1:
+        return None, None
+        
+    def is_numeric(val):
+        if pd.isna(val):
+            return False
+        if isinstance(val, bool):
+            return False
+        if isinstance(val, (int, float, np.integer, np.floating)):
+            return True
+        if isinstance(val, str):
+            try:
+                float(val)
+                return True
+            except ValueError:
+                return False
+        return False
+
+    # 1. Identify candidate data rows
+    candidates = []
+    for r in range(n_rows):
+        row_vals = df.iloc[r].tolist()
+        num_count = sum(1 for val in row_vals if is_numeric(val))
+        non_empty = sum(1 for val in row_vals if pd.notna(val) and str(val).strip() != "")
+        if num_count >= 1 and num_count >= 0.5 * non_empty:
+            candidates.append(r)
+            
+    if not candidates:
+        return None, None
+        
+    # 2. Group into contiguous rows
+    groups = []
+    current_group = [candidates[0]]
+    for r in candidates[1:]:
+        if r == current_group[-1] + 1:
+            current_group.append(r)
+        else:
+            groups.append(current_group)
+            current_group = [r]
+    groups.append(current_group)
+    
+    # 3. Score groups to find the main data table
+    best_group = None
+    best_score = -1
+    best_numeric_cols = []
+    
+    for group in groups:
+        numeric_cols = []
+        for c in range(n_cols):
+            col_vals = [df.iloc[r, c] for r in group]
+            num_in_col = sum(1 for val in col_vals if is_numeric(val))
+            if num_in_col >= 0.7 * len(group):
+                numeric_cols.append(c)
+        
+        score = len(group) * len(numeric_cols)
+        if score > best_score:
+            best_score = score
+            best_group = group
+            best_numeric_cols = numeric_cols
+            
+    if best_score < 4 or not best_group:
+        # Fallback to simple backward-compatible heuristic
+        data_start_row = None
+        for i in range(n_rows):
+            row_vals = df.iloc[i].tolist()
+            num_count = sum(1 for v in row_vals if pd.notna(v) and isinstance(v, (int, float)) and not isinstance(v, bool))
+            if num_count >= 1:
+                data_start_row = i
+                break
+        if data_start_row is None:
+            data_start_row = 1
+            
+        headers = []
+        for col_idx in range(n_cols):
+            parts = []
+            for r in range(max(0, data_start_row)):
+                cell_val = df.iloc[r, col_idx]
+                cell_str = str(cell_val).strip() if pd.notna(cell_val) else ""
+                if cell_str and cell_str.lower() != "nan":
+                    parts.append(cell_str)
+            headers.append(" ".join(parts) if parts else f"col_{col_idx}")
+            
+        seen = {}
+        unique_headers = []
+        for h in headers:
+            h_clean = h.strip()
+            if not h_clean:
+                h_clean = "unnamed"
+            if h_clean in seen:
+                seen[h_clean] += 1
+                unique_headers.append(f"{h_clean}_{seen[h_clean]}")
+            else:
+                seen[h_clean] = 1
+                unique_headers.append(h_clean)
+        headers = unique_headers
+        return data_start_row, headers
+        
+    data_start_row = best_group[0]
+    
+    # 4. Find the header row by scanning upwards from data_start_row - 1
+    header_row_idx = None
+    for r in range(data_start_row - 1, -1, -1):
+        row_vals = df.iloc[r].tolist()
+        non_empty_strings = [str(val).strip() for val in row_vals if pd.notna(val) and str(val).strip() != "" and not is_numeric(val)]
+        if len(non_empty_strings) >= 1:
+            header_row_idx = r
+            break
+            
+    if header_row_idx is None:
+        header_row_idx = max(0, data_start_row - 1)
+        
+    # 5. Extract headers
+    headers = []
+    for col_idx in range(n_cols):
+        parts = []
+        for r in range(header_row_idx, data_start_row):
+            cell_val = df.iloc[r, col_idx]
+            cell_str = str(cell_val).strip() if pd.notna(cell_val) else ""
+            if cell_str and cell_str.lower() != "nan":
+                parts.append(cell_str)
+        headers.append(" ".join(parts) if parts else f"col_{col_idx}")
+        
+    seen = {}
+    unique_headers = []
+    for h in headers:
+        h_clean = h.strip()
+        if not h_clean:
+            h_clean = "unnamed"
+        if h_clean in seen:
+            seen[h_clean] += 1
+            unique_headers.append(f"{h_clean}_{seen[h_clean]}")
+        else:
+            seen[h_clean] = 1
+            unique_headers.append(h_clean)
+            
+    return data_start_row, unique_headers
 
 
 def cache_excel_data_vectors(sid: str, filepath: str):
@@ -789,44 +943,10 @@ def cache_excel_data_vectors(sid: str, filepath: str):
     for sheet_name, df in sheets_dict.items():
         if df.empty:
             continue
-        n_rows, n_cols = df.shape
-        if n_rows < 2 or n_cols < 1:
+        data_start_row, headers = _detect_main_table(df)
+        if data_start_row is None or headers is None:
             continue
-            
-        data_start_row = None
-        for i in range(n_rows):
-            row_vals = df.iloc[i].tolist()
-            num_count = sum(1 for v in row_vals if pd.notna(v) and isinstance(v, (int, float)) and not isinstance(v, bool))
-            if num_count >= 1:
-                data_start_row = i
-                break
-                
-        if data_start_row is None:
-            data_start_row = 1
-            
-        headers = []
-        for col_idx in range(n_cols):
-            parts = []
-            for r in range(max(0, data_start_row)):
-                cell_val = df.iloc[r, col_idx]
-                cell_str = str(cell_val).strip() if pd.notna(cell_val) else ""
-                if cell_str and cell_str.lower() != "nan":
-                    parts.append(cell_str)
-            headers.append(" ".join(parts) if parts else f"col_{col_idx}")
-            
-        seen = {}
-        unique_headers = []
-        for h in headers:
-            h_clean = h.strip()
-            if not h_clean:
-                h_clean = "unnamed"
-            if h_clean in seen:
-                seen[h_clean] += 1
-                unique_headers.append(f"{h_clean}_{seen[h_clean]}")
-            else:
-                seen[h_clean] = 1
-                unique_headers.append(h_clean)
-        headers = unique_headers
+        n_rows, n_cols = df.shape
 
         col_vectors = {h: [] for h in headers}
         for r in range(data_start_row, n_rows):
@@ -5358,6 +5478,18 @@ def get_session(sid: str, email: str = None):
 
     title = title_row[0][0] if title_row else "New Study"
 
+    if not title_row:
+
+        # Pre-create the empty session so it exists in the database and sidebar immediately
+
+        if _PG_AVAILABLE:
+
+            db("INSERT INTO sessions (sid, title, user_email, updated_at) VALUES (?, 'New Study', ?, ?) ON CONFLICT (sid) DO NOTHING", (sid, email or "", time.time()))
+
+        else:
+
+            db("INSERT OR IGNORE INTO sessions (sid, title, user_email, created_at, updated_at) VALUES (?, 'New Study', ?, ?, ?)", (sid, email or "", time.time(), time.time()))
+
     return {
 
         "status":"ok",
@@ -5504,6 +5636,8 @@ async def chat_stream(
                        (sid, email, time.time(), time.time()))
 
                     db("UPDATE sessions SET updated_at=? WHERE sid=?", (time.time(), sid))
+
+                auto_rename_session_if_new(sid, email, filename=None, message=message)
 
 
 
@@ -5866,6 +6000,9 @@ async def handle(
                (sid, email, time.time(), time.time()))
 
             await async_db("UPDATE sessions SET updated_at=? WHERE sid=?", (time.time(), sid))
+
+        f_name_rename = valid_files[0].filename if valid_files else None
+        auto_rename_session_if_new(sid, email, filename=f_name_rename, message=message)
 
 
 
@@ -6350,7 +6487,7 @@ def evict_session(session_id: str) -> None:
 
 
 def save_session_cache_to_db(sid: str) -> None:
-    """Serializes and persists the in-memory session cache dictionary to the SQLite database
+    """Serializes and persists the in-memory session cache dictionary to the database
     to support multi-process, multi-worker, or stateless container deployments (like Render).
     """
     if not sid:
@@ -6366,8 +6503,14 @@ def save_session_cache_to_db(sid: str) -> None:
             re_data = _json.dumps(cache_data.get("raw_excel_data", {}))
             
         db(
-            "INSERT OR REPLACE INTO session_cache (sid, ground_truth, labeled_values, flat_vectors, raw_excel_data, updated_at) "
-            "VALUES (?, ?, ?, ?, ?, ?)",
+            "INSERT INTO session_cache (sid, ground_truth, labeled_values, flat_vectors, raw_excel_data, updated_at) "
+            "VALUES (?, ?, ?, ?, ?, ?) "
+            "ON CONFLICT (sid) DO UPDATE SET "
+            "  ground_truth = EXCLUDED.ground_truth, "
+            "  labeled_values = EXCLUDED.labeled_values, "
+            "  flat_vectors = EXCLUDED.flat_vectors, "
+            "  raw_excel_data = EXCLUDED.raw_excel_data, "
+            "  updated_at = EXCLUDED.updated_at",
             (sid, gt, lv, fv, re_data, time.time())
         )
     except Exception as e:
@@ -6416,6 +6559,67 @@ def load_session_cache_from_db(sid: str) -> None:
     except Exception as e:
         _logger.warning(f"[SessionCacheDB] Load failed for {sid}: {e}")
 
+
+def auto_rename_session_if_new(sid: str, email: str, filename: str = None, message: str = None):
+    """Automatically assigns a descriptive title to a session if its current title is 'New Study'."""
+    try:
+        if not sid:
+            return
+        const_email = email.lower().strip() if email else ""
+        
+        _logger.info(f"[AutoRename] Invoked for session {sid} (filename={filename}, message_len={len(message) if message else 0})")
+        
+        # Check current title
+        rows = db("SELECT title FROM sessions WHERE sid=?", (sid,))
+        current_title = "New Study"
+        exists = False
+        if rows:
+            current_title = rows[0][0]
+            exists = True
+            
+        _logger.info(f"[AutoRename] Session exists={exists}, current title: '{current_title}'")
+            
+        if current_title != "New Study" and current_title.strip() != "":
+            _logger.info(f"[AutoRename] Title already customized, bypassing auto-rename.")
+            return
+            
+        # Determine new title
+        new_title = None
+        if filename:
+            # Strip extension and clean
+            base = filename.rsplit(".", 1)[0]
+            new_title = base.replace("_", " ").replace("-", " ").strip()
+            # Truncate if extremely long
+            if len(new_title) > 40:
+                new_title = new_title[:37] + "..."
+        elif message:
+            # Clean message
+            clean_msg = message.strip()
+            # Get first 5 words
+            words = clean_msg.split()
+            if words:
+                new_title = " ".join(words[:5])
+                if len(clean_msg) > len(new_title):
+                    new_title += "..."
+                    
+        if new_title:
+            if exists:
+                db("UPDATE sessions SET title = ?, updated_at = ? WHERE sid = ?", (new_title, time.time(), sid))
+                _logger.info(f"[AutoRename] Successfully updated title in DB to: '{new_title}'")
+            else:
+                _logger.info(f"[AutoRename] Session row does not exist yet, pre-creating with title: '{new_title}'")
+                if _PG_AVAILABLE:
+                    db("INSERT INTO sessions (sid, title, user_email, updated_at) VALUES (?, ?, ?, ?) "
+                       "ON CONFLICT (sid) DO UPDATE SET title = EXCLUDED.title, updated_at = EXCLUDED.updated_at",
+                       (sid, new_title, const_email, time.time()))
+                else:
+                    db("INSERT OR REPLACE INTO sessions (sid, title, user_email, created_at, updated_at) VALUES (?, ?, ?, ?, ?)",
+                       (sid, new_title, const_email, time.time(), time.time()))
+                _logger.info(f"[AutoRename] Inserted session row with title '{new_title}' successfully.")
+        else:
+            _logger.info(f"[AutoRename] No descriptive title could be determined.")
+    except Exception as e:
+        _logger.warning(f"[AutoRename] Failed to auto-rename session {sid}: {e}")
 
 
 @app.post("/api/clear-session")
