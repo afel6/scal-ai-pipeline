@@ -670,6 +670,7 @@ def populate_cache_from_ground_truth(sid: str, gt_text: str):
             
             # Find columns line
             cols = []
+            grid = []
             for line in lines[1:]:
                 if "COLUMNS (" in line:
                     col_str = line.split("):")[-1].strip()
@@ -677,24 +678,69 @@ def populate_cache_from_ground_truth(sid: str, gt_text: str):
                         cols = ast.literal_eval(col_str)
                     except Exception:
                         cols = [c.strip().strip("'\"[]") for c in col_str.split(",")]
-                    break
-            
-            # Find all ROW lines
-            for line in lines[1:]:
-                if "    ROW " in line:
+                elif "    ROW " in line:
                     row_vals_str = line.split(":")[-1].strip()
                     try:
                         row_vals = ast.literal_eval(row_vals_str)
+                        grid.append(row_vals)
                     except Exception:
                         continue
-                    
-                    # Zip columns and values
-                    for col, val in zip(cols, row_vals):
-                        if val is not None and isinstance(val, (int, float)):
-                            col_clean = col.strip().lower()
-                            SESSION_DATA_CACHE[sid]["labeled_values"][col_clean] = val
-                            sheet_key = f"{sheet_name}.{col}".lower().replace(" ", "_")
-                            SESSION_DATA_CACHE[sid]["labeled_values"][sheet_key] = val
+            
+            # Zip columns and values (legacy fallback mapping)
+            for row_vals in grid:
+                for col, val in zip(cols, row_vals):
+                    if val is not None and isinstance(val, (int, float)) and not isinstance(val, bool):
+                        col_clean = col.strip().lower()
+                        SESSION_DATA_CACHE[sid]["labeled_values"][col_clean] = val
+                        sheet_key = f"{sheet_name}.{col}".lower().replace(" ", "_")
+                        SESSION_DATA_CACHE[sid]["labeled_values"][sheet_key] = val
+
+            # Advanced cell-based spatial extraction (horizontal and vertical scan)
+            full_grid = [cols] + grid
+            n_rows_g = len(full_grid)
+            for r in range(n_rows_g):
+                n_cols_g = len(full_grid[r])
+                for c in range(n_cols_g):
+                    cell = full_grid[r][c]
+                    if isinstance(cell, str) and cell.strip():
+                        # Extract value to the right
+                        val_r = None
+                        if c + 1 < n_cols_g:
+                            val_r = full_grid[r][c + 1]
+                        # Extract value below
+                        val_d = None
+                        if r + 1 < n_rows_g and c < len(full_grid[r + 1]):
+                            val_d = full_grid[r + 1][c]
+                            
+                        # Standard label clean
+                        def clean_lbl(s):
+                            s = re.sub(r'[^a-zA-Z0-9_]', '_', s.lower())
+                            s = re.sub(r'_{2,}', '_', s)
+                            return s.strip('_')
+                            
+                        for val in [val_r, val_d]:
+                            if val is not None and isinstance(val, (int, float)) and not isinstance(val, bool):
+                                cl = clean_lbl(cell)
+                                if cl:
+                                    SESSION_DATA_CACHE[sid]["labeled_values"][cl] = val
+                                    sheet_key = f"{sheet_name.lower()}.{cl}".replace(" ", "_")
+                                    SESSION_DATA_CACHE[sid]["labeled_values"][sheet_key] = val
+                                    
+                                    # Keyword standardized mappings (excluding mathematical derivatives)
+                                    if any(x in cl for x in ["swi", "swc", "connate", "irreducible_water", "sw_irr", "swir"]):
+                                        if not any(x in cl for x in ["1_", "1-", "1 -"]):
+                                            SESSION_DATA_CACHE[sid]["labeled_values"]["swi"] = val
+                                    if any(x in cl for x in ["sor", "s_or", "residual_oil", "sorw", "sorg"]):
+                                        if not any(x in cl for x in ["1_", "1-", "1 -"]):
+                                            SESSION_DATA_CACHE[sid]["labeled_values"]["sor"] = val
+                                    if any(x in cl for x in ["cementation", "exponent_m", "exponentm", "tortuosity"]):
+                                        SESSION_DATA_CACHE[sid]["labeled_values"]["m"] = val
+                                    if any(x in cl for x in ["saturation_exponent", "exponent_n", "exponentn"]):
+                                        SESSION_DATA_CACHE[sid]["labeled_values"]["n"] = val
+                                    if any(x in cl for x in ["porosity", "phi"]):
+                                        SESSION_DATA_CACHE[sid]["labeled_values"]["porosity"] = val
+                                    if any(x in cl for x in ["permeability", "perm", "klinkenberg"]):
+                                        SESSION_DATA_CACHE[sid]["labeled_values"]["permeability"] = val
     save_session_cache_to_db(sid)
 
 
@@ -3411,6 +3457,9 @@ class PRCChatAssistant:
             return data
 
 
+        if f_parts and sid:
+            evict_session(sid)
+
         for data_bytes, mime, fname in f_parts:
             safe_mime = (mime or "application/octet-stream").lower()
             ext = Path(fname).suffix.lower() if fname else ".xlsx"
@@ -3567,41 +3616,36 @@ class PRCChatAssistant:
             return _gen_refusal() if stream else _refusal
 
         # ── INCOMPLETE-LOAD GATE (fluid-saturation-bound completeness) ────────
-        # Incomplete state = cache IS loaded (has_cached_data) but labeled_values is
-        # missing a critical saturation bound (Swi or Sor). A saturation/displacement
-        # question cannot be answered without those bounds, so refuse rather than fabricate.
-        # Scoped to saturation-dependent queries ON PURPOSE: FF/RI/MICP/poro-perm files
-        # legitimately carry no Swi/Sor, so a blanket refusal would brick those sessions
-        # and make the cache-only RI/FF fitters above unreachable.
-        if has_cached_data and msg:
-            def _cache_has(param: str) -> bool:
-                if param in labeled_values:
-                    return True
-                for _k in labeled_values.keys():
-                    if param in _re_gate.split(r'[^a-z0-9]+', str(_k).lower()):
-                        return True
-                return False
-            _sat_query = _re_gate.search(
-                r"(?i)\b(?:swi|sor|displacement\s+effic|recover|mobile\s+(?:oil|fluid)|"
-                r"residual\s+oil|irreducible\s+water|saturation\s+endpoint)\b",
-                msg,
-            )
-            if _sat_query:
-                _has_swi, _has_sor = _cache_has("swi"), _cache_has("sor")
-                if not (_has_swi and _has_sor):
-                    _missing = ("Swi and Sor" if not (_has_swi or _has_sor)
-                                else ("Swi" if not _has_swi else "Sor"))
-                    _refusal2 = (
-                        f"⚠️ I can't compute that: the session cache is loaded but its verified "
-                        f"parameters are missing the required fluid-saturation bound(s) ({_missing}). "
-                        f"Saturation-dependent results (displacement efficiency, recovery, residual "
-                        f"saturations) cannot be derived without them, and I will not substitute "
-                        f"assumed values. Please re-upload a file whose extraction yields explicit "
-                        f"Swi and Sor."
-                    )
-                    def _gen_refusal2():
-                        yield _refusal2
-                    return _gen_refusal2() if stream else _refusal2
+        # [DELEGATED TO LLM SYSTEM PROMPT INSTEAD OF BLANKET INTERCEPT FOR BATCH QUERIES]
+        # if has_cached_data and msg:
+        #     def _cache_has(param: str) -> bool:
+        #         if param in labeled_values:
+        #             return True
+        #         for _k in labeled_values.keys():
+        #             if param in _re_gate.split(r'[^a-z0-9]+', str(_k).lower()):
+        #                 return True
+        #         return False
+        #     _sat_query = _re_gate.search(
+        #         r"(?i)\b(?:swi|sor|displacement\s+effic|recover|mobile\s+(?:oil|fluid)|"
+        #         r"residual\s+oil|irreducible\s+water|saturation\s+endpoint)\b",
+        #         msg,
+        #     )
+        #     if _sat_query:
+        #         _has_swi, _has_sor = _cache_has("swi"), _cache_has("sor")
+        #         if not (_has_swi and _has_sor):
+        #             _missing = ("Swi and Sor" if not (_has_swi or _has_sor)
+        #                         else ("Swi" if not _has_swi else "Sor"))
+        #             _refusal2 = (
+        #                 f"⚠️ I can't compute that: the session cache is loaded but its verified "
+        #                 f"parameters are missing the required fluid-saturation bound(s) ({_missing}). "
+        #                 f"Saturation-dependent results (displacement efficiency, recovery, residual "
+        #                 f"saturations) cannot be derived without them, and I will not substitute "
+        #                 f"assumed values. Please re-upload a file whose extraction yields explicit "
+        #                 f"Swi and Sor."
+        #             )
+        #             def _gen_refusal2():
+        #                 yield _refusal2
+        #             return _gen_refusal2() if stream else _refusal2
 
         # Strict Context Shielding
 
@@ -3733,7 +3777,24 @@ class PRCChatAssistant:
                                 extra_prompt += f"### CACHED FLAT VECTORS:\n{_json.dumps(flat_vecs, indent=2)}\n\n"
                                 
                             extra_prompt += "=========================================\n\n"
-                            dynamic_system_prompt = extra_prompt + dynamic_system_prompt
+                            
+                            # Question-Specific Granular Refusal and Enforcements Instruction Block
+                            refusal_rules = "\n\n=== MANDATORY GRANULAR CALCULATIONS & REFUSAL INSTRUCTIONS ===\n"
+                            refusal_rules += "1. INDEPENDENT QUESTION EVALUATION: You must evaluate every question in a batch completely independently. Never refuse to answer a whole message or batch because one question lacks parameters.\n"
+                            refusal_rules += "2. GRANULAR CALCULATIONS & MISSING PARAMETER REFUSALS:\n"
+                            refusal_rules += "   If the user asks for a specific petrophysical parameter, fit, or calculation, and its required inputs are missing from the CACHED LABELED VALUES above:\n"
+                            refusal_rules += "     - You MUST output a clean, structured refusal ONLY for that specific question.\n"
+                            refusal_rules += "     - For example, if Swi or Sor is missing from the cache, and a question asks for displacement efficiency (Ed), recovery, mobile oil, or residual saturation, you MUST output a warning: "
+                            refusal_rules += "'⚠️ I can't compute that: the session cache is loaded but its verified parameters are missing the required fluid-saturation bound(s) (Swi/Sor). Saturation-dependent results cannot be derived without them, and I will not substitute assumed values. Please re-upload a file whose extraction yields explicit Swi and Sor.'\n"
+                            refusal_rules += "     - Do NOT substitute assumed, estimated, or default constants (like Swi=0.1 or Sor=0.1) under any circumstances. If it's missing, refuse that specific question.\n"
+                            refusal_rules += "     - Answer all other questions in the batch normally using the verified cache.\n"
+                            refusal_rules += "3. DISPLACEMENT EFFICIENCY FORMULA ENFORCEMENT:\n"
+                            refusal_rules += "   - For any calculation of Displacement Efficiency (Ed) on any sample/well, you MUST strictly use: Ed = (1 - Swi - Sor) / (1 - Swi).\n"
+                            refusal_rules += "   - You are strictly FORBIDDEN from using the wrong formula (Swi - Sor) / Swi. Any output of (Swi - Sor)/Swi is an immediate failure.\n"
+                            refusal_rules += "   - Show the mathematical expansion dynamically based on the verified Swi and Sor from the cache.\n"
+                            refusal_rules += "========================================================================\n\n"
+                            
+                            dynamic_system_prompt = extra_prompt + refusal_rules + dynamic_system_prompt
                             
                     if sid or email:
                         try:
