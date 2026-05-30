@@ -6902,6 +6902,43 @@ async def analyze_scal(
         # Destructive memory eviction protocol on new file ingestion
         evict_session(sid)
 
+        # Save the incoming UploadFile to a temporary location safely
+        import tempfile
+        from pathlib import Path
+        
+        with tempfile.NamedTemporaryFile(delete=False, suffix=Path(file.filename).suffix) as tmp:
+            tmp.write(await file.read())
+            tmp_path = tmp.name
+            
+        # Run the absolute truth extractor to convert spreadsheet rows into string context
+        from scal_file_handler import extract_absolute_file_truth
+        ground_truth_string = extract_absolute_file_truth([(tmp_path, file.filename)])
+        
+        # HYDRATE THE ACTIVE CHAT CACHE NATIVELY BEFORE ANY UTILITY RUNS
+        with SESSION_DATA_CACHE_LOCK:
+            if sid not in SESSION_DATA_CACHE:
+                SESSION_DATA_CACHE[sid] = {}
+            SESSION_DATA_CACHE[sid]["ground_truth"] = ground_truth_string
+            # Initialize labeled values if missing to ensure completeness gate passes
+            if "labeled_values" not in SESSION_DATA_CACHE[sid]:
+                SESSION_DATA_CACHE[sid]["labeled_values"] = {}
+                
+        # Also populate labeled values and flat vectors synchronously to prevent fitters from aborting
+        populate_cache_from_ground_truth(sid, ground_truth_string)
+        ext_lower = Path(file.filename).suffix.lower()
+        if ext_lower in ('.xlsx', '.xlsm', '.xls', '.ods', '.csv'):
+            cache_excel_data_vectors(sid, tmp_path)
+                
+        # Clean up the temporary file from the disk
+        try:
+            import os
+            os.unlink(tmp_path)
+        except Exception:
+            pass
+
+        # Reset file stream pointer so subsequent reads work perfectly
+        await file.seek(0)
+
         email = user_email.lower().strip() if user_email else None
         msg = (message or "Analyze petrophysical data from uploaded file.").strip()
         filename = sanitize_filename(file.filename)
