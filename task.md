@@ -37,3 +37,10 @@
 
 - `[x]` Phase 9: Compressibility Keyword Standardisation
   - `[x]` Add `"compressibility"` keyword mapping in `populate_cache_from_ground_truth` to standardise `"pore_volume_compressibility"`.
+
+- `[x]` Phase 10: RQI Formula and Duplicate Q1 Generation Remediation
+  - `[x]` Populate `SESSION_DATA_CACHE` with pre-computed `rqi`, `fzi`, and `hu` sample values inside `calculate_petrophysics_properties` interceptor.
+  - `[x]` Add derived formulas for `rqi`, `rqi_fzi`, and `fzi` in `calculate_derived_value` fallback engine.
+  - `[x]` Improve `detect_multi_question` boundary regex to `(?:^|[\r\n]+)\s*(Q\d+)\b` to prevent matching in-sentence question references.
+  - `[x]` De-duplicate the parsed questions list by upper `q_num` inside `detect_multi_question`.
+  - `[x]` Run automated tests (`pytest`) and local WellX / WellY verifications.

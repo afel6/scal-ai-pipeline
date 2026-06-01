@@ -38,3 +38,12 @@ We have successfully designed, validated, and implemented a major architectural 
 
 2. **Automated Unit Tests**:
    * Executed the chat cache unit test suite: `pytest tests/test_chat_cache_refactor.py` (8/8 PASSED).
+
+### 4. RQI Formula and Duplicate Q1 Generation Remediation
+* **Problem**: 
+  - The Q1 answer table calculated RQI independently using an incorrect formula (missing the `0.0314` scaling factor), resulting in `6.90` instead of `1.48` for sample X9. This happened because the dynamically calculated `rqi`, `fzi`, and `hu` values were never populated in the `SESSION_DATA_CACHE` when the `calculate_petrophysics_properties` tool ran, causing downstream provenance tokens to fail to resolve and forcing the LLM to fall back to its own hallucinated/incorrect calculation.
+  - Q1 was processed twice before moving to Q2. This occurred because the regex `r'\b(Q\d+)\b'` inside `detect_multi_question` matched any reference to Q1 in the body of subsequent questions (e.g. `"...consistent with Q1"`), splitting the text at that point and appending a duplicate question to the queue.
+* **Solution**:
+  - **Pre-computed Cache Hydration**: Programmatically hydrated the `SESSION_DATA_CACHE[sid]["labeled_values"]` with the correct `rqi`, `fzi`, and `hu` sample values immediately when the `calculate_petrophysics_properties` tool runs successfully. Stored them under both raw keys (`rqi_{sample}`) and prefixed keys (`bca_hydraulicunits_rqi_{sample}`) to guarantee successful provenance token resolution.
+  - **Derived Calculation Safe Fallbacks**: Implemented direct formulas for `rqi`, `rqi_fzi`, and `fzi` in `calculate_derived_value` utilizing `0.0314 * np.sqrt(perm / phi)` and `rqi / (phi / (1.0 - phi))` as an additional layer of security.
+  - **Boundary Verification & De-duplication**: Refactored `detect_multi_question` to only consider matches at the start of a line (using `(?:^|[\r\n]+)\s*(Q\d+)\b` logic) as valid boundaries. Added case-insensitive unique key de-duplication inside the parser to guarantee a single, clean sequence of distinct questions.

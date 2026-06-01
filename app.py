@@ -1371,6 +1371,23 @@ def calculate_derived_value(formula_id: str, inputs_str: str, session_id: str):
         if swi > 1.0: swi /= 100.0
         return (1.0 - swi - sor) / (1.0 - swi)
         
+    elif formula_id in ("rqi", "rqi_fzi"):
+        perm = get_param("perm")
+        phi = get_param("phi")
+        if phi > 1.0: phi /= 100.0
+        if phi <= 0.0: return 0.0
+        import numpy as np
+        return 0.0314 * np.sqrt(perm / phi)
+        
+    elif formula_id == "fzi":
+        perm = get_param("perm")
+        phi = get_param("phi")
+        if phi > 1.0: phi /= 100.0
+        if phi <= 0.0 or phi >= 1.0: return 0.0
+        import numpy as np
+        rqi = 0.0314 * np.sqrt(perm / phi)
+        return rqi / (phi / (1.0 - phi))
+        
     else:
         raise ValueError(f"Unknown formula: {formula_id}")
 
@@ -3673,6 +3690,21 @@ class PRCChatAssistant:
                         pass
                 
                 if model == "rqi_fzi":
+                    if sid:
+                        with SESSION_DATA_CACHE_LOCK:
+                            if sid not in SESSION_DATA_CACHE:
+                                SESSION_DATA_CACHE[sid] = {}
+                            if "labeled_values" not in SESSION_DATA_CACHE[sid]:
+                                SESSION_DATA_CACHE[sid]["labeled_values"] = {}
+                            for s in tr["samples"]:
+                                s_name = str(s.get('sample', '')).lower().strip()
+                                if s_name:
+                                    SESSION_DATA_CACHE[sid]["labeled_values"][f"rqi_{s_name}"] = s.get('rqi', 0.0)
+                                    SESSION_DATA_CACHE[sid]["labeled_values"][f"fzi_{s_name}"] = s.get('fzi', 0.0)
+                                    SESSION_DATA_CACHE[sid]["labeled_values"][f"hu_{s_name}"] = s.get('hu', 1)
+                                    SESSION_DATA_CACHE[sid]["labeled_values"][f"bca_hydraulicunits_rqi_{s_name}"] = s.get('rqi', 0.0)
+                                    SESSION_DATA_CACHE[sid]["labeled_values"][f"bca_hydraulicunits_fzi_{s_name}"] = s.get('fzi', 0.0)
+                                    SESSION_DATA_CACHE[sid]["labeled_values"][f"bca_hydraulicunits_hu_{s_name}"] = s.get('hu', 1)
                     hu_summary = tr.get("summary", [])
                     num_units = len(hu_summary)
                     lines.append(f"\n\n**RQI / FZI Calculation — {tr.get('total_samples', '?')} Samples, {num_units} Hydraulic Units**\n")
@@ -6302,7 +6334,19 @@ def parse_q0_questions(text: str) -> list[tuple[str, str]]:
 
 def detect_multi_question(message: str, sid: str, email: str) -> list[tuple[str, str]]:
     # 1. Parse pasted questions from message if they look like multiple Q1, Q2, etc.
-    q_matches = list(re.finditer(r'\b(Q\d+)\b', message))
+    all_matches = list(re.finditer(r'\b(Q\d+)\b', message))
+    q_matches = []
+    for m in all_matches:
+        start_idx = m.start()
+        preceding = message[:start_idx]
+        is_at_start = (start_idx == 0) or preceding.strip() == ""
+        is_after_newline = False
+        if not is_at_start:
+            if re.search(r'[\r\n]\s*$', preceding):
+                is_after_newline = True
+        if is_at_start or is_after_newline:
+            q_matches.append(m)
+
     if len(q_matches) >= 3:
         questions = []
         for idx, match in enumerate(q_matches):
@@ -6310,11 +6354,20 @@ def detect_multi_question(message: str, sid: str, email: str) -> list[tuple[str,
             start = match.end()
             end = q_matches[idx+1].start() if idx + 1 < len(q_matches) else len(message)
             q_text = message[start:end].strip()
-            q_text = re.sub(r'^[:.\-\s]+', '', q_text)
+            q_text = re.sub(r'^[:.\-\s\u2013\u2014]+', '', q_text)
             if len(q_text) > 10:
                 questions.append((q_num, q_text))
-        if len(questions) >= 3:
-            return questions
+        
+        seen_q = set()
+        deduped_qs = []
+        for qn, qt in questions:
+            qn_norm = qn.strip().upper()
+            if qn_norm not in seen_q:
+                seen_q.add(qn_norm)
+                deduped_qs.append((qn, qt))
+        
+        if len(deduped_qs) >= 3:
+            return deduped_qs
 
     # 2. Check if the message is a trigger to answer Q0 questions
     is_trigger = any(x in message.lower() for x in ["solve all", "answer all", "q0", "comprehensive report", "advanced report"])
