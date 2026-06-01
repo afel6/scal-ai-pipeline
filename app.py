@@ -6475,45 +6475,48 @@ async def chat_stream(
                                 _logger.info(f"[SSE Worker] Streamed cached {q_num}")
                                 continue
                         
-                        _logger.info(f"[SSE Worker] Generating {q_num}...")
-                        sub_msg = f"Solve and provide a detailed analysis for this specific question:\n\n**{q_num}: {q_text}**"
-                        
-                        hist_rows = db("SELECT role, text FROM m WHERE sid=? AND user_email=? ORDER BY id DESC LIMIT 4", (sid, email))
-                        sub_history = list(reversed([{"role": r, "text": t} for r, t in hist_rows]))
-                        
-                        _enqueue({"type": "token", "text": f"\n\n### {q_num}: {q_text}\n\n"})
-                        
-                        max_attempts = 5
-                        attempt_delay = 1.0
-                        success_gen = False
-                        sub_reply = ""
-                        for attempt in range(max_attempts):
-                            try:
-                                sub_reply = ""
-                                for chunk in assistant.chat(sub_history, sub_msg, kb_context=kb_ctx, stream=True, sid=sid, email=email):
-                                    if q.qsize() >= 1900:
-                                        break
-                                    if isinstance(chunk, dict):
-                                        if chunk.get("type") == "token":
-                                            sub_reply += chunk.get("text", "")
-                                        _enqueue(chunk)
+                        try:
+                            _logger.info(f"[SSE Worker] Generating {q_num}...")
+                            sub_msg = f"Solve and provide a detailed analysis for this specific question:\n\n**{q_num}: {q_text}**"
+                            
+                            hist_rows = db("SELECT role, text FROM m WHERE sid=? AND user_email=? ORDER BY id DESC LIMIT 4", (sid, email))
+                            sub_history = list(reversed([{"role": r, "text": t} for r, t in hist_rows]))
+                            
+                            _enqueue({"type": "token", "text": f"\n\n### {q_num}: {q_text}\n\n"})
+                            
+                            max_attempts = 5
+                            attempt_delay = 1.0
+                            success_gen = False
+                            sub_reply = ""
+                            for attempt in range(max_attempts):
+                                try:
+                                    sub_reply = ""
+                                    for chunk in assistant.chat(sub_history, sub_msg, kb_context=kb_ctx, stream=True, sid=sid, email=email):
+                                        if q.qsize() >= 1900:
+                                            break
+                                        if isinstance(chunk, dict):
+                                            if chunk.get("type") == "token":
+                                                sub_reply += chunk.get("text", "")
+                                            _enqueue(chunk)
+                                        else:
+                                            sub_reply += str(chunk)
+                                            _enqueue({"type": "token", "text": str(chunk)})
+                                    success_gen = True
+                                    break
+                                except Exception as ex:
+                                    err_l = str(ex).lower()
+                                    is_trans = any(x in err_l for x in ["503", "429", "resource_exhausted", "unavailable", "timeout", "overload", "rate_limit"])
+                                    if is_trans and attempt < max_attempts - 1:
+                                        _logger.warning(f"[SSE Worker] API error on {q_num} attempt {attempt+1}: {ex}. Retrying in {attempt_delay}s...")
+                                        import time as _time
+                                        _time.sleep(attempt_delay)
+                                        attempt_delay *= 2.0
                                     else:
-                                        sub_reply += str(chunk)
-                                        _enqueue({"type": "token", "text": str(chunk)})
-                                success_gen = True
-                                break
-                            except Exception as ex:
-                                err_l = str(ex).lower()
-                                is_trans = any(x in err_l for x in ["503", "429", "resource_exhausted", "unavailable", "timeout", "overload", "rate_limit"])
-                                if is_trans and attempt < max_attempts - 1:
-                                    _logger.warning(f"[SSE Worker] API error on {q_num} attempt {attempt+1}: {ex}. Retrying in {attempt_delay}s...")
-                                    import time as _time
-                                    _time.sleep(attempt_delay)
-                                    attempt_delay *= 2.0
-                                else:
-                                    raise ex
-                        
-                        if success_gen and sub_reply:
+                                        raise ex
+                            
+                            if not success_gen or not sub_reply:
+                                raise ValueError("Empty response generated or max attempts reached.")
+                                
                             sub_reply = strip_thinking_blocks(sub_reply)
                             sub_reply = strip_placeholder_artifacts(sub_reply)
                             sub_reply = process_provenance_tokens(sub_reply, sid)
@@ -6527,6 +6530,13 @@ async def chat_stream(
                             
                             combined_answers.append(sub_reply)
                             _logger.info(f"[SSE Worker] Successfully completed and checkpointed {q_num}.")
+                        except Exception as q_ex:
+                            _logger.error(f"[SSE Worker] Permanent failure generating {q_num}: {q_ex}")
+                            err_msg = f"\n\n[ERROR] {q_num} failed: Unable to generate a response. This may be due to an API timeout, context window limit, or temporary model overload. Please retry with a shorter query, or try asking the model to process a specific sheet.\n<!-- CHECKPOINT {q_num} -->"
+                            _enqueue({"type": "token", "text": err_msg})
+                            db("INSERT INTO m (sid,role,text,ts,user_email) VALUES (?,?,?,?,?)",
+                               (sid, "model", err_msg, time.time(), email))
+                            combined_answers.append(err_msg)
                 
                 else:
                     full_reply = ""
@@ -6844,6 +6854,85 @@ async def handle(
                 except Exception as _ufe:
                     _logger.warning(f"[UserFiles] Could not record file for {email}: {_ufe}")
 
+        if f_parts:
+            # Synchronously extract file text and populate database/cache
+            # so that detect_multi_question can see the extracted text and questions.
+            import tempfile
+            for data_bytes, mime, fname in f_parts:
+                safe_mime = (mime or "application/octet-stream").lower()
+                ext = Path(fname).suffix.lower() if fname else ".xlsx"
+                is_spreadsheet = any(x in safe_mime for x in ["spreadsheet", "excel", "csv", "sheet"]) or ext in [".xlsx", ".xls", ".csv"]
+                is_docx = "wordprocessingml" in safe_mime or ext in [".docx", ".doc"]
+                
+                if is_spreadsheet or is_docx:
+                    if not ext:
+                        ext = ".xlsx" if is_spreadsheet else ".docx"
+                    with tempfile.NamedTemporaryFile(delete=False, suffix=ext) as tf:
+                        tf.write(data_bytes)
+                        tmp_path = tf.name
+                    try:
+                        mandatory_ground_truth = extract_absolute_file_truth([(tmp_path, fname)])
+                        if sid:
+                            with SESSION_DATA_CACHE_LOCK:
+                                SESSION_DATA_CACHE[sid] = {
+                                    "ground_truth": mandatory_ground_truth,
+                                    "timestamp": time.time()
+                                }
+                            populate_cache_from_ground_truth(sid, mandatory_ground_truth)
+                            if is_spreadsheet:
+                                cache_excel_data_vectors(sid, tmp_path)
+                        
+                        fr_data = read_file(tmp_path, target_identifier=None)
+                        fr_text, _ = to_prompt_string(fr_data)
+                        if email and fr_text:
+                            _fhash_store = hashlib.sha256(data_bytes).hexdigest()
+                            db(
+                                "INSERT INTO user_files"
+                                " (user_email, filename, file_hash, extracted_text, data_type, created_at)"
+                                " VALUES (?,?,?,?,?,?)"
+                                " ON CONFLICT(user_email, file_hash)"
+                                " DO UPDATE SET extracted_text=EXCLUDED.extracted_text,"
+                                " filename=EXCLUDED.filename",
+                                (email, fname, _fhash_store, fr_text, "SCAL", time.time()),
+                            )
+                    except Exception as ex:
+                        _logger.error(f"[Bootstrap Extract] Failed to extract text for {fname}: {ex}")
+                    finally:
+                        try: Path(tmp_path).unlink(missing_ok=True)
+                        except: pass
+                elif "pdf" in safe_mime:
+                    try:
+                        text = _sfh_extract_pdf(data_bytes)
+                        if text.strip() and email:
+                            _fhash_store = hashlib.sha256(data_bytes).hexdigest()
+                            db(
+                                "INSERT INTO user_files"
+                                " (user_email, filename, file_hash, extracted_text, data_type, created_at)"
+                                " VALUES (?,?,?,?,?,?)"
+                                " ON CONFLICT(user_email, file_hash)"
+                                " DO UPDATE SET extracted_text=EXCLUDED.extracted_text,"
+                                " filename=EXCLUDED.filename",
+                                (email, fname, _fhash_store, text, "PDF", time.time()),
+                            )
+                    except Exception as e:
+                        _logger.warning(f"[PDF Bootstrap Extract] {fname}: {e}")
+                elif "text/plain" in safe_mime or ext in (".txt", ".text"):
+                    try:
+                        content = data_bytes.decode("utf-8", errors="ignore")
+                        if content.strip() and email:
+                            _fhash_store = hashlib.sha256(data_bytes).hexdigest()
+                            db(
+                                "INSERT INTO user_files"
+                                " (user_email, filename, file_hash, extracted_text, data_type, created_at)"
+                                " VALUES (?,?,?,?,?,?)"
+                                " ON CONFLICT(user_email, file_hash)"
+                                " DO UPDATE SET extracted_text=EXCLUDED.extracted_text,"
+                                " filename=EXCLUDED.filename",
+                                (email, fname, _fhash_store, content, "TXT", time.time()),
+                            )
+                    except Exception as e:
+                        _logger.warning(f"[TXT Bootstrap Extract] {fname}: {e}")
+
 
 
         kb_ctx = await KnowledgeBase.search_async(message, sid=sid, email=email)
@@ -7033,45 +7122,55 @@ async def handle(
                             _logger.info(f"[CheckpointLoop] Loaded {q_num} from DB.")
                             continue
                     
-                    _logger.info(f"[CheckpointLoop] Generating {q_num}...")
-                    sub_msg = f"Solve and provide a detailed analysis for this specific question:\n\n**{q_num}: {q_text}**"
-                    
-                    hist_rows = db("SELECT role, text FROM m WHERE sid=? AND user_email=? ORDER BY id DESC LIMIT 4", (sid, email))
-                    sub_history = list(reversed([{"role": r, "text": t} for r, t in hist_rows]))
-                    
-                    max_attempts = 5
-                    attempt_delay = 1.0
-                    resp_obj = None
-                    for attempt in range(max_attempts):
-                        try:
-                            resp_obj = assistant.chat(sub_history, sub_msg, kb_ctx, f_parts, sid=sid, email=email)
-                            break
-                        except Exception as ex:
-                            err_l = str(ex).lower()
-                            is_trans = any(x in err_l for x in ["503", "429", "resource_exhausted", "unavailable", "timeout", "overload", "rate_limit"])
-                            if is_trans and attempt < max_attempts - 1:
-                                _logger.warning(f"[CheckpointLoop] API error on {q_num} attempt {attempt+1}: {ex}. Retrying in {attempt_delay}s...")
-                                _time.sleep(attempt_delay)
-                                attempt_delay *= 2.0
-                            else:
-                                raise ex
-                    
-                    ans_text = resp_obj if isinstance(resp_obj, str) else str(resp_obj) if resp_obj is not None else ""
-                    ans_text = strip_thinking_blocks(ans_text)
-                    ans_text = strip_placeholder_artifacts(ans_text)
-                    ans_text = process_provenance_tokens(ans_text, sid)
-                    filenames = get_filenames_from_cache(sid)
-                    ans_text = clean_citation_clutter(ans_text, filenames)
-                    ans_text = compress_traceability_ledger(ans_text)
-                    ans_text = _extract_and_log_corrections(sid, email, ans_text)
-                    
-                    ans_text += f"\n<!-- CHECKPOINT {q_num} -->"
-                    
-                    db("INSERT INTO m (sid,role,text,ts,user_email) VALUES (?,?,?,?,?)",
-                       (sid, "model", ans_text, _time.time(), email))
-                    
-                    combined_answers.append(ans_text)
-                    _logger.info(f"[CheckpointLoop] Successfully completed and checkpointed {q_num}.")
+                    try:
+                        _logger.info(f"[CheckpointLoop] Generating {q_num}...")
+                        sub_msg = f"Solve and provide a detailed analysis for this specific question:\n\n**{q_num}: {q_text}**"
+                        
+                        hist_rows = db("SELECT role, text FROM m WHERE sid=? AND user_email=? ORDER BY id DESC LIMIT 4", (sid, email))
+                        sub_history = list(reversed([{"role": r, "text": t} for r, t in hist_rows]))
+                        
+                        max_attempts = 5
+                        attempt_delay = 1.0
+                        resp_obj = None
+                        for attempt in range(max_attempts):
+                            try:
+                                resp_obj = assistant.chat(sub_history, sub_msg, kb_ctx, f_parts, sid=sid, email=email)
+                                break
+                            except Exception as ex:
+                                err_l = str(ex).lower()
+                                is_trans = any(x in err_l for x in ["503", "429", "resource_exhausted", "unavailable", "timeout", "overload", "rate_limit"])
+                                if is_trans and attempt < max_attempts - 1:
+                                    _logger.warning(f"[CheckpointLoop] API error on {q_num} attempt {attempt+1}: {ex}. Retrying in {attempt_delay}s...")
+                                    _time.sleep(attempt_delay)
+                                    attempt_delay *= 2.0
+                                else:
+                                    raise ex
+                        
+                        ans_text = resp_obj if isinstance(resp_obj, str) else str(resp_obj) if resp_obj is not None else ""
+                        if not ans_text:
+                            raise ValueError("Empty response generated or max attempts reached.")
+                            
+                        ans_text = strip_thinking_blocks(ans_text)
+                        ans_text = strip_placeholder_artifacts(ans_text)
+                        ans_text = process_provenance_tokens(ans_text, sid)
+                        filenames = get_filenames_from_cache(sid)
+                        ans_text = clean_citation_clutter(ans_text, filenames)
+                        ans_text = compress_traceability_ledger(ans_text)
+                        ans_text = _extract_and_log_corrections(sid, email, ans_text)
+                        
+                        ans_text += f"\n<!-- CHECKPOINT {q_num} -->"
+                        
+                        db("INSERT INTO m (sid,role,text,ts,user_email) VALUES (?,?,?,?,?)",
+                           (sid, "model", ans_text, _time.time(), email))
+                        
+                        combined_answers.append(ans_text)
+                        _logger.info(f"[CheckpointLoop] Successfully completed and checkpointed {q_num}.")
+                    except Exception as q_ex:
+                        _logger.error(f"[CheckpointLoop] Permanent failure generating {q_num}: {q_ex}")
+                        err_msg = f"\n\n[ERROR] {q_num} failed: Unable to generate a response. This may be due to an API timeout, context window limit, or temporary model overload. Please retry with a shorter query, or try asking the model to process a specific sheet.\n<!-- CHECKPOINT {q_num} -->"
+                        db("INSERT INTO m (sid,role,text,ts,user_email) VALUES (?,?,?,?,?)",
+                           (sid, "model", err_msg, _time.time(), email))
+                        combined_answers.append(err_msg)
                 
                 full_report = "\n\n---\n\n".join(combined_answers)
                 _post_kb.extend(getattr(_tls, 'pending_kb', []))
