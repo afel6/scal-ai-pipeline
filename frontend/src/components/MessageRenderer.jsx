@@ -191,6 +191,13 @@ export function renderMessageContent(text) {
     .replace(/__INTERNAL_DATA_START__[\s\S]*?__INTERNAL_DATA_END__/g, '')
     .trim();
 
+  // Enforce spacing before markdown headings (##, ###) if they lack a preceding double newline.
+  cleanText = cleanText.replace(/([^\n])\s*(#{2,}\s)/g, '$1\n\n$2');
+  // Enforce padding before the first row of a markdown table.
+  cleanText = cleanText.replace(/(^|\n)([^|\n]+)\s*(\|)/g, '$1$2\n\n$3');
+  // Enforce newlines between concatenated table rows.
+  cleanText = cleanText.replace(/\|\s+(?=\|)/g, '|\n');
+
   // Clean up markdown code block fences enclosing __PRC_PLOT__
   cleanText = cleanText.replace(/```+__PRC_PLOT__/g, '__PRC_PLOT__');
 

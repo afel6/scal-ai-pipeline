@@ -694,6 +694,23 @@ def sanitize_well_hallucinations(text: str) -> str:
 
     return text
 
+
+def fix_markdown_spacing(text: str) -> str:
+    """Ensure all headings and markdown tables have proper newlines before them
+    so that they don't break in the UI renderer.
+    """
+    if not text:
+        return text
+    # 1. Enforce padding before markdown headings (##, ###) if they lack a preceding double newline.
+    text = re.sub(r'([^
+])\s*(#{2,}\s)', r'\1\n\n\2', text)
+    # 2. Enforce padding before the first row of a markdown table.
+    text = re.sub(r'(^|\n)([^|\n]+)\s*(\|)', r'\1\2\n\n\3', text)
+    # 3. Enforce newlines between concatenated table rows.
+    text = re.sub(r'\|\s+(?=\|)', r'|\n', text)
+    return text
+
+
 def strip_thinking_blocks(text: str) -> str:
     """Remove <thinking>...</thinking> blocks from LLM output and sanitize well name hallucinations."""
     if not text:
@@ -714,6 +731,8 @@ def strip_thinking_blocks(text: str) -> str:
     )
     # Sanitize well name hallucinations
     cleaned = sanitize_well_hallucinations(cleaned)
+    # Enforce premium markdown table and heading formatting
+    cleaned = fix_markdown_spacing(cleaned)
     return cleaned.strip()
 
 
