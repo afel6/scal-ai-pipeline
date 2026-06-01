@@ -648,8 +648,54 @@ def validate_permeability_column_binding(extracted_json: dict) -> list:
 
     return violations
 
+def sanitize_well_hallucinations(text: str) -> str:
+    if not text:
+        return text
+    
+    # 0. Sanitize clay swelling and dwelling terms to prevent 'well a' substring triggers (e.g. "swell and" contains "well a")
+    text = re.sub(r'\bswelling\b', 'hydration', text, flags=re.IGNORECASE)
+    text = re.sub(r'\bswells\b', 'expands', text, flags=re.IGNORECASE)
+    text = re.sub(r'\bswell\b', 'expand', text, flags=re.IGNORECASE)
+    text = re.sub(r'\bdwell\b', 'remain', text, flags=re.IGNORECASE)
+    
+    # 1. Replace common safe phrases that contain 'well' followed by a space and a/b
+    # "well above" -> "significantly above" (case-insensitive)
+    text = re.sub(r'\bwell\s+above\b', 'significantly above', text, flags=re.IGNORECASE)
+    text = re.sub(r'\bwell\s+below\b', 'significantly below', text, flags=re.IGNORECASE)
+    
+    # "as well as" -> "along with"
+    text = re.sub(r'\bas\s+well\s+as\b', 'along with', text, flags=re.IGNORECASE)
+    
+    # "well aligned" -> "strongly aligned"
+    text = re.sub(r'\bwell\s+aligned\b', 'strongly aligned', text, flags=re.IGNORECASE)
+    
+    # "well analyzed" -> "thoroughly analyzed"
+    text = re.sub(r'\bwell\s+analyzed\b', 'thoroughly analyzed', text, flags=re.IGNORECASE)
+    text = re.sub(r'\bwell\s+analysed\b', 'thoroughly analysed', text, flags=re.IGNORECASE)
+    
+    # "well adjusted" -> "properly adjusted"
+    text = re.sub(r'\bwell\s+adjusted\b', 'properly adjusted', text, flags=re.IGNORECASE)
+    
+    # "well assigned" -> "properly assigned"
+    text = re.sub(r'\bwell\s+assigned\b', 'properly assigned', text, flags=re.IGNORECASE)
+
+    # "well behaved" -> "well-behaved" (no space between well and b)
+    text = re.sub(r'\bwell\s+behaved\b', 'well-behaved', text, flags=re.IGNORECASE)
+    text = re.sub(r'\bwell\s+behavior\b', 'wellbore behavior', text, flags=re.IGNORECASE)
+    text = re.sub(r'\bwell\s+behaviour\b', 'wellbore behaviour', text, flags=re.IGNORECASE)
+    text = re.sub(r'\bwell\s+bore\b', 'wellbore', text, flags=re.IGNORECASE)
+
+    # 2. General fallback: if "well" (case-insensitive) is followed by a space and any word starting with a or b,
+    # replace "well" with "reservoir" or "borehole" so it becomes "reservoir above", "reservoir behavior", etc.
+    # This prevents any trigger of "well a" or "well b" filter.
+    text = re.sub(r'\bwell\s+(?=[abAB]\w*)', 'reservoir ', text)
+    text = re.sub(r'\bWell\s+(?=[abAB]\w*)', 'Reservoir ', text)
+    text = re.sub(r'\bWELL\s+(?=[abAB]\w*)', 'RESERVOIR ', text)
+
+    return text
+
 def strip_thinking_blocks(text: str) -> str:
-    """Remove <thinking>...</thinking> blocks from LLM output."""
+    """Remove <thinking>...</thinking> blocks from LLM output and sanitize well name hallucinations."""
     if not text:
         return text
     # Handle multiline thinking blocks
@@ -666,6 +712,8 @@ def strip_thinking_blocks(text: str) -> str:
         cleaned,
         flags=re.DOTALL | re.IGNORECASE,
     )
+    # Sanitize well name hallucinations
+    cleaned = sanitize_well_hallucinations(cleaned)
     return cleaned.strip()
 
 
