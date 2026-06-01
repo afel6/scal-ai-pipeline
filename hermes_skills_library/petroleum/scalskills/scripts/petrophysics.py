@@ -578,6 +578,124 @@ class PetrophysicsSkills:
             "samples": results
         }
 
+    @staticmethod
+    def calculate_dykstra_lorenz(perm, phi=None, depth=None):
+        """Calculates Dykstra-Parsons coefficient (VDP) and Lorenz coefficient (LC) for permeability heterogeneity."""
+        # Ensure inputs are clean lists/arrays of identical length and free of NaNs/Nones
+        clean_data = []
+        n_input = len(perm)
+        
+        # Check phi
+        phi_arr = phi if phi is not None else [0.15] * n_input
+        if len(phi_arr) != n_input:
+            phi_arr = [0.15] * n_input
+            
+        # Check depth
+        depth_arr = depth if depth is not None else list(range(1, n_input + 1))
+        if len(depth_arr) != n_input:
+            depth_arr = list(range(1, n_input + 1))
+            
+        for i in range(n_input):
+            k_val = perm[i]
+            p_val = phi_arr[i]
+            d_val = depth_arr[i]
+            
+            # Skip if any are None or NaN
+            if k_val is None or p_val is None or d_val is None:
+                continue
+            try:
+                kf = float(k_val)
+                pf = float(p_val)
+                df = float(d_val)
+                if np.isnan(kf) or np.isnan(pf) or np.isnan(df):
+                    continue
+                # Permeability and porosity must be positive (porosity fraction or percent > 0)
+                if kf <= 0 or pf < 0:
+                    continue
+                clean_data.append((kf, pf, df))
+            except (ValueError, TypeError):
+                continue
+                
+        if not clean_data:
+            return {"status": "error", "message": "No valid positive permeability and porosity data points found."}
+            
+        # Unpack clean data
+        perm_clean = np.array([x[0] for x in clean_data], dtype=float)
+        phi_clean = np.array([x[1] for x in clean_data], dtype=float)
+        depths_clean = np.array([x[2] for x in clean_data], dtype=float)
+        n = len(perm_clean)
+
+        # 1. Dykstra-Parsons Coefficient VDP
+        perm_sorted = np.sort(perm_clean)[::-1]
+        k50 = np.percentile(perm_clean, 50.0)
+        k84_1 = np.percentile(perm_clean, 15.9) # 84.1% cumulative probability in descending list
+        vdp = (k50 - k84_1) / k50 if k50 > 0 else 0.0
+
+        if vdp < 0.1:
+            hetero_class_vdp = "Extremely Homogeneous"
+        elif vdp < 0.3:
+            hetero_class_vdp = "Slightly Heterogeneous"
+        elif vdp < 0.5:
+            hetero_class_vdp = "Moderately Heterogeneous"
+        elif vdp < 0.7:
+            hetero_class_vdp = "Highly Heterogeneous"
+        else:
+            hetero_class_vdp = "Extremely Heterogeneous"
+
+        # 2. Lorenz Coefficient LC
+        paired = list(zip(perm_clean, phi_clean, depths_clean))
+        paired.sort(key=lambda x: (x[0], x[2]), reverse=True)
+        
+        sorted_k = np.array([x[0] for x in paired])
+        sorted_phi = np.array([x[1] for x in paired])
+        sorted_depth = np.array([x[2] for x in paired])
+        
+        cum_thick_frac = np.arange(0, n + 1) / float(n)
+        
+        cum_cap = np.zeros(n + 1)
+        for idx in range(1, n + 1):
+            cum_cap[idx] = cum_cap[idx-1] + sorted_k[idx-1]
+        cum_cap_frac = cum_cap / cum_cap[-1] if cum_cap[-1] > 0 else cum_cap
+        
+        lc = (1.0 / n) * np.sum(cum_cap_frac[1:] + cum_cap_frac[:-1]) - 1.0
+        lc = max(0.0, min(1.0, lc))
+
+        if lc < 0.1:
+            hetero_class_lc = "Homogeneous"
+        elif lc < 0.3:
+            hetero_class_lc = "Slight Heterogeneity"
+        elif lc < 0.6:
+            hetero_class_lc = "Moderate Heterogeneity"
+        else:
+            hetero_class_lc = "High Heterogeneity"
+
+        samples = []
+        for i in range(n):
+            samples.append({
+                "rank": i + 1,
+                "depth": round(float(sorted_depth[i]), 2),
+                "k_md": round(float(sorted_k[i]), 4),
+                "phi_fraction": round(float(sorted_phi[i]), 4),
+                "cum_thickness_frac": round(float(cum_thick_frac[i+1]), 4),
+                "cum_capacity_frac": round(float(cum_cap_frac[i+1]), 4)
+            })
+
+        return {
+            "status": "success",
+            "vdp": round(float(vdp), 4),
+            "k50_md": round(float(k50), 4),
+            "k84_1_md": round(float(k84_1), 4),
+            "vdp_classification": hetero_class_vdp,
+            "lorenz_coefficient": round(float(lc), 4),
+            "lorenz_classification": hetero_class_lc,
+            "total_samples": n,
+            "samples": samples,
+            "thresholds": {
+                "vdp": round(float(vdp), 4),
+                "lorenz_coefficient": round(float(lc), 4)
+            }
+        }
+
 if __name__ == "__main__":
     if len(sys.argv) < 3:
         print(json.dumps({"error": "Usage: python petrophysics.py <model> <params_json>"}))
@@ -695,6 +813,13 @@ if __name__ == "__main__":
                 sg=params.get("sg"),
                 w_init=params.get("w_init"),
                 w_acid=params.get("w_acid"),
+                depth=params.get("depth")
+            )
+            print(json.dumps(res))
+        elif model == "dykstra_lorenz":
+            res = PetrophysicsSkills.calculate_dykstra_lorenz(
+                params["perm"],
+                phi=params.get("phi"),
                 depth=params.get("depth")
             )
             print(json.dumps(res))

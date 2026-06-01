@@ -13,7 +13,7 @@ def audit_image(image_path, manual_context, query):
     if not api_key:
         return {"error": "GEMINI_API_KEY not found in environment."}
 
-    client = genai.Client(api_key=api_key)
+    client = genai.Client(api_key=api_key, http_options={"timeout": 300000})
     
     with open(image_path, "rb") as f:
         image_data = f.read()

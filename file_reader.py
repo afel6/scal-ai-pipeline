@@ -144,7 +144,7 @@ def smart_read_csv(filepath: str, encodings: list = None, **kwargs):
     import logging
     logger = logging.getLogger("HvielPipeline")
     if encodings is None:
-        encodings = ["utf-8", "utf-8-sig", "latin1", "cp1252", "utf-16"]
+        encodings = ["utf-8", "utf-8-sig", "latin1", "cp1252", "cp1256", "iso-8859-6", "utf-16"]
         
     for idx, encoding in enumerate(encodings):
         try:

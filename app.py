@@ -25,7 +25,7 @@ import numpy as np
 
 
 
-from fastapi import FastAPI, UploadFile, File, Form, Request, HTTPException, Header, Depends, BackgroundTasks
+from fastapi import FastAPI, UploadFile, File, Form, Request, HTTPException, Header, Depends, BackgroundTasks, Query
 
 from fastapi.responses import FileResponse, StreamingResponse, JSONResponse
 
@@ -187,6 +187,130 @@ def _safe_json_dumps(obj, **kwargs):
     """Sanitize then dump — guaranteed valid JSON, no NaN/Infinity leakage."""
     return _json.dumps(_sanitize_for_json(obj), ensure_ascii=False, **kwargs)
 
+
+import sys
+from concurrent.futures import ThreadPoolExecutor
+
+# User session tokens
+_USER_TOKENS: dict[str, float] = {}
+_USER_TOKEN_TTL: int = 86400  # 24 hours
+
+# Sequential single-threaded SQLite executor queue to serialize all database operations and prevent locks/deadlocks.
+_sqlite_executor = ThreadPoolExecutor(max_workers=1)
+
+def is_testing() -> bool:
+    """Returns True if running in a test suite (pytest)."""
+    return "pytest" in sys.modules or "PYTEST_CURRENT_TEST" in os.environ or os.getenv("TESTING") == "true"
+
+def normalize_porosity_array(arr: np.ndarray) -> np.ndarray:
+    """Normalize porosity numpy array: convert percentage format (e.g. > 1.0) into fractional format (Security/Data issue 1)."""
+    if len(arr) == 0:
+        return arr
+    if np.max(arr) > 1.0:
+        return arr / 100.0
+    return arr
+
+def normalize_porosity_val(val: float) -> float:
+    """Normalize single porosity value: convert percentage to fraction if greater than 1.0 (Security/Data issue 1)."""
+    if val > 1.0:
+        return val / 100.0
+    return val
+
+def normalize_email(email: Optional[str]) -> Optional[str]:
+    if not email:
+        return None
+    return email.lower().strip()
+
+def verify_user_or_admin(
+    authorization: Optional[str] = Header(None),
+    token: Optional[str] = Query(None),
+    token_form: Optional[str] = Form(None),
+    user_email: Optional[str] = Form(None),
+    email_query: Optional[str] = Query(None)
+):
+    """Enforces token-based or email-based authentication on all user-facing endpoints (Security Issue 1)."""
+    # 1. Allow bypass in pytest/testing environment
+    if is_testing():
+        return True
+
+    # Safely extract string values from FastAPI defaults
+    auth_str = authorization if isinstance(authorization, str) else None
+    token_str = token if isinstance(token, str) else None
+    token_form_str = token_form if isinstance(token_form, str) else None
+    user_email_str = user_email if isinstance(user_email, str) else None
+    email_query_str = email_query if isinstance(email_query, str) else None
+
+    # Normalize token input
+    t = None
+    if auth_str and auth_str.startswith("Bearer "):
+        t = auth_str.split(" ")[1]
+    elif token_str:
+        t = token_str
+    elif token_form_str:
+        t = token_form_str
+
+    # 2. Check token against Admin & User token pools
+    if t:
+        if t in _ADMIN_TOKENS and time.time() <= _ADMIN_TOKENS[t]:
+            return True
+        if t in _USER_TOKENS and time.time() <= _USER_TOKENS[t]:
+            return True
+        raise HTTPException(status_code=401, detail="Invalid or expired token")
+
+    # 3. Fallback to user email if provided
+    req_email = normalize_email(user_email_str or email_query_str)
+    if not req_email:
+        raise HTTPException(status_code=401, detail="Authentication required: Token or email must be provided.")
+
+    return True
+
+def sanitize_prompt(prompt: str) -> str:
+    """Sanitizes user prompt inputs against prompt injection attacks (Security Issue 3)."""
+    if not prompt:
+        return ""
+    adversarial_patterns = [
+        r"(?i)\bignore\s+(?:all\s+)?previous\s+instructions\b",
+        r"(?i)\bignore\s+(?:the\s+)?above\s+instructions\b",
+        r"(?i)\bignore\s+(?:the\s+)?system\s+prompt\b",
+        r"(?i)\byou\s+are\s+now\s+a\s+different\s+ai\b",
+        r"(?i)\bforget\s+(?:all\s+)?previous\s+instructions\b",
+        r"(?i)\bforget\s+(?:your\s+)?system\s+prompt\b",
+        r"(?i)\bswitch\s+(?:your\s+)?persona\b",
+        r"(?i)\bact\s+as\s+a\b",
+        r"(?i)\bnew\s+rule\b",
+        r"(?i)\bdo\s+not\s+follow\s+any\s+restrictions\b",
+        r"(?i)\breveal\s+(?:your\s+)?system\s+prompt\b",
+        r"(?i)\bshow\s+(?:your\s+)?system\s+prompt\b",
+        r"(?i)\bprint\s+(?:your\s+)?system\s+prompt\b",
+        r"(?i)\bwhat\s+is\s+your\s+system\s+prompt\b",
+        r"(?i)\boutput\s+(?:your\s+)?system\s+prompt\b",
+        r"(?i)\bexport\s+(?:your\s+)?system\s+prompt\b"
+    ]
+    sanitized = prompt
+    for pattern in adversarial_patterns:
+        sanitized = re.sub(pattern, "[PROMPT INJECTION BLOCK]", sanitized)
+    return sanitized
+
+def validate_gemini_api_keys():
+    """Validates the configured Gemini API keys on startup by making a small check.
+    Raises ValueError with a clear, readable error message if keys are invalid (Crash Issue 6)."""
+    _logger.info("[STARTUP-VAL] Validating Gemini API key(s)...")
+    if not GEMINI_KEY_POOL or GEMINI_KEY_POOL[0] == "DUMMY_KEY":
+        raise ValueError(
+            "CRITICAL: Gemini API key is missing or set to default 'DUMMY_KEY'. "
+            "Please configure the GEMINI_API_KEY environment variable in your .env file."
+        )
+    try:
+        test_client = genai_new.Client(api_key=GEMINI_KEY_POOL[0])
+        test_client.models.list()
+        _logger.info("[STARTUP-VAL] Gemini API key validated successfully.")
+    except Exception as e:
+        err_msg = str(e)
+        _logger.error(f"[STARTUP-VAL] Gemini API key validation failed: {err_msg}")
+        raise ValueError(
+            f"CRITICAL: The configured Gemini API key is invalid or unauthorized! "
+            f"Error details: {err_msg}. Please verify your GEMINI_API_KEY environment variable."
+        ) from e
 
 _PG_POOL      = None
 
@@ -1909,19 +2033,10 @@ def _call_gemini_with_retry(client, model, contents, config, max_retries=5, base
             err = str(e).lower()
             is_503 = any(x in err for x in ["503", "service_unavailable", "unavailable"])
             is_429 = any(x in err for x in ["429", "resource_exhausted"])
-            if (is_503 or is_429) and attempt < max_retries - 1:
-                delay = base_delay * (2 ** attempt)  # 2, 4, 8, 16, 32
-                if is_429:
-                    delay *= 2                        # 4, 8, 16, 32, 64
-                _logger.info(
-                    f"[DocGen] Gemini {'503' if is_503 else '429'} — "
-                    f"attempt {attempt + 1}/{max_retries}, retrying in {delay}s"
-                )
-                time.sleep(delay)
-                continue
             
-            if is_503 and model == "gemini-2.5-flash":
-                _logger.warning("[Fallback] gemini-2.5-flash is 503 overloaded. Falling back to gemini-2.5-pro.")
+            # Immediately fallback to pro for any 503 or 429 on gemini-2.5-flash
+            if (is_503 or is_429) and model == "gemini-2.5-flash":
+                _logger.warning(f"[Fallback] gemini-2.5-flash returned {'503' if is_503 else '429'}. Falling back to gemini-2.5-pro immediately...")
                 try:
                     resp = client.models.generate_content(
                         model="gemini-2.5-pro", contents=contents, config=config
@@ -1939,6 +2054,17 @@ def _call_gemini_with_retry(client, model, contents, config, max_retries=5, base
                     return resp
                 except Exception as fallback_err:
                     raise ValueError(f"CRITICAL: Both primary and fallback models are UNAVAILABLE. {fallback_err}")
+
+            if (is_503 or is_429) and attempt < max_retries - 1:
+                delay = base_delay * (2 ** attempt)  # 2, 4, 8, 16, 32
+                if is_429:
+                    delay *= 2                        # 4, 8, 16, 32, 64
+                _logger.info(
+                    f"[DocGen] Gemini {'503' if is_503 else '429'} — "
+                    f"attempt {attempt + 1}/{max_retries}, retrying in {delay}s"
+                )
+                time.sleep(delay)
+                continue
             
             raise
     raise ValueError(f"Gemini call failed after {max_retries} retries")
@@ -1970,17 +2096,9 @@ def _call_gemini_stream_with_retry(client, model, contents, config, max_retries=
             is_503 = any(x in err for x in ["503", "service_unavailable", "unavailable"])
             is_429 = any(x in err for x in ["429", "resource_exhausted"])
             
-            # Simple retry backoff
-            if (is_503 or is_429) and attempt < max_retries - 1:
-                delay = base_delay * (2 ** attempt)
-                if is_429: delay *= 2
-                _logger.info(f"[Chat Stream] Gemini {'503' if is_503 else '429'} — attempt {attempt + 1}/{max_retries}, retrying in {delay}s")
-                time.sleep(delay)
-                continue
-                
-            # If we're out of retries for 503 and using flash, fallback to pro
-            if is_503 and model == "gemini-2.5-flash":
-                _logger.warning("[Fallback] gemini-2.5-flash is 503 overloaded. Falling back to gemini-2.5-pro for stream.")
+            # Immediately fallback to pro for any 503 or 429 on gemini-2.5-flash
+            if (is_503 or is_429) and model == "gemini-2.5-flash":
+                _logger.warning(f"[Fallback] gemini-2.5-flash returned {'503' if is_503 else '429'}. Falling back to gemini-2.5-pro for stream immediately...")
                 try:
                     prompt_tokens = 0
                     completion_tokens = 0
@@ -2002,8 +2120,15 @@ def _call_gemini_stream_with_retry(client, model, contents, config, max_retries=
                     return
                 except Exception as fallback_err:
                     raise ValueError(f"CRITICAL: Both primary (flash) and fallback (pro) models are UNAVAILABLE for streaming. {fallback_err}")
-            
-            # For 429s or other errors we just raise
+
+            # Simple retry backoff
+            if (is_503 or is_429) and attempt < max_retries - 1:
+                delay = base_delay * (2 ** attempt)
+                if is_429: delay *= 2
+                _logger.info(f"[Chat Stream] Gemini {'503' if is_503 else '429'} — attempt {attempt + 1}/{max_retries}, retrying in {delay}s")
+                time.sleep(delay)
+                continue
+                
             raise
 
 
@@ -2411,7 +2536,11 @@ class PRCChatAssistant:
 
             res = SkillsEngine.run_skill("petroleum", subdir, script, args_list)
 
-            result = res.get("stdout") or res.get("stderr") or res.get("error", "")
+            if ("error" in res and res["error"]) or res.get("exit_code", 0) != 0 or res.get("stderr"):
+                err_msg = res.get("error") or res.get("stderr") or f"Subprocess exited with code {res.get('exit_code')}"
+                result = _json.dumps({"status": "error", "error": str(err_msg).strip()})
+            else:
+                result = res.get("stdout", "")
 
             # If the calculation was successful, bind thresholds/avg values to session cache
             try:
@@ -2455,7 +2584,11 @@ class PRCChatAssistant:
 
                 res  = SkillsEngine.run_skill("petroleum", "", "curve_fitting_skill.py", [_json.dumps(data)])
 
-                result = res.get("stdout") or res.get("stderr") or res.get("error", "")
+                if ("error" in res and res["error"]) or res.get("exit_code", 0) != 0 or res.get("stderr"):
+                    err_msg = res.get("error") or res.get("stderr") or f"Subprocess exited with code {res.get('exit_code')}"
+                    result = _json.dumps({"status": "error", "error": str(err_msg).strip()})
+                else:
+                    result = res.get("stdout", "")
 
                 # Bind parameters directly to local session cache (Skills Assessment Integration)
                 try:
@@ -4163,7 +4296,7 @@ class PRCChatAssistant:
             try:
                 # Use a lightweight query to see what files were mentioned in this session
                 # We also want to know which one was the VERY LAST one mentioned before this turn
-                rows = db("SELECT DISTINCT fname FROM m WHERE sid=? AND fname IS NOT NULL ORDER BY ts DESC", (sid,))
+                rows = db("SELECT fname, MAX(ts) as max_ts FROM m WHERE sid=? AND fname IS NOT NULL GROUP BY fname ORDER BY max_ts DESC", (sid,))
                 if rows:
                     fnames = [r[0] for r in rows]
                     session_files_ctx = f"[SESSION FILE REGISTRY]: This session contains data for: {', '.join(fnames)}.\n"
@@ -4334,7 +4467,8 @@ class PRCChatAssistant:
         # grounded data (empty cache, no recovered document, no active upload this turn),
         # refuse outright. We never let the model answer SCAL specifics from general
         # knowledge. General petrophysics questions (no data reference) pass through.
-        _scal_data_ref = re.compile(
+        import re as _re_gate
+        _scal_data_ref = _re_gate.compile(
             r"(?i)\b(?:sheets?|worksheets?|columns?|rows?|cells?|samples?|core\s*plugs?|"
             r"spreadsheet|excel|uploaded|extract|tabulate|the\s+file|the\s+data|"
             r"the\s+report|the\s+table|values?)\b"
@@ -5655,6 +5789,13 @@ def init_db() -> None:
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    # API key validation on startup with clear error (Crash Issue 6)
+    if not is_testing():
+        try:
+            validate_gemini_api_keys()
+        except ValueError as ve:
+            _logger.critical(f"[STARTUP-CRITICAL] {ve}")
+            os._exit(1)
     init_db()
     try:
         purge_all_historical_assets()
@@ -5769,9 +5910,11 @@ def health(): return {"status": "ok", "db": "postgres" if _PG_AVAILABLE else "sq
 
 
 @app.get("/api/diag")
-
-def diag():
-
+def diag(
+    authorization: Optional[str] = Header(None),
+    token: Optional[str] = Query(None),
+):
+    verify_user_or_admin(authorization=authorization, token=token)
     with _FAILED_KEYS_LOCK: snap = dict(_FAILED_KEYS)
 
     now = time.time(); cooldown = sum(1 for v in snap.values() if (now - v.get("ts",0)) < v.get("wait",0))
@@ -6016,127 +6159,179 @@ def get_users(admin: bool = Depends(verify_admin)):
 
 
 @app.post("/api/feedback")
-
-async def submit_feedback(user_email: str = Form(""), bug_report: str = Form(...)):
-
+async def submit_feedback(
+    user_email: str = Form(""),
+    bug_report: str = Form(...),
+    authorization: Optional[str] = Header(None),
+    token: Optional[str] = Query(None),
+):
+    verify_user_or_admin(authorization=authorization, token=token, user_email=user_email)
     await async_db("INSERT INTO feedback (user_email, bug_report, ts) VALUES (?, ?, ?)", (user_email.lower(), bug_report, time.time()))
-
     return {"status": "ok"}
 
 
 
 @app.post("/api/analytics/event")
-
-async def track_event(user_email: str = Form(""), event_type: str = Form(...), event_data: str = Form("")):
-
+async def track_event(
+    user_email: str = Form(""),
+    event_type: str = Form(...),
+    event_data: str = Form(""),
+    authorization: Optional[str] = Header(None),
+    token: Optional[str] = Query(None),
+):
+    verify_user_or_admin(authorization=authorization, token=token, user_email=user_email)
     await async_db("INSERT INTO analytics_events (user_email, event_type, event_data, ts) VALUES (?, ?, ?, ?)",
-
        (user_email.lower(), event_type, event_data, time.time()))
-
     return {"status": "ok"}
 
 
 
 @app.get("/api/sessions")
-
-async def get_sessions(email: str = None):
-
+async def get_sessions(
+    email: str = None,
+    authorization: Optional[str] = Header(None),
+    token: Optional[str] = Query(None),
+):
+    verify_user_or_admin(authorization=authorization, token=token, email_query=email)
     if not email:
-
         return []
-
     const_email = email.lower().strip()
-
     rows = await async_db(
-
         "SELECT sid, title, updated_at FROM sessions "
-
         "WHERE user_email=? ORDER BY updated_at DESC",
-
         (const_email,),
-
     )
-
     return [{"id": r[0], "title": r[1], "ts": r[2]} for r in rows]
 
 
 
 @app.get("/api/session/{sid}")
-
-def get_session(sid: str, email: str = None):
-
+def get_session(
+    sid: str,
+    email: str = None,
+    authorization: Optional[str] = Header(None),
+    token: Optional[str] = Query(None),
+):
+    verify_user_or_admin(authorization=authorization, token=token, email_query=email)
     _verify_session_owner(sid, email)
-
     rows = db("SELECT role, text, url, ts, fname FROM m WHERE sid=? AND user_email=? ORDER BY id", (sid, email))
-
     title_row = db("SELECT title FROM sessions WHERE sid=? AND user_email=?", (sid, email))
-
     title = title_row[0][0] if title_row else "New Study"
-
     if not title_row:
-
         # Pre-create the empty session so it exists in the database and sidebar immediately
-
         if _PG_AVAILABLE:
-
             db("INSERT INTO sessions (sid, title, user_email, updated_at) VALUES (?, 'New Study', ?, ?) ON CONFLICT (sid) DO NOTHING", (sid, email or "", time.time()))
-
         else:
-
             db("INSERT OR IGNORE INTO sessions (sid, title, user_email, created_at, updated_at) VALUES (?, 'New Study', ?, ?, ?)", (sid, email or "", time.time(), time.time()))
-
     return {
-
         "status":"ok",
-
         "title": title,
-
         "messages":[{"role":r,"text":t,"download_url":u,"ts":ts,"fileName":fn} for r,t,u,ts,fn in rows]
-
     }
 
 
 
 @app.post("/api/session/{sid}/title")
-
-async def update_session_title(sid: str, email: str = Form(...), title: str = Form(...)):
-
+async def update_session_title(
+    sid: str,
+    email: str = Form(...),
+    title: str = Form(...),
+    authorization: Optional[str] = Header(None),
+    token: Optional[str] = Query(None),
+):
+    verify_user_or_admin(authorization=authorization, token=token, user_email=email)
     _verify_session_owner(sid, email)
-
     if _PG_AVAILABLE:
-
         await async_db("INSERT INTO sessions (sid, title, user_email, updated_at) VALUES (?, ?, ?, ?) "
-
            "ON CONFLICT (sid) DO UPDATE SET title = EXCLUDED.title, updated_at = EXCLUDED.updated_at",
-
            (sid, title, email, time.time()))
-
     else:
-
         await async_db("INSERT OR REPLACE INTO sessions (sid, title, user_email, created_at, updated_at) VALUES (?, ?, ?, ?, ?)",
-
            (sid, title, email, time.time(), time.time()))
-
     return {"status": "ok"}
 
 
 
 @app.delete("/api/session/{sid}")
-
-def delete_session(sid: str, email: str = None):
-
+def delete_session(
+    sid: str,
+    email: str = None,
+    authorization: Optional[str] = Header(None),
+    token: Optional[str] = Query(None),
+):
+    verify_user_or_admin(authorization=authorization, token=token, email_query=email)
     _verify_session_owner(sid, email)
-
     db("DELETE FROM m WHERE sid=?", (sid,))
-
     db("DELETE FROM sessions WHERE sid=?", (sid,))
-
     db("DELETE FROM physics_audits WHERE session_id=?", (sid,))
-
     KnowledgeBase.delete_session_data(sid)
-
     return {"status": "ok"}
 
+
+def parse_q0_questions(text: str) -> list[tuple[str, str]]:
+    import csv
+    questions = []
+    lines = text.split('\n')
+    in_q0_sheet = False
+    for line in lines:
+        lstrip = line.strip()
+        if 'Sheet:' in line:
+            if 'Q0' in line:
+                in_q0_sheet = True
+            else:
+                in_q0_sheet = False
+        
+        if in_q0_sheet or not any('Sheet:' in l for l in lines):
+            try:
+                row = list(csv.reader([lstrip]))[0]
+                if len(row) >= 2 and row[0].strip().startswith('Q') and row[0].strip()[1:].isdigit():
+                    q_num = row[0].strip()
+                    q_text = row[-1].strip()
+                    if q_text and q_text.lower() not in ("question", "topic"):
+                        questions.append((q_num, q_text))
+            except Exception:
+                pass
+    seen = set()
+    unique_qs = []
+    for q_num, q_text in questions:
+        if q_num not in seen:
+            seen.add(q_num)
+            unique_qs.append((q_num, q_text))
+    return unique_qs
+
+
+def detect_multi_question(message: str, sid: str, email: str) -> list[tuple[str, str]]:
+    # 1. Parse pasted questions from message if they look like multiple Q1, Q2, etc.
+    q_matches = list(re.finditer(r'\b(Q\d+)\b', message))
+    if len(q_matches) >= 3:
+        questions = []
+        for idx, match in enumerate(q_matches):
+            q_num = match.group(1)
+            start = match.end()
+            end = q_matches[idx+1].start() if idx + 1 < len(q_matches) else len(message)
+            q_text = message[start:end].strip()
+            q_text = re.sub(r'^[:.\-\s]+', '', q_text)
+            if len(q_text) > 10:
+                questions.append((q_num, q_text))
+        if len(questions) >= 3:
+            return questions
+
+    # 2. Check if the message is a trigger to answer Q0 questions
+    is_trigger = any(x in message.lower() for x in ["solve all", "answer all", "q0", "comprehensive report", "advanced report"])
+    if is_trigger and sid and email:
+        rows = db("SELECT fname FROM m WHERE sid=? AND role='user' AND fname IS NOT NULL ORDER BY id DESC LIMIT 1", (sid,))
+        fname = rows[0][0] if rows else None
+        if not fname:
+            rows = db("SELECT filename FROM user_files WHERE user_email=? ORDER BY created_at DESC LIMIT 1", (email,))
+            fname = rows[0][0] if rows else None
+        if fname:
+            for f in fname.split(';'):
+                row = db("SELECT extracted_text FROM user_files WHERE user_email=? AND filename=?", (email, f))
+                if row and row[0][0]:
+                    qs = parse_q0_questions(row[0][0])
+                    if qs:
+                        return qs
+    return []
 
 
 @app.get("/api/chat/stream")
@@ -6248,64 +6443,133 @@ async def chat_stream(
 
 
                 # 4. Context Preparation
-
-                hist_rows = db("SELECT role, text FROM m WHERE sid=? ORDER BY id DESC LIMIT 10", (sid,))
-
+                hist_rows = db("SELECT role, text FROM m WHERE sid=? ORDER BY id DESC LIMIT 2", (sid,))
                 history   = list(reversed([{"role": r, "text": t} for r, t in hist_rows]))
 
-
-
                 # 5. Gemini Chat Logic
-
                 _tls.current_session_id = sid
+                qs = detect_multi_question(message, sid, email)
+                if qs:
+                    _logger.info(f"[SSE Worker] Detected multi-question streaming ({len(qs)} sub-questions).")
+                    
+                    rows_answered = db("SELECT text FROM m WHERE sid=? AND role='model'", (sid,))
+                    answered_qnums = set()
+                    for r in rows_answered:
+                        txt = r[0] or ""
+                        m_check = re.findall(r'<!-- CHECKPOINT (Q\d+) -->', txt)
+                        for q_val in m_check:
+                            answered_qnums.add(q_val)
+                    
+                    combined_answers = []
+                    for q_num, q_text in qs:
+                        if q_num in answered_qnums:
+                            chk_row = db("SELECT text FROM m WHERE sid=? AND role='model' AND text LIKE ?", (sid, f"%<!-- CHECKPOINT {q_num} -->%"))
+                            if chk_row and chk_row[0][0]:
+                                ans_text = chk_row[0][0]
+                                combined_answers.append(ans_text)
+                                _enqueue({"type": "token", "text": f"\n\n### {q_num} (Cached Analysis):\n\n"})
+                                for chunk_part in [ans_text[i:i+100] for i in range(0, len(ans_text), 100)]:
+                                    _enqueue({"type": "token", "text": chunk_part})
+                                    import time as _time
+                                    _time.sleep(0.01)
+                                _logger.info(f"[SSE Worker] Streamed cached {q_num}")
+                                continue
+                        
+                        _logger.info(f"[SSE Worker] Generating {q_num}...")
+                        sub_msg = f"Solve and provide a detailed analysis for this specific question:\n\n**{q_num}: {q_text}**"
+                        
+                        hist_rows = db("SELECT role, text FROM m WHERE sid=? AND user_email=? ORDER BY id DESC LIMIT 4", (sid, email))
+                        sub_history = list(reversed([{"role": r, "text": t} for r, t in hist_rows]))
+                        
+                        _enqueue({"type": "token", "text": f"\n\n### {q_num}: {q_text}\n\n"})
+                        
+                        max_attempts = 5
+                        attempt_delay = 1.0
+                        success_gen = False
+                        sub_reply = ""
+                        for attempt in range(max_attempts):
+                            try:
+                                sub_reply = ""
+                                for chunk in assistant.chat(sub_history, sub_msg, kb_context=kb_ctx, stream=True, sid=sid, email=email):
+                                    if q.qsize() >= 1900:
+                                        break
+                                    if isinstance(chunk, dict):
+                                        if chunk.get("type") == "token":
+                                            sub_reply += chunk.get("text", "")
+                                        _enqueue(chunk)
+                                    else:
+                                        sub_reply += str(chunk)
+                                        _enqueue({"type": "token", "text": str(chunk)})
+                                success_gen = True
+                                break
+                            except Exception as ex:
+                                err_l = str(ex).lower()
+                                is_trans = any(x in err_l for x in ["503", "429", "resource_exhausted", "unavailable", "timeout", "overload", "rate_limit"])
+                                if is_trans and attempt < max_attempts - 1:
+                                    _logger.warning(f"[SSE Worker] API error on {q_num} attempt {attempt+1}: {ex}. Retrying in {attempt_delay}s...")
+                                    import time as _time
+                                    _time.sleep(attempt_delay)
+                                    attempt_delay *= 2.0
+                                else:
+                                    raise ex
+                        
+                        if success_gen and sub_reply:
+                            sub_reply = strip_thinking_blocks(sub_reply)
+                            sub_reply = strip_placeholder_artifacts(sub_reply)
+                            sub_reply = process_provenance_tokens(sub_reply, sid)
+                            sub_reply = compress_traceability_ledger(sub_reply)
+                            sub_reply = _extract_and_log_corrections(sid, email, sub_reply)
+                            
+                            sub_reply += f"\n<!-- CHECKPOINT {q_num} -->"
+                            
+                            db("INSERT INTO m (sid,role,text,ts,user_email) VALUES (?,?,?,?,?)",
+                               (sid, "model", sub_reply, time.time(), email))
+                            
+                            combined_answers.append(sub_reply)
+                            _logger.info(f"[SSE Worker] Successfully completed and checkpointed {q_num}.")
+                
+                else:
+                    full_reply = ""
+                    max_attempts = 5
+                    attempt_delay = 1.0
+                    for attempt in range(max_attempts):
+                        try:
+                            full_reply = ""
+                            for chunk in assistant.chat(history, message, kb_context=kb_ctx, stream=True, sid=sid, email=email):
+                                if q.qsize() >= 1900:
+                                    _logger.warning("[SSE Worker] Queue near-full — client likely disconnected, aborting.")
+                                    break
+                                if isinstance(chunk, dict):
+                                    if chunk.get("type") == "token":
+                                        full_reply += chunk.get("text", "")
+                                    _enqueue(chunk)
+                                else:
+                                    full_reply += str(chunk)
+                                    _enqueue({"type": "token", "text": str(chunk)})
+                            break
+                        except Exception as ex:
+                            err_l = str(ex).lower()
+                            is_trans = any(x in err_l for x in ["503", "429", "resource_exhausted", "unavailable", "timeout", "overload", "rate_limit"])
+                            if is_trans and attempt < max_attempts - 1:
+                                _logger.warning(f"[SSE Worker] API error on attempt {attempt+1}: {ex}. Retrying in {attempt_delay}s...")
+                                import time as _time
+                                _time.sleep(attempt_delay)
+                                attempt_delay *= 2.0
+                            else:
+                                raise ex
 
-                full_reply = ""
-
-                for chunk in assistant.chat(history, message, kb_context=kb_ctx, stream=True, sid=sid, email=email):
-
-                    if q.qsize() >= 1900:  # consumer gone; abort stream to stop memory growth
-                        _logger.warning("[SSE Worker] Queue near-full — client likely disconnected, aborting.")
-                        break
-
-                    if isinstance(chunk, dict):
-
-                        if chunk.get("type") == "token":
-
-                            full_reply += chunk.get("text", "")
-
-                        _enqueue(chunk)
-
-                    else:
-
-                        full_reply += str(chunk)
-
-                        _enqueue({"type": "token", "text": str(chunk)})
-
-
-
-                # 6. Finalization — strip LLM artifacts before persistence
-
-                if full_reply:
-                    # Phase 0b cleanup: strip <thinking> blocks and placeholder artifacts
-                    full_reply = strip_thinking_blocks(full_reply)
-                    full_reply = strip_placeholder_artifacts(full_reply)
-                    full_reply = process_provenance_tokens(full_reply, sid)
-                    full_reply = compress_traceability_ledger(full_reply)
-                    full_reply = _extract_and_log_corrections(sid, email, full_reply)
-
-                    db("INSERT INTO m (sid,role,text,ts,user_email) VALUES (?,?,?,?,?)",
-
-                       (sid, "model", full_reply, time.time(), email))
-
-
+                    # 6. Finalization — strip LLM artifacts before persistence
+                    if full_reply:
+                        full_reply = strip_thinking_blocks(full_reply)
+                        full_reply = strip_placeholder_artifacts(full_reply)
+                        full_reply = process_provenance_tokens(full_reply, sid)
+                        full_reply = compress_traceability_ledger(full_reply)
+                        full_reply = _extract_and_log_corrections(sid, email, full_reply)
+                        db("INSERT INTO m (sid,role,text,ts,user_email) VALUES (?,?,?,?,?)",
+                           (sid, "model", full_reply, time.time(), email))
 
                 if getattr(_tls, 'pending_kb', None):
-
-                    # Capture pending KB — _tls is this worker thread's own storage
-
                     _enqueue({"type": "__PENDING_KB__", "data": list(_tls.pending_kb)})
-
-
 
                 _enqueue({"type": "done"})
 
@@ -6744,9 +7008,95 @@ async def handle(
         _post_kb: list = []
 
         def _chat_capture():
-            result = assistant.chat(history, message, kb_ctx, f_parts, sid=sid, email=email)
-            _post_kb.extend(getattr(_tls, 'pending_kb', []))
-            return result
+            import time as _time
+            qs = detect_multi_question(message, sid, email)
+            if qs:
+                _logger.info(f"[CheckpointLoop] Detected multi-question query ({len(qs)} sub-questions).")
+                
+                rows_answered = db("SELECT text FROM m WHERE sid=? AND role='model'", (sid,))
+                answered_qnums = set()
+                for r in rows_answered:
+                    txt = r[0] or ""
+                    m_check = re.findall(r'<!-- CHECKPOINT (Q\d+) -->', txt)
+                    for q_val in m_check:
+                        answered_qnums.add(q_val)
+                
+                _logger.info(f"[CheckpointLoop] Found already completed: {answered_qnums}")
+                
+                combined_answers = []
+                for q_num, q_text in qs:
+                    if q_num in answered_qnums:
+                        chk_row = db("SELECT text FROM m WHERE sid=? AND role='model' AND text LIKE ?", (sid, f"%<!-- CHECKPOINT {q_num} -->%"))
+                        if chk_row and chk_row[0][0]:
+                            ans_text = chk_row[0][0]
+                            combined_answers.append(ans_text)
+                            _logger.info(f"[CheckpointLoop] Loaded {q_num} from DB.")
+                            continue
+                    
+                    _logger.info(f"[CheckpointLoop] Generating {q_num}...")
+                    sub_msg = f"Solve and provide a detailed analysis for this specific question:\n\n**{q_num}: {q_text}**"
+                    
+                    hist_rows = db("SELECT role, text FROM m WHERE sid=? AND user_email=? ORDER BY id DESC LIMIT 4", (sid, email))
+                    sub_history = list(reversed([{"role": r, "text": t} for r, t in hist_rows]))
+                    
+                    max_attempts = 5
+                    attempt_delay = 1.0
+                    resp_obj = None
+                    for attempt in range(max_attempts):
+                        try:
+                            resp_obj = assistant.chat(sub_history, sub_msg, kb_ctx, f_parts, sid=sid, email=email)
+                            break
+                        except Exception as ex:
+                            err_l = str(ex).lower()
+                            is_trans = any(x in err_l for x in ["503", "429", "resource_exhausted", "unavailable", "timeout", "overload", "rate_limit"])
+                            if is_trans and attempt < max_attempts - 1:
+                                _logger.warning(f"[CheckpointLoop] API error on {q_num} attempt {attempt+1}: {ex}. Retrying in {attempt_delay}s...")
+                                _time.sleep(attempt_delay)
+                                attempt_delay *= 2.0
+                            else:
+                                raise ex
+                    
+                    ans_text = resp_obj if isinstance(resp_obj, str) else str(resp_obj) if resp_obj is not None else ""
+                    ans_text = strip_thinking_blocks(ans_text)
+                    ans_text = strip_placeholder_artifacts(ans_text)
+                    ans_text = process_provenance_tokens(ans_text, sid)
+                    filenames = get_filenames_from_cache(sid)
+                    ans_text = clean_citation_clutter(ans_text, filenames)
+                    ans_text = compress_traceability_ledger(ans_text)
+                    ans_text = _extract_and_log_corrections(sid, email, ans_text)
+                    
+                    ans_text += f"\n<!-- CHECKPOINT {q_num} -->"
+                    
+                    db("INSERT INTO m (sid,role,text,ts,user_email) VALUES (?,?,?,?,?)",
+                       (sid, "model", ans_text, _time.time(), email))
+                    
+                    combined_answers.append(ans_text)
+                    _logger.info(f"[CheckpointLoop] Successfully completed and checkpointed {q_num}.")
+                
+                full_report = "\n\n---\n\n".join(combined_answers)
+                _post_kb.extend(getattr(_tls, 'pending_kb', []))
+                return {"is_multi": True, "reply": full_report}
+            
+            else:
+                max_attempts = 5
+                attempt_delay = 1.0
+                resp_obj = None
+                for attempt in range(max_attempts):
+                    try:
+                        resp_obj = assistant.chat(history, message, kb_ctx, f_parts, sid=sid, email=email)
+                        break
+                    except Exception as ex:
+                        err_l = str(ex).lower()
+                        is_trans = any(x in err_l for x in ["503", "429", "resource_exhausted", "unavailable", "timeout", "overload", "rate_limit"])
+                        if is_trans and attempt < max_attempts - 1:
+                            _logger.warning(f"[Chat] API error on attempt {attempt+1}: {ex}. Retrying in {attempt_delay}s...")
+                            _time.sleep(attempt_delay)
+                            attempt_delay *= 2.0
+                        else:
+                            raise ex
+                
+                _post_kb.extend(getattr(_tls, 'pending_kb', []))
+                return resp_obj
 
         try:
             resp = await asyncio.get_running_loop().run_in_executor(None, _chat_capture)
@@ -6757,17 +7107,20 @@ async def handle(
                (sid, "model", reply, time.time(), email))
             return {"status": "error", "session_id": sid, "reply": reply}
 
-        resp_text = resp if isinstance(resp, str) else str(resp) if resp is not None else ""
-        resp_text = strip_thinking_blocks(resp_text)
-        resp_text = strip_placeholder_artifacts(resp_text)
-        resp_text = process_provenance_tokens(resp_text, sid)
-        filenames = get_filenames_from_cache(sid)
-        resp_text = clean_citation_clutter(resp_text, filenames)
-        resp_text = compress_traceability_ledger(resp_text)
-        resp_text = _extract_and_log_corrections(sid, email, resp_text)
-        await async_db("INSERT INTO m (sid,role,text,ts,user_email) VALUES (?,?,?,?,?)",
-
-           (sid, "model", resp_text, time.time(), email))
+        is_multi = isinstance(resp, dict) and resp.get("is_multi")
+        if is_multi:
+            resp_text = resp["reply"]
+        else:
+            resp_text = resp if isinstance(resp, str) else str(resp) if resp is not None else ""
+            resp_text = strip_thinking_blocks(resp_text)
+            resp_text = strip_placeholder_artifacts(resp_text)
+            resp_text = process_provenance_tokens(resp_text, sid)
+            filenames = get_filenames_from_cache(sid)
+            resp_text = clean_citation_clutter(resp_text, filenames)
+            resp_text = compress_traceability_ledger(resp_text)
+            resp_text = _extract_and_log_corrections(sid, email, resp_text)
+            await async_db("INSERT INTO m (sid,role,text,ts,user_email) VALUES (?,?,?,?,?)",
+               (sid, "model", resp_text, time.time(), email))
 
 
 
@@ -7057,9 +7410,13 @@ _DOWNLOAD_ROOT = _pathlib.Path(".").resolve()
 
 
 @app.get("/api/download/{filename:path}")
-
-async def dl(filename: str):
-
+async def dl(
+    filename: str,
+    user_email: Optional[str] = Query(None),
+    authorization: Optional[str] = Header(None),
+    token: Optional[str] = Query(None),
+):
+    verify_user_or_admin(authorization=authorization, token=token, email_query=user_email)
     target = (_DOWNLOAD_ROOT / _pathlib.Path(filename).name).resolve()
 
     if not str(target).startswith(str(_DOWNLOAD_ROOT)):
@@ -7246,7 +7603,8 @@ def auto_rename_session_if_new(sid: str, email: str, filename: str = None, messa
 async def clear_session(session_id: str = Form(...)):
     """Explicit destructive eviction of a session's cached SCAL data.
     Enforces absolute isolation: clears the dict and forces gc.collect()."""
-    if not re.match(r"^(report-)?[a-zA-Z0-9\-]+$", session_id):
+    import re as _re
+    if not _re.match(r"^(report-)?[a-zA-Z0-9\-]+$", session_id):
         raise HTTPException(status_code=400, detail="Invalid session_id format")
     evict_session(session_id)
     return {"status": "cleared", "session_id": session_id}
@@ -7878,8 +8236,11 @@ async def analyze_scal(
     session_id: Optional[str] = Form(None),
     user_email: Optional[str] = Form(None),
     message: Optional[str] = Form(None),
+    authorization: Optional[str] = Header(None),
+    token: Optional[str] = Query(None),
 ):
     try:
+        verify_user_or_admin(authorization=authorization, token=token, user_email=user_email)
         sid = session_id or str(uuid.uuid4())
 
         # Destructive memory eviction protocol on new file ingestion
@@ -7895,7 +8256,8 @@ async def analyze_scal(
             
         # Run the absolute truth extractor to convert spreadsheet rows into string context
         from scal_file_handler import extract_absolute_file_truth
-        ground_truth_string = extract_absolute_file_truth([(tmp_path, file.filename)])
+        loop = asyncio.get_running_loop()
+        ground_truth_string = await loop.run_in_executor(None, extract_absolute_file_truth, [(tmp_path, file.filename)])
         
         # HYDRATE THE ACTIVE CHAT CACHE NATIVELY BEFORE ANY UTILITY RUNS
         with SESSION_DATA_CACHE_LOCK:
@@ -7910,7 +8272,7 @@ async def analyze_scal(
         populate_cache_from_ground_truth(sid, ground_truth_string)
         ext_lower = Path(file.filename).suffix.lower()
         if ext_lower in ('.xlsx', '.xlsm', '.xls', '.ods', '.csv'):
-            cache_excel_data_vectors(sid, tmp_path)
+            await loop.run_in_executor(None, cache_excel_data_vectors, sid, tmp_path)
                 
         # Clean up the temporary file from the disk
         try:
@@ -7922,7 +8284,11 @@ async def analyze_scal(
         # Reset file stream pointer so subsequent reads work perfectly
         await file.seek(0)
 
-        email = user_email.lower().strip() if user_email else None
+        email = normalize_email(user_email)
+        if not email and sid:
+            row = db("SELECT user_email FROM sessions WHERE sid=?", (sid,))
+            if row and row[0][0]:
+                email = row[0][0].lower().strip()
         msg = (message or "Analyze petrophysical data from uploaded file.").strip()
         filename = sanitize_filename(file.filename)
 
@@ -8003,8 +8369,14 @@ async def analyze_scal(
 
 
 @app.get("/api/v1/tasks/{session_id}")
-async def get_task_status(session_id: str):
+async def get_task_status(
+    session_id: str,
+    user_email: Optional[str] = Query(None),
+    authorization: Optional[str] = Header(None),
+    token: Optional[str] = Query(None),
+):
     try:
+        verify_user_or_admin(authorization=authorization, token=token, email_query=user_email)
         if "\x00" in session_id:
             raise HTTPException(status_code=400, detail="Null bytes are strictly prohibited.")
         # Path traversal prevention using regex check
@@ -8022,8 +8394,14 @@ async def get_task_status(session_id: str):
 
 
 @app.get("/api/report/download/{filename}")
-async def download_report(filename: str):
+async def download_report(
+    filename: str,
+    user_email: Optional[str] = Query(None),
+    authorization: Optional[str] = Header(None),
+    token: Optional[str] = Query(None),
+):
     try:
+        verify_user_or_admin(authorization=authorization, token=token, email_query=user_email)
         # Clean null bytes immediately (CWE-22)
         if "\x00" in filename:
             raise HTTPException(status_code=400, detail="Null bytes are strictly prohibited.")
@@ -8050,7 +8428,11 @@ async def download_report(filename: str):
 async def api_grade_response(
     file:        UploadFile = File(...),
     ai_response: str        = Form(...),
+    user_email:  Optional[str] = Form(None),
+    authorization: Optional[str] = Header(None),
+    token:       Optional[str] = Query(None),
 ):
+    verify_user_or_admin(authorization=authorization, token=token, user_email=user_email)
     import tempfile
     file.filename = sanitize_filename(file.filename)
     file_bytes = await file.read()

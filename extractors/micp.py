@@ -100,6 +100,15 @@ class MICPExtractor(BaseExtractor):
                 data     = df.iloc[i + 1:].reset_index(drop=True)
                 data.columns = range(len(data.columns))
 
+                # Truncate at first empty or non-numeric row to isolate the main table
+                cutoff = len(data)
+                for idx_r, r in data.iterrows():
+                    first_val = r.iloc[0]
+                    if pd.isna(first_val) or (isinstance(first_val, str) and not re.match(r'^\s*[-+]?\d', first_val)):
+                        cutoff = idx_r
+                        break
+                data = data.iloc[:cutoff].reset_index(drop=True)
+
                 press_col = next(
                     (j for j, h in enumerate(headers)
                      if any(kw in str(h).lower() for kw in ['press', 'psia', 'mpa', 'pc'])),

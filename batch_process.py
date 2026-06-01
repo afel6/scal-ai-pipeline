@@ -189,7 +189,7 @@ def _process_micp(df: pd.DataFrame, res: BatchResult) -> None:
 
     entry_mask       = shg_s > 0.01
     pe               = float(pc_s[entry_mask][0]) if entry_mask.any() else float(pc_s[0])
-    thr_r            = 107.5 / max(pe, 0.1)
+    thr_r            = 107.6 / max(pe, 0.1)
 
     res.entry_pressure = round(pe, 2)
     res.modal_radius   = round(thr_r, 4)

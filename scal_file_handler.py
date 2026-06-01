@@ -478,6 +478,34 @@ def validate_extraction_against_inventory(
     return violations
 
 
+def sanitize_prompt(prompt: str) -> str:
+    """Sanitizes inputs against prompt injection attacks (Security Issue 3)."""
+    if not prompt:
+        return ""
+    adversarial_patterns = [
+        r"(?i)\bignore\s+(?:all\s+)?previous\s+instructions\b",
+        r"(?i)\bignore\s+(?:the\s+)?above\s+instructions\b",
+        r"(?i)\bignore\s+(?:the\s+)?system\s+prompt\b",
+        r"(?i)\byou\s+are\s+now\s+a\s+different\s+ai\b",
+        r"(?i)\bforget\s+(?:all\s+)?previous\s+instructions\b",
+        r"(?i)\bforget\s+(?:your\s+)?system\s+prompt\b",
+        r"(?i)\bswitch\s+(?:your\s+)?persona\b",
+        r"(?i)\bact\s+as\s+a\b",
+        r"(?i)\bnew\s+rule\b",
+        r"(?i)\bdo\s+not\s+follow\s+any\s+restrictions\b",
+        r"(?i)\breveal\s+(?:your\s+)?system\s+prompt\b",
+        r"(?i)\bshow\s+(?:your\s+)?system\s+prompt\b",
+        r"(?i)\bprint\s+(?:your\s+)?system\s+prompt\b",
+        r"(?i)\bwhat\s+is\s+your\s+system\s+prompt\b",
+        r"(?i)\boutput\s+(?:your\s+)?system\s+prompt\b",
+        r"(?i)\bexport\s+(?:your\s+)?system\s+prompt\b"
+    ]
+    sanitized = prompt
+    for pattern in adversarial_patterns:
+        sanitized = re.sub(pattern, "[PROMPT INJECTION BLOCK]", sanitized)
+    return sanitized
+
+
 # ------------------------------------------------------------------ #
 # DETERMINISTIC METADATA PRE-PARSER (Extract Absolute File Truth)
 # ------------------------------------------------------------------ #
@@ -507,7 +535,8 @@ def extract_absolute_file_truth(temp_file_paths: list) -> str:
 
     for file_path, original_filename in temp_file_paths:
         ext = Path(original_filename).suffix.lower()
-        lines.append(f"═══ FILE: {original_filename} ═══")
+        sanitized_filename = sanitize_prompt(original_filename)
+        lines.append(f"═══ FILE: {sanitized_filename} ═══")
 
         try:
             if ext in ('.xlsx', '.xlsm', '.xls', '.ods'):
@@ -517,23 +546,25 @@ def extract_absolute_file_truth(temp_file_paths: list) -> str:
                 )
                 xl = pd.ExcelFile(file_path, engine=engine)
                 sheet_names = xl.sheet_names
+                sanitized_sheet_names = [sanitize_prompt(s) for s in sheet_names]
                 lines.append(f"TOTAL SHEETS: {len(sheet_names)}")
-                lines.append(f"SHEET NAMES: {sheet_names}")
+                lines.append(f"SHEET NAMES: {sanitized_sheet_names}")
                 lines.append("")
 
                 for sheet in sheet_names:
                     df = pd.read_excel(xl, sheet_name=sheet, engine=engine)
                     full_df_shape = pd.read_excel(xl, sheet_name=sheet, header=None, engine=engine).shape
                     columns = list(df.columns)
-                    lines.append(f"  SHEET: \"{sheet}\"")
-                    lines.append(f"    COLUMNS ({len(columns)}): {columns}")
+                    sanitized_columns = [sanitize_prompt(str(c)) for c in columns]
+                    lines.append(f"  SHEET: \"{sanitize_prompt(sheet)}\"")
+                    lines.append(f"    COLUMNS ({len(columns)}): {sanitized_columns}")
                     lines.append(f"    FULL SHAPE: ({full_df_shape[0]} rows × {full_df_shape[1]} cols)")
                     # Print all rows as raw values to completely hydrate the data cache
                     for row_idx in range(len(df)):
                         row_vals = df.iloc[row_idx].tolist()
                         # Convert NaN to None for clarity
                         row_vals = [
-                            None if pd.isna(v) else (float(v) if isinstance(v, (int, float, np.integer, np.floating)) else str(v))
+                            None if pd.isna(v) else (float(v) if isinstance(v, (int, float, np.integer, np.floating)) else sanitize_prompt(str(v)))
                             for v in row_vals
                         ]
                         lines.append(f"    ROW {row_idx}: {row_vals}")
@@ -544,16 +575,17 @@ def extract_absolute_file_truth(temp_file_paths: list) -> str:
             elif ext == '.csv':
                 df = smart_read_csv(file_path)
                 columns = list(df.columns)
+                sanitized_columns = [sanitize_prompt(str(c)) for c in columns]
                 lines.append(f"TOTAL SHEETS: 1 (CSV)")
                 lines.append(f"SHEET NAMES: ['Sheet1']")
                 lines.append(f"  SHEET: \"Sheet1\"")
-                lines.append(f"    COLUMNS ({len(columns)}): {columns}")
+                lines.append(f"    COLUMNS ({len(columns)}): {sanitized_columns}")
                 lines.append(f"    FULL SHAPE: ({len(df)} rows × {len(columns)} cols)")
                 # Print all rows as raw values to completely hydrate the data cache
                 for row_idx in range(len(df)):
                     row_vals = df.iloc[row_idx].tolist()
                     row_vals = [
-                        None if pd.isna(v) else (float(v) if isinstance(v, (int, float, np.integer, np.floating)) else str(v))
+                        None if pd.isna(v) else (float(v) if isinstance(v, (int, float, np.integer, np.floating)) else sanitize_prompt(str(v)))
                         for v in row_vals
                     ]
                     lines.append(f"    ROW {row_idx}: {row_vals}")

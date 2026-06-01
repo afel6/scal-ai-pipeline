@@ -13,7 +13,7 @@ class LLMInsightGenerator:
         self.api_key = api_key
         self.client = None
         if self.api_key and self.api_key != "DUMMY_KEY":
-            self.client = genai.Client(api_key=api_key)
+            self.client = genai.Client(api_key=api_key, http_options={"timeout": 300000})
 
     def generate_report_insights(self, archie_params: dict, endpoints: dict) -> str:
         if not self.api_key or self.api_key == "DUMMY_KEY":
@@ -52,7 +52,7 @@ class MasterEngineerNode:
         self.api_key = api_key
         self.client = None
         if self.api_key and self.api_key != "DUMMY_KEY":
-            self.client = genai.Client(api_key=api_key)
+            self.client = genai.Client(api_key=api_key, http_options={"timeout": 300000})
 
     def analyze_scal_data(self, validated_json: list) -> str:
         if not self.client:
@@ -118,7 +118,7 @@ class DashboardArchitectNode:
         self.api_key = api_key
         self.client = None
         if self.api_key and self.api_key != "DUMMY_KEY":
-            self.client = genai.Client(api_key=api_key)
+            self.client = genai.Client(api_key=api_key, http_options={"timeout": 300000})
 
     def generate_dashboard_code(self, validated_json: list, master_engineer_directive: str) -> str:
         if not self.client:
