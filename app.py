@@ -21,6 +21,19 @@ from contextlib import asynccontextmanager, contextmanager
 from typing import Optional
 from concurrent.futures import ThreadPoolExecutor
 
+from dataclasses import dataclass, field
+from typing import List, Optional, Any
+
+@dataclass
+class ChatRequest:
+    history: list
+    msg: str
+    kb_context: str = ""
+    f_parts: list = field(default_factory=list)
+    stream: bool = False
+    sid: str = None
+    email: str = None
+
 import numpy as np
 
 
@@ -4315,7 +4328,15 @@ class PRCChatAssistant:
 
 
 
-    def chat(self, history: list, msg: str, kb_context: str = "", f_parts: list = [], stream: bool = False, sid: str = None, email: str = None):
+    def chat(self, request: ChatRequest):
+
+        history = request.history
+        msg = request.msg
+        kb_context = request.kb_context
+        f_parts = request.f_parts
+        stream = request.stream
+        sid = request.sid
+        email = request.email
 
         _tls.pending_kb = []       # thread-local: safe under 50+ concurrent workers
         _tls.last_well_name = None  # updated when a SCAL file is processed this turn
@@ -6544,7 +6565,7 @@ async def chat_stream(
                             for attempt in range(max_attempts):
                                 try:
                                     sub_reply = ""
-                                    for chunk in assistant.chat(sub_history, sub_msg, kb_context=kb_ctx, stream=True, sid=sid, email=email):
+                                    for chunk in assistant.chat(ChatRequest(history=sub_history, msg=sub_msg, kb_context=kb_ctx, stream=True, sid=sid, email=email)):
                                         if q.qsize() >= 1900:
                                             break
                                         if isinstance(chunk, dict):
@@ -6598,7 +6619,7 @@ async def chat_stream(
                     for attempt in range(max_attempts):
                         try:
                             full_reply = ""
-                            for chunk in assistant.chat(history, message, kb_context=kb_ctx, stream=True, sid=sid, email=email):
+                            for chunk in assistant.chat(ChatRequest(history=history, msg=message, kb_context=kb_ctx, stream=True, sid=sid, email=email)):
                                 if q.qsize() >= 1900:
                                     _logger.warning("[SSE Worker] Queue near-full — client likely disconnected, aborting.")
                                     break
@@ -7187,7 +7208,7 @@ async def handle(
                         resp_obj = None
                         for attempt in range(max_attempts):
                             try:
-                                resp_obj = assistant.chat(sub_history, sub_msg, kb_ctx, f_parts, sid=sid, email=email)
+                                resp_obj = assistant.chat(ChatRequest(history=sub_history, msg=sub_msg, kb_context=kb_ctx, f_parts=f_parts, sid=sid, email=email))
                                 break
                             except Exception as ex:
                                 err_l = str(ex).lower()
@@ -7235,7 +7256,7 @@ async def handle(
                 resp_obj = None
                 for attempt in range(max_attempts):
                     try:
-                        resp_obj = assistant.chat(history, message, kb_ctx, f_parts, sid=sid, email=email)
+                        resp_obj = assistant.chat(ChatRequest(history=history, msg=message, kb_context=kb_ctx, f_parts=f_parts, sid=sid, email=email))
                         break
                     except Exception as ex:
                         err_l = str(ex).lower()
