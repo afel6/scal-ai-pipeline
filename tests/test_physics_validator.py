@@ -54,3 +54,47 @@ def test_physics_guard_micp():
     score_bad = guard_bad.generate_health_score()
     assert score_bad["score"] < 100
     assert "MICP_NEGATIVE_PC" in [v["rule"] for v in score_bad["violations"]]
+
+def test_physics_guard_compressibility():
+    # Valid compressibility
+    guard = PhysicsGuard()
+    cp_valid = [5e-6, 10e-6, 25e-6]
+    guard.validate_compressibility(cp_valid)
+    score = guard.generate_health_score()
+    assert score["score"] == 100
+
+    # Negative compressibility
+    guard_neg = PhysicsGuard()
+    cp_neg = [5e-6, -2e-6, 10e-6]
+    guard_neg.validate_compressibility(cp_neg)
+    score_neg = guard_neg.generate_health_score()
+    assert score_neg["score"] < 100
+    assert "CP_NEGATIVE" in [v["rule"] for v in score_neg["violations"]]
+
+    # High compressibility (>50e-6)
+    guard_high = PhysicsGuard()
+    cp_high = [10e-6, 60e-6]
+    guard_high.validate_compressibility(cp_high)
+    score_high = guard_high.generate_health_score()
+    assert score_high["score"] < 100
+    assert "CP_MAX_IMPOSSIBLE" in [v["rule"] for v in score_high["violations"]]
+
+    # Catastrophic compressibility (>100e-6)
+    guard_catastrophic = PhysicsGuard()
+    cp_catastrophic = [10e-6, 150e-6]
+    guard_catastrophic.validate_compressibility(cp_catastrophic)
+    score_catastrophic = guard_catastrophic.generate_health_score()
+    assert score_catastrophic["score"] < 100
+    rules = [v["rule"] for v in score_catastrophic["violations"]]
+    assert "CP_MAX_IMPOSSIBLE" in rules
+    assert "CP_CATASTROPHIC" in rules
+
+    # Edge cases (nan, inf, 0)
+    # The validate_compressibility method filters out non-finite values (np.nan, np.inf)
+    # and zero values, so an array containing only these will result in an empty valid
+    # array and no violations will be flagged.
+    guard_edge = PhysicsGuard()
+    cp_edge = [0.0, np.nan, np.inf]
+    guard_edge.validate_compressibility(cp_edge)
+    score_edge = guard_edge.generate_health_score()
+    assert score_edge["score"] == 100
