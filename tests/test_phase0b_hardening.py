@@ -18,6 +18,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 from scal_file_handler import (
     SCALFileHandler,
     strip_thinking_blocks,
+    fix_markdown_spacing,
     strip_placeholder_artifacts,
     validate_extraction_against_inventory,
     detect_multi_well_mixing,
@@ -197,6 +198,45 @@ class TestStructuralValidation:
 # ────────────────────────────────────────────────────────
 # TEST: <thinking> Block Stripping
 # ────────────────────────────────────────────────────────
+
+
+
+class TestFixMarkdownSpacing:
+
+    def test_empty_input(self):
+        assert fix_markdown_spacing("") == ""
+        assert fix_markdown_spacing(None) is None
+
+    def test_heading_spacing(self):
+        # Heading with no preceding newline
+        text = "Some text## Heading 2"
+        assert fix_markdown_spacing(text) == "Some text\n\n## Heading 2"
+
+        # Heading with only one preceding newline
+        text = "Some text\n### Heading 3"
+        assert fix_markdown_spacing(text) == "Some text\n\n### Heading 3"
+
+        # Heading with proper double newline
+        text = "Some text\n\n## Heading 2"
+        assert fix_markdown_spacing(text) == "Some text\n\n## Heading 2"
+
+    def test_table_spacing(self):
+        # Table with no preceding newline
+        text = "Some text| Col 1 | Col 2 |"
+        assert fix_markdown_spacing(text) == "Some text\n\n| Col 1 | Col 2 |"
+
+        # Table with one preceding newline
+        text = "Some text\n| Col 1 | Col 2 |"
+        assert fix_markdown_spacing(text) == "Some text\n\n| Col 1 | Col 2 |"
+
+        # Table already properly spaced
+        text = "Some text\n\n| Col 1 | Col 2 |"
+        assert fix_markdown_spacing(text) == "Some text\n\n| Col 1 | Col 2 |"
+
+    def test_table_concatenation(self):
+        # Table rows concatenated without newlines
+        text = "| Col 1 | Col 2 | | Val 1 | Val 2 |"
+        assert fix_markdown_spacing(text) == "| Col 1 | Col 2 |\n| Val 1 | Val 2 |"
 
 class TestThinkingBlockStrip:
 
