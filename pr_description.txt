@@ -1,0 +1,4 @@
+🎯 **What:** Removed the unused `Paragraph` import (`from docx.text.paragraph import Paragraph`) from the `_read_docx` function in `file_reader.py`.
+💡 **Why:** This resolves a static analysis warning, improves code health by reducing namespace clutter, and prevents confusion regarding dependencies.
+✅ **Verification:** Ran the full pytest suite (219 tests), and all passed without errors. Verified that `Paragraph` was not actually used in `file_reader.py`.
+✨ **Result:** A cleaner `file_reader.py` with no unused imports, improving maintainability without changing any functionality.
