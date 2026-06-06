@@ -61,12 +61,14 @@ def init_postgres_db(conn):
         "CREATE TABLE IF NOT EXISTS session_cache (sid TEXT PRIMARY KEY, ground_truth TEXT, labeled_values TEXT, flat_vectors TEXT, raw_excel_data TEXT, updated_at REAL)",
     ]
 
-    pg_stmts = [
-        s.replace("INTEGER PRIMARY KEY AUTOINCREMENT", "SERIAL PRIMARY KEY")
-         .replace("BLOB", "BYTEA")
-         .replace(" REAL", " TIMESTAMP")
-        for s in base_stmts
-    ]
+    # Do replacements safely. We must not replace "REAL" with "TIMESTAMP" blindly,
+    # because cost_usd is a REAL (float).
+    pg_stmts = []
+    for s in base_stmts:
+        s = s.replace("INTEGER PRIMARY KEY AUTOINCREMENT", "SERIAL PRIMARY KEY").replace("BLOB", "BYTEA")
+        # specific replacement for known timestamp columns
+        s = s.replace("ts REAL", "ts TIMESTAMP").replace("created_at REAL", "created_at TIMESTAMP").replace("updated_at REAL", "updated_at TIMESTAMP").replace("timestamp REAL", "timestamp TIMESTAMP")
+        pg_stmts.append(s)
 
     indices = [
         "CREATE INDEX IF NOT EXISTS idx_query_hash ON response_cache(query_hash)",
@@ -178,7 +180,7 @@ def migrate_data(pg_conn):
                 if isinstance(val, memoryview):
                      row_values[i] = val.tobytes()
                 # For TIMESTAMP columns, we need to convert float (REAL) to datetime
-                elif isinstance(val, float) and "ts" in columns or "timestamp" in columns or "created_at" in columns or "updated_at" in columns:
+                elif isinstance(val, float) and ("ts" in columns or "timestamp" in columns or "created_at" in columns or "updated_at" in columns):
                      # Attempt to find if this column is actually a timestamp column
                      col_name = list(columns)[i]
                      if col_name in ["ts", "timestamp", "created_at", "updated_at"] and val is not None:

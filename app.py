@@ -5999,14 +5999,38 @@ async def get_telemetry_metrics(
     except Exception:
         total_processed_datasets = 0
         
+    db_metrics = {}
+    if _PG_AVAILABLE and _PG_POOL is not None:
+        try:
+            # ThreadedConnectionPool internal variables
+            if hasattr(_PG_POOL, "_used"):
+                db_metrics["pg_pool_active_connections"] = len(_PG_POOL._used)
+            if hasattr(_PG_POOL, "_pool"):
+                db_metrics["pg_pool_idle_connections"] = len(_PG_POOL._pool)
+            if hasattr(_PG_POOL, "maxconn"):
+                db_metrics["pg_pool_max_connections"] = _PG_POOL.maxconn
+        except Exception as e:
+            _logger.error(f"Error fetching pg pool metrics: {e}")
+    else:
+        try:
+            db_path_obj = Path(DB_PATH)
+            db_metrics["sqlite_db_size_kb"] = db_path_obj.stat().st_size / 1024.0 if db_path_obj.exists() else 0.0
+            wal_path_obj = Path(str(DB_PATH) + "-wal")
+            db_metrics["sqlite_wal_size_kb"] = wal_path_obj.stat().st_size / 1024.0 if wal_path_obj.exists() else 0.0
+        except Exception as e:
+            _logger.error(f"Error fetching sqlite metrics: {e}")
+
+    metrics_payload = {
+        "average_document_compilation_latency_seconds": round(avg_latency, 2),
+        "cumulative_api_token_cost_usd": round(cumulative_cost_usd, 6),
+        "total_processed_datasets_volume": total_processed_datasets,
+        "cached_report_runs_count": len(latencies)
+    }
+    metrics_payload.update(db_metrics)
+
     return {
         "status": "success",
-        "metrics": {
-            "average_document_compilation_latency_seconds": round(avg_latency, 2),
-            "cumulative_api_token_cost_usd": round(cumulative_cost_usd, 6),
-            "total_processed_datasets_volume": total_processed_datasets,
-            "cached_report_runs_count": len(latencies)
-        }
+        "metrics": metrics_payload
     }
 
 
