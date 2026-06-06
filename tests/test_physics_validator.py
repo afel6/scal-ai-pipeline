@@ -54,3 +54,46 @@ def test_physics_guard_micp():
     score_bad = guard_bad.generate_health_score()
     assert score_bad["score"] < 100
     assert "MICP_NEGATIVE_PC" in [v["rule"] for v in score_bad["violations"]]
+
+def test_validate_j_function():
+    # Happy path
+    guard = PhysicsGuard()
+    j_valid = np.array([0.1, 0.4, 1.5])
+    sw_valid = np.array([1.0, 0.9, 0.2])
+    guard.validate_j_function(j_valid, sw_valid)
+    score = guard.generate_health_score()
+    assert score["score"] == 100
+
+    # Negative J value
+    guard_neg = PhysicsGuard()
+    j_neg = np.array([-0.1, 0.4, 1.5])
+    guard_neg.validate_j_function(j_neg)
+    score_neg = guard_neg.generate_health_score()
+    assert score_neg["score"] < 100
+    assert "J_NEGATIVE" in [v["rule"] for v in score_neg["violations"]]
+
+    # Entry IFT Mismatch (J > 0.5 at Sw < 0.95)
+    guard_ift = PhysicsGuard()
+    j_ift = np.array([0.1, 0.6, 1.5])
+    sw_ift = np.array([1.0, 0.9, 0.2])
+    guard_ift.validate_j_function(j_ift, sw_ift)
+    score_ift = guard_ift.generate_health_score()
+    assert score_ift["score"] < 100
+    assert "J_ENTRY_IFT_MISMATCH" in [v["rule"] for v in score_ift["violations"]]
+
+    # Maximum J Impossible (J > 2.0)
+    guard_max = PhysicsGuard()
+    j_max = np.array([0.1, 0.4, 3.0])
+    guard_max.validate_j_function(j_max)
+    score_max = guard_max.generate_health_score()
+    assert score_max["score"] < 100
+    assert "J_MAX_IMPOSSIBLE" in [v["rule"] for v in score_max["violations"]]
+
+    # Catastrophic Maximum J (J > 5.0)
+    guard_cat = PhysicsGuard()
+    j_cat = np.array([0.1, 0.4, 6.0])
+    guard_cat.validate_j_function(j_cat)
+    score_cat = guard_cat.generate_health_score()
+    assert score_cat["score"] < 100
+    assert "J_MAX_IMPOSSIBLE" in [v["rule"] for v in score_cat["violations"]]
+    assert "J_CATASTROPHIC" in [v["rule"] for v in score_cat["violations"]]
