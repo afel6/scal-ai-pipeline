@@ -1644,10 +1644,11 @@ def _ingest_library_file(file_bytes: bytes, filename: str, uploader_email: str) 
                 )
                 doc_id = cur.fetchone()[0]
 
-            for chunk_text, emb_bytes in embedded:
-                cur.execute(
+            chunk_data = [(doc_id, chunk_text, emb_bytes, filename) for chunk_text, emb_bytes in embedded]
+            if chunk_data:
+                cur.executemany(
                     f"INSERT INTO library_chunks (doc_id, chunk_text, embedding, source) VALUES ({ph},{ph},{ph},{ph})",
-                    (doc_id, chunk_text, emb_bytes, filename),
+                    chunk_data
                 )
 
             conn.commit()
