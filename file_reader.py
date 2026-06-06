@@ -303,7 +303,6 @@ def _read_docx(filepath, target_identifier=None):
     try:
         import docx
         from docx.oxml.ns import qn
-        from docx.text.paragraph import Paragraph
         from docx.table import Table as DocxTable
         doc = docx.Document(filepath)
         _P   = qn("w:p")
