@@ -232,30 +232,7 @@ def add_key_value_line(doc, key, value):
 # ──────────────────────────────────────────────
 # CREATE DOCUMENT
 # ──────────────────────────────────────────────
-def generate_report(well_name: str = "UNKNOWN WELL") -> str:
-    """Build and save a PRC-branded SCAL Word document for well_name.
-
-    Returns the path to the saved .docx file.
-    """
-    doc = Document()
-
-    style = doc.styles["Normal"]
-    style.font.name = "Arial"
-    style.font.size = Pt(10.5)
-    style.font.color.rgb = GRAY_RGB
-    style.paragraph_format.space_after = Pt(6)
-
-    for level in range(1, 4):
-        hs = doc.styles[f"Heading {level}"]
-        hs.font.name = "Arial"
-        hs.font.color.rgb = NAVY_RGB
-
-    for section in doc.sections:
-        section.top_margin = Cm(2.54)
-        section.bottom_margin = Cm(2.54)
-        section.left_margin = Cm(2.54)
-        section.right_margin = Cm(2.54)
-
+def _add_cover_page(doc, well_name):
     # ── COVER PAGE ──
     banner = doc.add_table(rows=1, cols=1)
     banner.alignment = WD_TABLE_ALIGNMENT.CENTER
@@ -284,25 +261,25 @@ def generate_report(well_name: str = "UNKNOWN WELL") -> str:
     logo_p.space_after = Pt(4)
     # Try to load actual PRC logo
     for lp in ['prc_logo.png', 'prc_logo.jpg']:
-        if os.path.exists(lp):
-            try:
-                logo_p.add_run().add_picture(lp, width=Inches(2.0))
-                break
-            except: pass
+    if os.path.exists(lp):
+        try:
+            logo_p.add_run().add_picture(lp, width=Inches(2.0))
+            break
+        except: pass
     else:
-        run = logo_p.add_run("[  PRC LOGO  ]")
-        run.font.size = Pt(14)
-        run.font.color.rgb = LIGHT_GRAY_RGB
-        run.font.name = "Arial"
-        run.bold = True
+    run = logo_p.add_run("[  PRC LOGO  ]")
+    run.font.size = Pt(14)
+    run.font.color.rgb = LIGHT_GRAY_RGB
+    run.font.name = "Arial"
+    run.bold = True
 
     line_p = doc.add_paragraph()
     line_p.alignment = WD_ALIGN_PARAGRAPH.CENTER
     pPr = line_p._element.get_or_add_pPr()
     pBdr = parse_xml(
-        f'<w:pBdr {nsdecls("w")}>'
-        f'  <w:bottom w:val="single" w:sz="12" w:space="8" w:color="{BLUE}"/>'
-        f'</w:pBdr>'
+    f'<w:pBdr {nsdecls("w")}>'
+    f'  <w:bottom w:val="single" w:sz="12" w:space="8" w:color="{BLUE}"/>'
+    f'</w:pBdr>'
     )
     pPr.append(pBdr)
 
@@ -331,41 +308,41 @@ def generate_report(well_name: str = "UNKNOWN WELL") -> str:
     info_table.alignment = WD_TABLE_ALIGNMENT.CENTER
     info_table.autofit = False
     for row in info_table.rows:
-        row.cells[0].width = Inches(2.2)
-        row.cells[1].width = Inches(4.0)
+    row.cells[0].width = Inches(2.2)
+    row.cells[1].width = Inches(4.0)
 
     info_items = [
-        ("Well", well_name),
-        ("Field", FIELD_NAME),
-        ("Formation", FORMATION),
-        ("Report No.", REPORT_NUM),
-        ("Date", REPORT_DATE),
-        ("Prepared by", ENGINEER),
+    ("Well", well_name),
+    ("Field", FIELD_NAME),
+    ("Formation", FORMATION),
+    ("Report No.", REPORT_NUM),
+    ("Date", REPORT_DATE),
+    ("Prepared by", ENGINEER),
     ]
     for i, (label, value) in enumerate(info_items):
-        row = info_table.rows[i]
-        row.height = Cm(0.65)
-        c0 = row.cells[0]
-        c0.vertical_alignment = WD_ALIGN_VERTICAL.CENTER
-        set_cell_shading(c0, LIGHT_BLUE)
-        p0 = c0.paragraphs[0]
-        p0.space_before = Pt(2); p0.space_after = Pt(2)
-        r0 = p0.add_run(label)
-        r0.bold = True; r0.font.name = "Arial"
-        r0.font.size = Pt(10); r0.font.color.rgb = NAVY_RGB
-        c1 = row.cells[1]
-        c1.vertical_alignment = WD_ALIGN_VERTICAL.CENTER
-        p1 = c1.paragraphs[0]
-        p1.space_before = Pt(2); p1.space_after = Pt(2)
-        r1 = p1.add_run(value)
-        r1.font.name = "Arial"; r1.font.size = Pt(10); r1.font.color.rgb = GRAY_RGB
-        for cell in [c0, c1]:
-            set_cell_border(cell,
-                top={"sz": "2", "color": "CCCCCC"},
-                bottom={"sz": "2", "color": "CCCCCC"},
-                left={"sz": "2", "color": "CCCCCC"},
-                right={"sz": "2", "color": "CCCCCC"},
-            )
+    row = info_table.rows[i]
+    row.height = Cm(0.65)
+    c0 = row.cells[0]
+    c0.vertical_alignment = WD_ALIGN_VERTICAL.CENTER
+    set_cell_shading(c0, LIGHT_BLUE)
+    p0 = c0.paragraphs[0]
+    p0.space_before = Pt(2); p0.space_after = Pt(2)
+    r0 = p0.add_run(label)
+    r0.bold = True; r0.font.name = "Arial"
+    r0.font.size = Pt(10); r0.font.color.rgb = NAVY_RGB
+    c1 = row.cells[1]
+    c1.vertical_alignment = WD_ALIGN_VERTICAL.CENTER
+    p1 = c1.paragraphs[0]
+    p1.space_before = Pt(2); p1.space_after = Pt(2)
+    r1 = p1.add_run(value)
+    r1.font.name = "Arial"; r1.font.size = Pt(10); r1.font.color.rgb = GRAY_RGB
+    for cell in [c0, c1]:
+        set_cell_border(cell,
+            top={"sz": "2", "color": "CCCCCC"},
+            bottom={"sz": "2", "color": "CCCCCC"},
+            left={"sz": "2", "color": "CCCCCC"},
+            right={"sz": "2", "color": "CCCCCC"},
+        )
 
     doc.add_paragraph()
     doc.add_paragraph()
@@ -378,6 +355,8 @@ def generate_report(well_name: str = "UNKNOWN WELL") -> str:
 
     doc.add_page_break()
 
+
+def _add_header_footer(doc):
     # ── HEADERS & FOOTERS ──
     section = doc.sections[-1]
     section.different_first_page_header_footer = False
@@ -389,9 +368,9 @@ def generate_report(well_name: str = "UNKNOWN WELL") -> str:
     fp.clear()
     pPr = fp._element.get_or_add_pPr()
     pBdr = parse_xml(
-        f'<w:pBdr {nsdecls("w")}>'
-        f'  <w:top w:val="single" w:sz="4" w:space="4" w:color="{BLUE}"/>'
-        f'</w:pBdr>'
+    f'<w:pBdr {nsdecls("w")}>'
+    f'  <w:top w:val="single" w:sz="4" w:space="4" w:color="{BLUE}"/>'
+    f'</w:pBdr>'
     )
     pPr.append(pBdr)
     run1 = fp.add_run("Petroleum Research Center — Confidential")
@@ -414,15 +393,17 @@ def generate_report(well_name: str = "UNKNOWN WELL") -> str:
     hp.clear()
     pPr_h = hp._element.get_or_add_pPr()
     pBdr_h = parse_xml(
-        f'<w:pBdr {nsdecls("w")}>'
-        f'  <w:bottom w:val="single" w:sz="4" w:space="4" w:color="{BLUE}"/>'
-        f'</w:pBdr>'
+    f'<w:pBdr {nsdecls("w")}>'
+    f'  <w:bottom w:val="single" w:sz="4" w:space="4" w:color="{BLUE}"/>'
+    f'</w:pBdr>'
     )
     pPr_h.append(pBdr_h)
     hr = hp.add_run(f"PRC-SCAL  |  Well {well_name}  |  {REPORT_NUM}")
     hr.font.name = "Arial"; hr.font.size = Pt(7.5)
     hr.font.color.rgb = LIGHT_GRAY_RGB; hr.italic = True
 
+
+def _add_section_1_introduction(doc, well_name):
     # ══ SECTION 1: INTRODUCTION ══
     add_heading_styled(doc, "1. Introduction", level=1)
     add_body(doc, f"This report presents the results of Special Core Analysis (SCAL) performed on six core plug samples recovered from Well {well_name}, located in the {FIELD_NAME}, offshore Libya. The well penetrates the {FORMATION}, a proven hydrocarbon-bearing interval within the {BASIN}.")
@@ -431,16 +412,18 @@ def generate_report(well_name: str = "UNKNOWN WELL") -> str:
     add_heading_styled(doc, "1.1 Scope of Work", level=2)
     add_body(doc, "The following analyses were conducted on the selected core plugs:")
     for item in [
-        "Routine core analysis (porosity and absolute permeability under net confining stress)",
-        "Unsteady-state (USS) relative permeability — oil/water system at reservoir temperature (92 °C)",
-        "Mercury injection capillary pressure (MICP) to characterise pore throat distribution",
-        "Amott spontaneous imbibition wettability index determination",
-        "Brooks-Corey analytical curve fitting for simulation input",
-        "Leverett J-function normalisation for capillary pressure height modelling",
+    "Routine core analysis (porosity and absolute permeability under net confining stress)",
+    "Unsteady-state (USS) relative permeability — oil/water system at reservoir temperature (92 °C)",
+    "Mercury injection capillary pressure (MICP) to characterise pore throat distribution",
+    "Amott spontaneous imbibition wettability index determination",
+    "Brooks-Corey analytical curve fitting for simulation input",
+    "Leverett J-function normalisation for capillary pressure height modelling",
     ]:
-        add_bullet(doc, item)
+    add_bullet(doc, item)
     add_body(doc, "All measurements were performed in accordance with API RP 40 and SCA guidelines.")
 
+
+def _add_section_2_methodology(doc):
     # ══ SECTION 2: METHODOLOGY ══
     doc.add_page_break()
     add_heading_styled(doc, "2. Methodology", level=1)
@@ -455,6 +438,8 @@ def generate_report(well_name: str = "UNKNOWN WELL") -> str:
     add_heading_styled(doc, "2.5 Wettability — Amott Index", level=2)
     add_body(doc, "The Amott wettability index was determined through a four-stage spontaneous/forced imbibition process, with values ranging from -1 (strongly oil-wet) to +1 (strongly water-wet).")
 
+
+def _add_section_3_core_sample_data(doc, well_name):
     # ══ SECTION 3: CORE SAMPLE DATA ══
     doc.add_page_break()
     add_heading_styled(doc, "3. Core Sample Data", level=1)
@@ -462,9 +447,9 @@ def generate_report(well_name: str = "UNKNOWN WELL") -> str:
     add_heading_styled(doc, "3.1 Routine Core Properties", level=2)
     add_body(doc, f"Table 1 — Routine Core Analysis Results, Well {well_name}", bold=True, italic=True)
     styled_table(doc,
-        ["Sample ID", "Depth\n(m TVDSS)", "Porosity\n(%)", "Kabs\n(mD)", "Swi\n(%)", "Sor\n(%)"],
-        [[s["id"], f"{s['depth']:.1f}", f"{s['por']:.1f}", f"{s['kabs']:.1f}", f"{s['swi']:.1f}", f"{s['sor']:.1f}"] for s in CORE_DATA],
-        col_widths_inches=[1.1, 1.1, 0.9, 0.9, 0.85, 0.85]
+    ["Sample ID", "Depth\n(m TVDSS)", "Porosity\n(%)", "Kabs\n(mD)", "Swi\n(%)", "Sor\n(%)"],
+    [[s["id"], f"{s['depth']:.1f}", f"{s['por']:.1f}", f"{s['kabs']:.1f}", f"{s['swi']:.1f}", f"{s['sor']:.1f}"] for s in CORE_DATA],
+    col_widths_inches=[1.1, 1.1, 0.9, 0.9, 0.85, 0.85]
     )
     doc.add_paragraph()
     add_body(doc, "Porosity values range from 14.3% to 22.1%, reflecting good to very good reservoir quality. Absolute permeability spans nearly an order of magnitude (76.4 to 412.3 mD).")
@@ -473,12 +458,14 @@ def generate_report(well_name: str = "UNKNOWN WELL") -> str:
     add_body(doc, "Table 2 — Relative Permeability Endpoints & Wettability Index", bold=True, italic=True)
     rows_2 = []
     for s in CORE_DATA:
-        wclass = "Water-Wet" if s["amott"] >= 0.7 else ("Mod. Water-Wet" if s["amott"] >= 0.6 else "Weakly Water-Wet")
-        rows_2.append([s["id"], f"{s['krw_sor']:.3f}", f"{s['kro_swi']:.3f}", f"{s['amott']:.2f}", wclass])
+    wclass = "Water-Wet" if s["amott"] >= 0.7 else ("Mod. Water-Wet" if s["amott"] >= 0.6 else "Weakly Water-Wet")
+    rows_2.append([s["id"], f"{s['krw_sor']:.3f}", f"{s['kro_swi']:.3f}", f"{s['amott']:.2f}", wclass])
     styled_table(doc, ["Sample ID", "Krw @ Sor", "Kro @ Swi", "Amott\nIndex", "Wettability\nClass"], rows_2, col_widths_inches=[1.1, 1.0, 1.0, 0.9, 1.3])
     doc.add_paragraph()
     add_body(doc, "All samples exhibit low Krw at residual oil saturation (0.072-0.142), consistent with a predominantly water-wet system. Amott indices range from 0.54 to 0.72.")
 
+
+def _add_section_4_results(doc):
     # ══ SECTION 4: RESULTS ══
     doc.add_page_break()
     add_heading_styled(doc, "4. Results & Interpretation", level=1)
@@ -487,9 +474,9 @@ def generate_report(well_name: str = "UNKNOWN WELL") -> str:
     add_heading_styled(doc, "4.2 Capillary Pressure Analysis", level=2)
     add_body(doc, "Table 3 — Capillary Pressure Data (Average of All Samples)", bold=True, italic=True)
     styled_table(doc,
-        ["Sw (%)", "Pc Drainage\n(psi)", "Pc Imbibition\n(psi)"],
-        [[f"{m['sw']:.1f}", f"{m['pc_drain']:.1f}", f"{m['pc_imb']:.1f}"] for m in MICP_DATA],
-        col_widths_inches=[1.5, 1.8, 1.8]
+    ["Sw (%)", "Pc Drainage\n(psi)", "Pc Imbibition\n(psi)"],
+    [[f"{m['sw']:.1f}", f"{m['pc_drain']:.1f}", f"{m['pc_imb']:.1f}"] for m in MICP_DATA],
+    col_widths_inches=[1.5, 1.8, 1.8]
     )
     doc.add_paragraph()
     add_body(doc, "Mercury injection data reveals a well-defined entry pressure at approximately 1.8 psi, corresponding to a threshold pore throat radius of approximately 8.2 μm.")
@@ -498,42 +485,46 @@ def generate_report(well_name: str = "UNKNOWN WELL") -> str:
     add_heading_styled(doc, "4.4 Wettability Interpretation", level=2)
     add_body(doc, "Amott indices (0.54-0.72) place all samples within the water-wet to moderately water-wet range. Waterflood recovery efficiency is expected to be favourable, with microscopic displacement efficiency (Ed) estimated at 62-75%.")
 
+
+def _add_section_5_conclusions(doc):
     # ══ SECTION 5: CONCLUSIONS ══
     doc.add_page_break()
     add_heading_styled(doc, "5. Conclusions & Recommendations", level=1)
     add_heading_styled(doc, "5.1 Conclusions", level=2)
     for i, text in enumerate([
-        f"The {FORMATION} exhibits good to very good reservoir quality: porosity 14.3-22.1%, permeability 76.4-412.3 mD under net confining stress.",
-        "Relative permeability endpoints confirm water-wet system: low Krw at Sor (0.072-0.142) and high Kro at Swi (0.748-0.923).",
-        "Amott wettability indices (0.54-0.72) confirm moderately to strongly water-wet conditions with no evidence of wettability alteration.",
-        "Brooks-Corey and Leverett J-function models provide excellent fits (R² > 0.94), suitable for direct input into Eclipse/Petrel simulation models.",
-        "Residual oil saturations (25.1-36.2%) indicate waterflood microscopic displacement efficiency of 62-75%, consistent with field development targets.",
+    f"The {FORMATION} exhibits good to very good reservoir quality: porosity 14.3-22.1%, permeability 76.4-412.3 mD under net confining stress.",
+    "Relative permeability endpoints confirm water-wet system: low Krw at Sor (0.072-0.142) and high Kro at Swi (0.748-0.923).",
+    "Amott wettability indices (0.54-0.72) confirm moderately to strongly water-wet conditions with no evidence of wettability alteration.",
+    "Brooks-Corey and Leverett J-function models provide excellent fits (R² > 0.94), suitable for direct input into Eclipse/Petrel simulation models.",
+    "Residual oil saturations (25.1-36.2%) indicate waterflood microscopic displacement efficiency of 62-75%, consistent with field development targets.",
     ], 1):
-        p = doc.add_paragraph()
-        p.paragraph_format.space_after = Pt(6)
-        p.paragraph_format.left_indent = Cm(0.5)
-        p.add_run(f"{i}. ").bold = True
-        p.runs[0].font.name = "Arial"; p.runs[0].font.size = Pt(10.5); p.runs[0].font.color.rgb = NAVY_RGB
-        r = p.add_run(text)
-        r.font.name = "Arial"; r.font.size = Pt(10.5); r.font.color.rgb = GRAY_RGB
+    p = doc.add_paragraph()
+    p.paragraph_format.space_after = Pt(6)
+    p.paragraph_format.left_indent = Cm(0.5)
+    p.add_run(f"{i}. ").bold = True
+    p.runs[0].font.name = "Arial"; p.runs[0].font.size = Pt(10.5); p.runs[0].font.color.rgb = NAVY_RGB
+    r = p.add_run(text)
+    r.font.name = "Arial"; r.font.size = Pt(10.5); r.font.color.rgb = GRAY_RGB
 
     doc.add_paragraph()
     add_heading_styled(doc, "5.2 Recommendations", level=2)
     for i, text in enumerate([
-        "Integrate the Brooks-Corey relative permeability curves and J-function capillary pressure model into the full-field Eclipse simulation model.",
-        "Conduct additional SCAL measurements on samples from the lower Farwah interval (2,880-2,920 m) where log-derived porosity suggests a secondary pay zone.",
-        "Consider steady-state relative permeability measurements on two selected plugs to cross-validate the USS results.",
-        "Perform aging experiments at reservoir temperature (92 °C) with live crude oil for a minimum of 4 weeks to confirm wettability.",
-        "Export all SCAL curves in Petrel-compatible XML format. Hviel can generate this export on request.",
+    "Integrate the Brooks-Corey relative permeability curves and J-function capillary pressure model into the full-field Eclipse simulation model.",
+    "Conduct additional SCAL measurements on samples from the lower Farwah interval (2,880-2,920 m) where log-derived porosity suggests a secondary pay zone.",
+    "Consider steady-state relative permeability measurements on two selected plugs to cross-validate the USS results.",
+    "Perform aging experiments at reservoir temperature (92 °C) with live crude oil for a minimum of 4 weeks to confirm wettability.",
+    "Export all SCAL curves in Petrel-compatible XML format. Hviel can generate this export on request.",
     ], 1):
-        p = doc.add_paragraph()
-        p.paragraph_format.space_after = Pt(6)
-        p.paragraph_format.left_indent = Cm(0.5)
-        p.add_run(f"{i}. ").bold = True
-        p.runs[0].font.name = "Arial"; p.runs[0].font.size = Pt(10.5); p.runs[0].font.color.rgb = NAVY_RGB
-        r = p.add_run(text)
-        r.font.name = "Arial"; r.font.size = Pt(10.5); r.font.color.rgb = GRAY_RGB
+    p = doc.add_paragraph()
+    p.paragraph_format.space_after = Pt(6)
+    p.paragraph_format.left_indent = Cm(0.5)
+    p.add_run(f"{i}. ").bold = True
+    p.runs[0].font.name = "Arial"; p.runs[0].font.size = Pt(10.5); p.runs[0].font.color.rgb = NAVY_RGB
+    r = p.add_run(text)
+    r.font.name = "Arial"; r.font.size = Pt(10.5); r.font.color.rgb = GRAY_RGB
 
+
+def _add_signature_block(doc):
     # ── SIGNATURE BLOCK ──
     doc.add_paragraph()
     doc.add_paragraph()
@@ -545,28 +536,62 @@ def generate_report(well_name: str = "UNKNOWN WELL") -> str:
     sig_table = doc.add_table(rows=3, cols=2)
     sig_table.alignment = WD_TABLE_ALIGNMENT.CENTER
     for row in sig_table.rows:
-        row.cells[0].width = Inches(3.0)
-        row.cells[1].width = Inches(3.0)
+    row.cells[0].width = Inches(3.0)
+    row.cells[1].width = Inches(3.0)
 
     for col_idx, (role, name, title) in enumerate([
-        ("Prepared by:", ENGINEER, "System Architect / SCAL Analyst"),
-        ("Reviewed by:", REVIEWER, "Chief Petrophysicist, PRC"),
+    ("Prepared by:", ENGINEER, "System Architect / SCAL Analyst"),
+    ("Reviewed by:", REVIEWER, "Chief Petrophysicist, PRC"),
     ]):
-        p = sig_table.rows[0].cells[col_idx].paragraphs[0]
-        r = p.add_run(role); r.font.name = "Arial"; r.font.size = Pt(9); r.font.color.rgb = LIGHT_GRAY_RGB
-        p = sig_table.rows[1].cells[col_idx].paragraphs[0]
-        r = p.add_run(name); r.bold = True; r.font.name = "Arial"; r.font.size = Pt(10); r.font.color.rgb = NAVY_RGB
-        p = sig_table.rows[2].cells[col_idx].paragraphs[0]
-        r = p.add_run(title); r.font.name = "Arial"; r.font.size = Pt(9); r.font.color.rgb = GRAY_RGB
+    p = sig_table.rows[0].cells[col_idx].paragraphs[0]
+    r = p.add_run(role); r.font.name = "Arial"; r.font.size = Pt(9); r.font.color.rgb = LIGHT_GRAY_RGB
+    p = sig_table.rows[1].cells[col_idx].paragraphs[0]
+    r = p.add_run(name); r.bold = True; r.font.name = "Arial"; r.font.size = Pt(10); r.font.color.rgb = NAVY_RGB
+    p = sig_table.rows[2].cells[col_idx].paragraphs[0]
+    r = p.add_run(title); r.font.name = "Arial"; r.font.size = Pt(9); r.font.color.rgb = GRAY_RGB
 
     for row in sig_table.rows:
-        for cell in row.cells:
-            set_cell_border(cell,
-                top={"sz": "0", "color": "FFFFFF", "val": "none"},
-                bottom={"sz": "0", "color": "FFFFFF", "val": "none"},
-                left={"sz": "0", "color": "FFFFFF", "val": "none"},
-                right={"sz": "0", "color": "FFFFFF", "val": "none"},
-            )
+    for cell in row.cells:
+        set_cell_border(cell,
+            top={"sz": "0", "color": "FFFFFF", "val": "none"},
+            bottom={"sz": "0", "color": "FFFFFF", "val": "none"},
+            left={"sz": "0", "color": "FFFFFF", "val": "none"},
+            right={"sz": "0", "color": "FFFFFF", "val": "none"},
+        )
+
+
+def generate_report(well_name: str = "UNKNOWN WELL") -> str:
+    """Build and save a PRC-branded SCAL Word document for well_name.
+
+    Returns the path to the saved .docx file.
+    """
+    doc = Document()
+
+    style = doc.styles["Normal"]
+    style.font.name = "Arial"
+    style.font.size = Pt(10.5)
+    style.font.color.rgb = GRAY_RGB
+    style.paragraph_format.space_after = Pt(6)
+
+    for level in range(1, 4):
+        hs = doc.styles[f"Heading {level}"]
+        hs.font.name = "Arial"
+        hs.font.color.rgb = NAVY_RGB
+
+    for section in doc.sections:
+        section.top_margin = Cm(2.54)
+        section.bottom_margin = Cm(2.54)
+        section.left_margin = Cm(2.54)
+        section.right_margin = Cm(2.54)
+
+    _add_cover_page(doc, well_name)
+    _add_header_footer(doc)
+    _add_section_1_introduction(doc, well_name)
+    _add_section_2_methodology(doc)
+    _add_section_3_core_sample_data(doc, well_name)
+    _add_section_4_results(doc)
+    _add_section_5_conclusions(doc)
+    _add_signature_block(doc)
 
     # ── SAVE ──
     safe_name = well_name.replace('-', '').replace(' ', '_')
