@@ -6064,7 +6064,7 @@ async def admin_login(pin: str = Form(...)):
 
         _logger.warning(f"[ADMIN] Failed login attempt with PIN: {pin}")
 
-        time.sleep(1) # Throttling
+        await asyncio.sleep(1) # Throttling
 
         raise HTTPException(status_code=401, detail="Invalid Admin PIN")
 
