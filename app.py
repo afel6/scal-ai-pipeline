@@ -6068,7 +6068,7 @@ async def user_login(pin: str = Form(...)):
 
         _logger.warning(f"[AUTH] Failed user login attempt with code: {pin}")
 
-        time.sleep(0.5)
+        await asyncio.sleep(0.5)
 
         raise HTTPException(status_code=401, detail="Invalid Access Code")
 
