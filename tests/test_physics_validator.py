@@ -54,3 +54,42 @@ def test_physics_guard_micp():
     score_bad = guard_bad.generate_health_score()
     assert score_bad["score"] < 100
     assert "MICP_NEGATIVE_PC" in [v["rule"] for v in score_bad["violations"]]
+
+def test_validate_saturation_endpoints_valid():
+    guard = PhysicsGuard()
+    guard.validate_saturation_endpoints(swi=0.2, sor=0.2, sample="Test1")
+    score_info = guard.generate_health_score()
+    assert score_info["score"] == 100
+    assert score_info["grade"] == "A"
+    assert len(score_info["violations"]) == 0
+
+def test_validate_saturation_endpoints_mass_conservation_violation():
+    guard = PhysicsGuard()
+    guard.validate_saturation_endpoints(swi=0.6, sor=0.5, sample="Test2")
+    score_info = guard.generate_health_score()
+    violations = score_info["violations"]
+    assert any(v["rule"] == "SAT_MASS_CONSERVATION" for v in violations)
+
+def test_validate_saturation_endpoints_swi_range_violation():
+    guard = PhysicsGuard()
+    guard.validate_saturation_endpoints(swi=0.85, sor=0.1, sample="Test3")
+    score_info = guard.generate_health_score()
+    violations = score_info["violations"]
+    assert any(v["rule"] == "SWI_RANGE" for v in violations)
+
+def test_validate_saturation_endpoints_sor_range_violation():
+    guard = PhysicsGuard()
+    guard.validate_saturation_endpoints(swi=0.2, sor=0.55, sample="Test4")
+    score_info = guard.generate_health_score()
+    violations = score_info["violations"]
+    assert any(v["rule"] == "SOR_RANGE" for v in violations)
+
+def test_validate_saturation_endpoints_multiple_violations():
+    guard = PhysicsGuard()
+    # Violates mass conservation, SWI range, and SOR range
+    guard.validate_saturation_endpoints(swi=0.85, sor=0.55, sample="Test5")
+    score_info = guard.generate_health_score()
+    violations = [v["rule"] for v in score_info["violations"]]
+    assert "SAT_MASS_CONSERVATION" in violations
+    assert "SWI_RANGE" in violations
+    assert "SOR_RANGE" in violations
