@@ -692,3 +692,30 @@ accountability requirement for industrial deployment.
 - **Tool Access:** Hviel accesses this ledger via the `get_audit_history` tool. Use this tool to verify the quality trend of user-uploaded data and alert the engineer to recurring violations (e.g., non-monotonic Kr curves).
 - **System Notification:** The system prompt mandates that the user is notified of this logging. Never disable the audit-ledger notification in the `SYSTEM_PROMPT`.
 - **Immutability:** Audit records are append-only. The database helper provides no `DELETE` or `UPDATE` methods for the `physics_audits` table.
+
+---
+
+## 8. Host Environment & Optimized Workspace Layout
+
+The host execution environment has been optimized via Chris Titus's WinUtil to ensure maximum computational overhead, file transparency, and development stability. All agents and automated execution loops must operate under and respect these parameters:
+
+### 8.1 System Layout & Process Budget
+- **Process Constraints:** The host operates under a strict process budget (~70-80 active background tasks). Do not spawn unnecessary long-running child processes, background telemetry workers, or un-reclaimed execution threads.
+- **Resource Allocation:** Maximum raw CPU cycles and physical RAM overhead are prioritized for high-speed petrophysical data analysis and RAG vector computations. Ensure all memory footprints are optimized, and explicitly clean up large arrays using `gc.collect()`.
+
+### 8.2 Filesystem Transparency & Dotfiles
+- **Extension Visibility:** Hidden system files, configuration profiles, dotfiles, and File Explorer extensions are explicitly enabled.
+- **Access Protocols:** Paths under the repository root (including `.env`, `.gemini`, and dotfiles) are fully visible. Utilize native `pathlib.Path` traversals to manage config maps directly, preserving visibility in directory listings.
+
+### 8.3 Terminal & System Command Execution
+- **GPU-Accelerated Console:** Windows Terminal is the primary terminal environment.
+- **Execution Rule:** Run all shell executions, test suites, and project commands directly within Windows Terminal. Maintain optimal console logging and avoid cluttering stdout with raw arrays.
+
+### 8.4 runtime Dependency Stability (Update Protocol)
+- **Dependency Guard:** Windows Update is restricted strictly to security settings. Major feature upgrades are delayed by 365 days, and hardware driver updates are blocked.
+- **Runtime Consistency:** The host runtime, compiler versions, and hardware controllers (GPU, memory bridges) are guaranteed stable. Do not propose custom operating system patches or driver updates.
+
+### 8.5 Testing Caches & Disk Cleanup (WizTree)
+- **Disk Utilities:** WizTree is installed via WinGet as the host disk analyzer.
+- **Cache Management:** Keep track of massive data testing modules, local database exports, or cache assets that accumulate. Maintain a structured log of potential temp directories to permit rapid cleanup maps using WizTree.
+

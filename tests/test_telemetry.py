@@ -27,3 +27,12 @@ def test_telemetry_metrics_auth():
     has_pg = "pg_pool_active_connections" in metrics
     has_sqlite = "sqlite_db_size_kb" in metrics
     assert has_pg or has_sqlite
+
+    # Verify enhanced metrics
+    assert "db_pool_health" in metrics
+    assert metrics["db_pool_health"] in ["healthy", "exhausted", "uninitialized", "error"]
+    
+    if has_pg:
+        assert "pg_wal_size_kb" in metrics
+    if has_sqlite:
+        assert "sqlite_wal_size_kb" in metrics

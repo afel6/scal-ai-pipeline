@@ -6004,22 +6004,49 @@ async def get_telemetry_metrics(
     if _PG_AVAILABLE and _PG_POOL is not None:
         try:
             # ThreadedConnectionPool internal variables
+            active = 0
             if hasattr(_PG_POOL, "_used"):
-                db_metrics["pg_pool_active_connections"] = len(_PG_POOL._used)
+                active = len(_PG_POOL._used)
+                db_metrics["pg_pool_active_connections"] = active
             if hasattr(_PG_POOL, "_pool"):
                 db_metrics["pg_pool_idle_connections"] = len(_PG_POOL._pool)
+            
+            max_conn = 50
             if hasattr(_PG_POOL, "maxconn"):
-                db_metrics["pg_pool_max_connections"] = _PG_POOL.maxconn
+                max_conn = _PG_POOL.maxconn
+                db_metrics["pg_pool_max_connections"] = max_conn
+            
+            # Pool health status: check if we are hitting the ceiling
+            if active >= max_conn:
+                db_metrics["db_pool_health"] = "exhausted"
+            else:
+                db_metrics["db_pool_health"] = "healthy"
+
+            # Database WAL file size (PostgreSQL)
+            try:
+                # pg_ls_waldir() requires superuser or pg_monitor role
+                wal_res = db("SELECT SUM(size) FROM pg_ls_waldir()")
+                db_metrics["pg_wal_size_kb"] = float(wal_res[0][0]) / 1024.0 if wal_res and wal_res[0][0] is not None else 0.0
+            except Exception:
+                db_metrics["pg_wal_size_kb"] = None  # Restricted access or managed service
+                
         except Exception as e:
             _logger.error(f"Error fetching pg pool metrics: {e}")
+            db_metrics["db_pool_health"] = "error"
     else:
         try:
             db_path_obj = Path(DB_PATH)
             db_metrics["sqlite_db_size_kb"] = db_path_obj.stat().st_size / 1024.0 if db_path_obj.exists() else 0.0
-            wal_path_obj = Path(str(DB_PATH) + "-wal")
+            
+            # Use pathlib exclusively for WAL path discovery as per AGENTS.md
+            wal_path_obj = db_path_obj.with_name(db_path_obj.name + "-wal")
             db_metrics["sqlite_wal_size_kb"] = wal_path_obj.stat().st_size / 1024.0 if wal_path_obj.exists() else 0.0
+            
+            # SQLite health check
+            db_metrics["db_pool_health"] = "healthy" if db_path_obj.exists() else "uninitialized"
         except Exception as e:
             _logger.error(f"Error fetching sqlite metrics: {e}")
+            db_metrics["db_pool_health"] = "error"
 
     metrics_payload = {
         "average_document_compilation_latency_seconds": round(avg_latency, 2),
