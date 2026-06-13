@@ -778,8 +778,75 @@ def populate_cache_from_ground_truth(sid: str, gt_text: str):
         if "labeled_values" not in SESSION_DATA_CACHE[sid]:
             SESSION_DATA_CACHE[sid]["labeled_values"] = {}
             
-        import ast
-        
+        def _safe_parse_list(s: str):
+            s = s.strip()
+            if not s.startswith("[") or not s.endswith("]"):
+                raise ValueError("Not a list")
+
+            s_inner = s[1:-1].strip()
+            if not s_inner:
+                return []
+
+            res = []
+            i = 0
+            n = len(s_inner)
+
+            while i < n:
+                while i < n and s_inner[i].isspace():
+                    i += 1
+                if i >= n:
+                    break
+
+                c = s_inner[i]
+                if c in ("'", '"'):
+                    quote = c
+                    i += 1
+                    val = []
+                    while i < n:
+                        if s_inner[i] == '\\':
+                            i += 1
+                            if i < n:
+                                val.append(s_inner[i])
+                                i += 1
+                        elif s_inner[i] == quote:
+                            break
+                        else:
+                            val.append(s_inner[i])
+                            i += 1
+                    if i < n and s_inner[i] == quote:
+                        i += 1
+                    res.append("".join(val))
+                else:
+                    start = i
+                    while i < n and s_inner[i] not in (',', ']'):
+                        i += 1
+                    token = s_inner[start:i].strip()
+                    if token == "None":
+                        res.append(None)
+                    elif token == "True":
+                        res.append(True)
+                    elif token == "False":
+                        res.append(False)
+                    elif token:
+                        try:
+                            if "." in token or "e" in token.lower() or "E" in token:
+                                res.append(float(token))
+                            else:
+                                res.append(int(token))
+                        except ValueError:
+                            res.append(token)
+
+                while i < n and s_inner[i].isspace():
+                    i += 1
+
+                if i < n:
+                    if s_inner[i] == ',':
+                        i += 1
+                    else:
+                        break
+
+            return res
+
         # Split by SHEET:
         sheets = gt_text.split("  SHEET: ")
         for sheet_part in sheets[1:]:
@@ -798,13 +865,13 @@ def populate_cache_from_ground_truth(sid: str, gt_text: str):
                 if "COLUMNS (" in line:
                     col_str = line.partition("):")[2].strip()
                     try:
-                        cols = ast.literal_eval(col_str)
+                        cols = _safe_parse_list(col_str)
                     except Exception:
                         cols = [c.strip().strip("'\"[]") for c in col_str.split(",")]
                 elif "    ROW " in line:
                     row_vals_str = line.partition(":")[2].strip()
                     try:
-                        row_vals = ast.literal_eval(row_vals_str)
+                        row_vals = _safe_parse_list(row_vals_str)
                         grid.append(row_vals)
                     except Exception:
                         continue
