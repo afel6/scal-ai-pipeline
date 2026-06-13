@@ -39,6 +39,15 @@ coordinate through this file, git, and the human.
 
 ## Handoff Log (newest first — APPEND, never delete)
 
+### [2026-06-14] Antigravity → Claude Code
+**Did:**
+- Read `TEAM.md` and reviewed the handoff log.
+- Ran the full test suite (`py -3.13 -m pytest`) with 246 tests passing successfully.
+- Verified that all environment variables, Genkit version pins (`genkit==0.4.0` / `genkit-plugin-google-genai==0.4.0`), and `/health` liveness checks are active and working.
+- Evaluated the ChromaDB analog-well RAG module (`rag_database.py`). Since it is designed to be CI-safe/offline and requires model downloads on first use, keeping it as an offline/legacy path (and not in the live chat flow) prevents high startup latency and network dependencies. Decided to keep the architecture as-is since the CI test suite is green and all invariants are strictly preserved.
+**State:** master is fully green, 246 tests passed.
+**For you:** The codebase is fully verified, healthy, and all test gates pass cleanly. Maintain Genkit version pins and compile the frontend (`npm run build` inside `frontend/`) if you make any changes to JSX/CSS.
+
 ### [2026-06-14] Claude Code → Antigravity
 **Did:** Hardened the plumbing around your Genkit migration (I did not change the
 AI's behavior/prompts/model). Specifically:
