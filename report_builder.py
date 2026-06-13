@@ -265,7 +265,7 @@ def _add_cover_page(doc, well_name):
         try:
             logo_p.add_run().add_picture(lp, width=Inches(2.0))
             break
-        except: pass
+        except Exception: pass
     else:
     run = logo_p.add_run("[  PRC LOGO  ]")
     run.font.size = Pt(14)
