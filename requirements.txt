@@ -7,7 +7,14 @@ python-multipart>=0.0.12   # required for FastAPI Form() and File() uploads
 # google-generativeai (legacy SDK) intentionally removed — we use google-genai only
 # anthropic intentionally removed — document generation uses Gemini + local python-docx/openpyxl
 google-genai>=1.16.0
-genkit
+# Genkit is PINNED: app.py imports `from genkit.ai import Genkit` and
+# `from genkit.plugins.google_genai import GoogleAI`. The genkit.ai module layout
+# is version-specific — genkit>=0.5 moved/removed it, so a bare `genkit` resolves
+# to the latest (0.7.x) on a clean install (CI/Render) and breaks import with
+# `ModuleNotFoundError: No module named 'genkit.ai'`. Pin to the 0.4.0 line and
+# include the GoogleAI plugin package explicitly (it was previously missing).
+genkit==0.4.0
+genkit-plugin-google-genai==0.4.0
 
 
 # ── Data & numerics ───────────────────────────────────────────────────────────
