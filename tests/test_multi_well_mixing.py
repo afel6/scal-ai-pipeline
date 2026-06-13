@@ -53,12 +53,11 @@ def test_detect_multi_well_mixing_with_filename():
     df1 = pd.DataFrame({'col1': ['data'], 'col2': [1]})
     df2 = pd.DataFrame({'col1': ['Well B-2'], 'col2': [3]})
     raw_data = {'sheet1': df1, 'sheet2': df2}
-    # filename has 'Well A-1', but the function ignores primary_well from filename
-    # when determining well_sheet_map unless we fix the function, let's test current behavior.
-    # Currently `primary_well` is extracted but not used to determine mixing if it doesn't appear in sheets.
-    # Thus only B-2 is found -> single well -> None.
+    # filename has 'Well A-1', so the primary well is A-1.
+    # When B-2 is discovered in sheet2, the function detects multi-well mixing
+    # because the primary well from the filename does not match the well inside the sheet.
     result = detect_multi_well_mixing(raw_data, filename="C:/data/Well A-1.xlsx")
-    assert result is None
+    assert result == {'A-1': [], 'B-2': ['sheet2']}
 
 def test_detect_multi_well_mixing_multiple_wells_across_many_sheets():
     df1 = pd.DataFrame({'col1': ['Well X-1']})

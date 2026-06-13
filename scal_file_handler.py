@@ -909,6 +909,7 @@ def detect_multi_well_mixing(raw_data: dict, filename: str = "") -> dict | None:
 
     well_sheet_map = {}  # well_id -> [sheet_names]
 
+
     for sheet_name, df in raw_data.items():
         if df is None or df.empty:
             continue
@@ -928,7 +929,18 @@ def detect_multi_well_mixing(raw_data: dict, filename: str = "") -> dict | None:
 
     # Only alert if multiple wells found
     if len(well_sheet_map) > 1:
+        if primary_well and primary_well not in well_sheet_map:
+            if not any(primary_well in w or w in primary_well for w in well_sheet_map):
+                well_sheet_map[primary_well] = []
         return well_sheet_map
+
+    if primary_well and len(well_sheet_map) == 1:
+        found_well = list(well_sheet_map.keys())[0]
+        if primary_well != found_well:
+            if primary_well not in found_well and found_well not in primary_well:
+                well_sheet_map[primary_well] = []
+                return well_sheet_map
+
     return None
 
 
