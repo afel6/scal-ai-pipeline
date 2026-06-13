@@ -2,6 +2,9 @@
 
 This file provides system instructions, setup commands, and architectural context for autonomous AI agents (such as Google Labs Jules) working on the PRC SCAL AI Pipeline.
 
+> [!IMPORTANT]
+> **Multi-agent teamwork:** This repo is built by more than one AI agent (Antigravity/Gemini and Claude Code). **Before you start, read [`TEAM.md`](TEAM.md)** — it holds the collaboration protocol, the "Do Not Break" invariants (e.g. the pinned `genkit==0.4.0`), and the async Handoff Log. **When you finish, append a Handoff Log entry in TEAM.md and commit before handing off.**
+
 ## 🛠 Project Context
 - **Name**: PRC SCAL AI Pipeline (Hviel)
 - **Purpose**: A mixture-of-experts petrophysical analysis agent that ingests core sample data (Excel/CSV) and generates reports/charts adhering to strict physical boundaries and an Industrial Brutalist design theme.

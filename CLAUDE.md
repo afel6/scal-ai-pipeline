@@ -5,6 +5,13 @@ This file defines the non-negotiable engineering rules for the PRC SCAL AI Pipel
 and enforce these rules without exception.
 
 > [!IMPORTANT]
+> **Multi-agent teamwork:** This repo is built by more than one AI agent (Claude Code
+> and Antigravity/Gemini). **Before starting work, read [`TEAM.md`](TEAM.md)** — the
+> collaboration protocol, the "Do Not Break" invariants (e.g. pinned `genkit==0.4.0`,
+> `/health` not `/api/diag` for liveness), and the async Handoff Log. **When you finish,
+> append a Handoff Log entry to TEAM.md and commit before handing off to Antigravity.**
+
+> [!IMPORTANT]
 > **[2026-05-29] Zero-Memory Footprint, Active Session TTL Eviction & Streaming Truncation Prevention Hotfix**
 > - **Automatic Startup Purge**: Synced background startup function `purge_all_historical_assets()` runs at server boot, unlinking all T1-31/CSV/Excel assets from the uploads and local temp directories, sterilizing the environment completely.
 > - **15-Minute Session TTL Monitor**: Idle sessions are actively tracked and programmatically evicted after 15 minutes of inactivity, destroying their RAM state and unlinking all session-id matching disk files.
