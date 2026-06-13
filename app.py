@@ -5497,6 +5497,8 @@ class KnowledgeBase:
 
                 
 
+                vec_insert_data = []
+
                 for source, chunk, vec in chunk_data:
 
                     if ph == "?":
@@ -5513,7 +5515,11 @@ class KnowledgeBase:
 
                     if vec is not None:
 
-                        cur.execute(f"INSERT INTO kb_vectors (chunk_id, embedding) VALUES ({ph},{ph})", (chunk_id, vec.tobytes()))
+                        vec_insert_data.append((chunk_id, vec.tobytes()))
+
+                if vec_insert_data:
+
+                    cur.executemany(f"INSERT INTO kb_vectors (chunk_id, embedding) VALUES ({ph},{ph})", vec_insert_data)
 
                 conn.commit()
 
