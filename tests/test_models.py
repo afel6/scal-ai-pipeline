@@ -9,7 +9,7 @@ try:
     from app import GEMINI_KEY_POOL
     if GEMINI_KEY_POOL:
         key = GEMINI_KEY_POOL[0]
-except:
+except ImportError:
     pass
 
 if key:

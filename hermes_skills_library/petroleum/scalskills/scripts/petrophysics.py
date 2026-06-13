@@ -704,7 +704,7 @@ if __name__ == "__main__":
     model = sys.argv[1]
     try:
         params = json.loads(sys.argv[2])
-    except:
+    except json.JSONDecodeError:
         print(json.dumps({"error": "Invalid JSON parameters."}))
         sys.exit(1)
         

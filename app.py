@@ -4335,7 +4335,7 @@ class PRCChatAssistant:
                     session_files_ctx = f"[SESSION FILE REGISTRY]: This session contains data for: {', '.join(fnames)}.\n"
                     session_files_ctx += f"[LATEST SESSION FILE]: {fnames[0]}\n"
                     session_files_ctx += "Reference the [LATEST SESSION FILE] if the user asks generic questions.\n\n"
-            except: pass
+            except Exception: pass
 
         extracted_context = ""
 
@@ -4407,7 +4407,7 @@ class PRCChatAssistant:
                         )
                 finally:
                     try: Path(tmp_path).unlink(missing_ok=True)
-                    except: pass
+                    except Exception: pass
 
             elif "pdf" in safe_mime:
                 try:
@@ -7004,7 +7004,7 @@ async def handle(
                         _logger.error(f"[Bootstrap Extract] Failed to extract text for {fname}: {ex}")
                     finally:
                         try: Path(tmp_path).unlink(missing_ok=True)
-                        except: pass
+                        except Exception: pass
                 elif "pdf" in safe_mime:
                     try:
                         text = _sfh_extract_pdf(data_bytes)
