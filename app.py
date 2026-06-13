@@ -4519,37 +4519,6 @@ class PRCChatAssistant:
                 yield _refusal
             return _gen_refusal() if stream else _refusal
 
-        # ── INCOMPLETE-LOAD GATE (fluid-saturation-bound completeness) ────────
-        # [DELEGATED TO LLM SYSTEM PROMPT INSTEAD OF BLANKET INTERCEPT FOR BATCH QUERIES]
-        # if has_cached_data and msg:
-        #     def _cache_has(param: str) -> bool:
-        #         if param in labeled_values:
-        #             return True
-        #         for _k in labeled_values.keys():
-        #             if param in _re_gate.split(r'[^a-z0-9]+', str(_k).lower()):
-        #                 return True
-        #         return False
-        #     _sat_query = _re_gate.search(
-        #         r"(?i)\b(?:swi|sor|displacement\s+effic|recover|mobile\s+(?:oil|fluid)|"
-        #         r"residual\s+oil|irreducible\s+water|saturation\s+endpoint)\b",
-        #         msg,
-        #     )
-        #     if _sat_query:
-        #         _has_swi, _has_sor = _cache_has("swi"), _cache_has("sor")
-        #         if not (_has_swi and _has_sor):
-        #             _missing = ("Swi and Sor" if not (_has_swi or _has_sor)
-        #                         else ("Swi" if not _has_swi else "Sor"))
-        #             _refusal2 = (
-        #                 f"⚠️ I can't compute that: the session cache is loaded but its verified "
-        #                 f"parameters are missing the required fluid-saturation bound(s) ({_missing}). "
-        #                 f"Saturation-dependent results (displacement efficiency, recovery, residual "
-        #                 f"saturations) cannot be derived without them, and I will not substitute "
-        #                 f"assumed values. Please re-upload a file whose extraction yields explicit "
-        #                 f"Swi and Sor."
-        #             )
-        #             def _gen_refusal2():
-        #                 yield _refusal2
-        #             return _gen_refusal2() if stream else _refusal2
 
         # Strict Context Shielding
 
