@@ -3,7 +3,8 @@ Extra API Routes: Feedback, Analytics, User Registration
 """
 import os
 import time
-from fastapi import Form
+from fastapi import Form, Depends
+from app import verify_admin
 
 
 def register_extra_routes(app, db):
@@ -42,7 +43,7 @@ def register_extra_routes(app, db):
         return {"status": "ok"}
 
     @app.get("/api/admin/analytics")
-    def get_analytics():
+    def get_analytics(admin: bool = Depends(verify_admin)):
         try:
             events = db("SELECT user_email, event_type, event_data, ts FROM analytics_events ORDER BY ts DESC LIMIT 200")
             return {"events": [{"email": e[0], "type": e[1], "data": e[2], "ts": e[3]} for e in events]}
@@ -50,7 +51,7 @@ def register_extra_routes(app, db):
             return {"events": []}
 
     @app.get("/api/admin/feedback")
-    def get_feedback():
+    def get_feedback(admin: bool = Depends(verify_admin)):
         try:
             rows = db("SELECT user_email, bug_report, ts FROM feedback ORDER BY ts DESC LIMIT 100")
             return {"feedback": [{"email": r[0], "report": r[1], "ts": r[2]} for r in rows]}
@@ -58,7 +59,7 @@ def register_extra_routes(app, db):
             return {"feedback": []}
 
     @app.get("/api/admin/users")
-    def get_users():
+    def get_users(admin: bool = Depends(verify_admin)):
         try:
             rows = db("SELECT email, name, created_at FROM users ORDER BY created_at DESC")
             return {"users": [{"email": r[0], "name": r[1], "created_at": r[2]} for r in rows]}
@@ -66,7 +67,7 @@ def register_extra_routes(app, db):
             return {"users": []}
 
     @app.get("/api/admin/summary")
-    def get_summary():
+    def get_summary(admin: bool = Depends(verify_admin)):
         """Aggregated stats for the Admin Dashboard."""
         try:
             total_users = db("SELECT COUNT(*) FROM users")[0][0]
