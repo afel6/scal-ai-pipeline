@@ -4,6 +4,34 @@ import os
 from fastapi.testclient import TestClient
 from app import app, init_db
 
+
+def _resolve_key():
+    key = os.environ.get("GEMINI_API_KEY", "").strip()
+    if key:
+        return key
+    # Fall back to the app's key pool (populated from .env via load_dotenv),
+    # but never treat the placeholder DUMMY_KEY as usable.
+    try:
+        from app import GEMINI_KEY_POOL
+        if GEMINI_KEY_POOL and GEMINI_KEY_POOL[0] not in ("", "DUMMY_KEY"):
+            return GEMINI_KEY_POOL[0]
+    except Exception:
+        pass
+    return ""
+
+
+_KEY = _resolve_key()
+
+# Both tests exercise the live /api/chat LLM pipeline (real Gemini responses),
+# so they are integration tests: skipped on CI (no secret) and run only when a
+# real key is present locally. This lets the file be collected by `pytest tests/`
+# without a dedicated --ignore entry.
+pytestmark = [
+    pytest.mark.integration,
+    pytest.mark.skipif(not _KEY, reason="No usable GEMINI_API_KEY available (live API test)"),
+]
+
+
 @pytest.fixture(scope="module")
 def client():
     with TestClient(app) as c:

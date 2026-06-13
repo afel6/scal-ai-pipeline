@@ -7,6 +7,8 @@ python-multipart>=0.0.12   # required for FastAPI Form() and File() uploads
 # google-generativeai (legacy SDK) intentionally removed — we use google-genai only
 # anthropic intentionally removed — document generation uses Gemini + local python-docx/openpyxl
 google-genai>=1.16.0
+genkit
+
 
 # ── Data & numerics ───────────────────────────────────────────────────────────
 numpy>=1.26.0
@@ -15,7 +17,10 @@ scipy>=1.14.0
 
 # ── Visualisation ─────────────────────────────────────────────────────────────
 matplotlib>=3.9.0
-streamlit>=1.35.0
+# streamlit removed — the server never imports or launches it. It only appears as
+# *generated* text: llm_insight_generator.py / dashboard_architect.py / visualizer.py
+# write standalone app_dashboard.py scripts to outputs/ for the user to run separately.
+# Those generated dashboards are never executed by this FastAPI service.
 # seaborn removed — not imported anywhere; matplotlib used directly with PRC palette
 
 # ── Document generation ───────────────────────────────────────────────────────
@@ -34,7 +39,8 @@ pdfplumber>=0.10.0             # PDF text extraction for SCAL file uploads
 
 # ── Database ──────────────────────────────────────────────────────────────────
 psycopg2-binary>=2.9.9     # PostgreSQL driver; SQLite is stdlib (no extra dep)
-chromadb>=0.4.0             # Vector DB for RAG knowledge base (rag_database.py)
+chromadb>=0.4.0             # Vector DB only for the legacy/analog-well path (rag_database.py,
+                           # ingest_legacy.py, e2e_test.py) — NOT the live chat flow (app.py)
 
 # ── Utilities ─────────────────────────────────────────────────────────────────
 python-dotenv>=1.0.0

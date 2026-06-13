@@ -1,3 +1,4 @@
+import os
 import logging
 import chromadb
 import uuid
@@ -8,7 +9,14 @@ class RAGDatabase:
     """
     Local Vector Database (ChromaDB) for Storing and Retrieving Historical Well Data.
     """
-    def __init__(self, persist_directory="./chroma_db"):
+    def __init__(self, persist_directory: str = None):
+        # When no explicit path is given, land the store on Render's persistent
+        # disk (DB_DIR=/data) so vectors survive deploys/restarts. The source dir
+        # on Render is ephemeral, so the old "./chroma_db" default was wiped on
+        # every deploy. Falls back to ./chroma_db for local runs.
+        if persist_directory is None:
+            base = os.environ.get("CHROMA_DIR") or os.environ.get("DB_DIR")
+            persist_directory = os.path.join(base, "chroma_db") if base else "./chroma_db"
         self.client = chromadb.PersistentClient(path=persist_directory)
         
         self.collection = self.client.get_or_create_collection(

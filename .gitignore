@@ -47,10 +47,26 @@ scratch/
 outputs/
 startup_*.txt
 hermes_skills_library/
+# But the runtime petroleum skill scripts (executed by skills_engine.py) MUST stay tracked.
+# Git will not descend into an ignored DIRECTORY, so re-including files inside it requires
+# first un-ignoring the directory itself, then re-including its contents. Walk the tree down:
+!hermes_skills_library/
+hermes_skills_library/*
+!hermes_skills_library/petroleum/
+!hermes_skills_library/petroleum/**
+# Keep compiled bytecode out regardless of the negations above.
+hermes_skills_library/**/__pycache__/
 test_centrifuge.xlsx
 pytest_temp/
 temp_pytest/
 
 # Generated SCAL spreadsheet artifacts
 PRC_XLSX_*
+
+# Genkit dev/reflection server runtime logs & traces (not source)
+.genkit/
+
+# Editor / migration backup files
+*.bak
+*.original.bak
 

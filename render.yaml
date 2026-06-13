@@ -22,8 +22,9 @@ services:
         sync: false
       - key: GEMINI_API_KEY
         sync: false
-      - key: CLAUDE_API_KEY
-        sync: false
+      # unused — anthropic removed; docgen is Gemini + python-docx/openpyxl
+      # - key: CLAUDE_API_KEY
+      #   sync: false
       - key: KB_INGEST_PASSWORD
         sync: false
       - key: KB_INGEST_SECRET
