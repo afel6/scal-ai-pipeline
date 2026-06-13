@@ -76,7 +76,6 @@ The pipeline processes the following SCAL test types natively: Relative Permeabi
   │
   ├── Curve Fitting Engine
   │   ├── KrCurveFitter       — Brooks-Corey / LET via Simulated Annealing
-  │   ├── PRCThermodynamics   — J-Leverett Pc, Amott-Harvey wettability index
   │   └── SCALFileHandler     — Excel/CSV/TXT ingestion, column auto-mapping
   │
   ├── Document Engine (HvielDocEngine)
