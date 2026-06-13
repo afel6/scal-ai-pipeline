@@ -146,7 +146,10 @@ export default function App() {
   useEffect(() => {
     const wake = async () => {
       try {
-        await axios.get(`${API_URL}/api/diag`, { timeout: 180_000 });
+        // Poll the PUBLIC /health endpoint (not the auth-gated /api/diag).
+        // wake() runs once on mount, before any login token/email exists, so
+        // /api/diag returned 401 here and the badge always showed "Offline".
+        await axios.get(`${API_URL}/health`, { timeout: 180_000 });
         setServerStatus('online');
       } catch {
         setServerStatus('offline');
@@ -203,13 +206,22 @@ export default function App() {
   }, [user, sessions, handleLoadSession]);
 
   // ── new chat ───────────────────────────────────────────────────────────────
-  const handleNewChat = useCallback(() => {
+  const handleNewChat = useCallback(async () => {
+    if (user?.email) {
+      try {
+        const form = new URLSearchParams({ email: user.email });
+        await axios.post(`${API_URL}/api/clear-user-files`, form);
+      } catch (err) {
+        console.error('Failed to clear user files:', err);
+      }
+    }
     setSessionId('');
     localStorage.setItem('prc_session_id', '');
     setMessages([WELCOME_MSG]);
     setLastMessage(null);
     if (window.innerWidth < 768) setSidebarOpen(false);
-  }, []);
+  }, [user]);
+
 
   // ── delete session ─────────────────────────────────────────────────────────
   const handleDeleteSession = useCallback(async (e, sid) => {

@@ -10,12 +10,47 @@
 
 #          env-var secrets Â· slowapi rate limiting Â· dead code purged
 
+# --- PYDANTIC MONKEYPATCH FOR GENKIT HTTP_OPTIONS SCHEMA RESOLUTION ---
+try:
+    from pydantic.json_schema import GenerateJsonSchema
+    _orig_handle = GenerateJsonSchema.handle_invalid_for_json_schema
+    def _patched_handle(self, schema, error_info):
+        try:
+            return _orig_handle(self, schema, error_info)
+        except Exception:
+            return {"type": "object"}
+    GenerateJsonSchema.handle_invalid_for_json_schema = _patched_handle
+except Exception:
+    pass
 
+# --- PYDANTIC MONKEYPATCH FOR GENKIT TypeAdapter.json_schema PROPERTIES RESOLUTION ---
+try:
+    from pydantic import TypeAdapter
+    _orig_json_schema = TypeAdapter.json_schema
+    def ensure_properties(d):
+        if isinstance(d, dict):
+            if d.get("type") == "object" and "properties" not in d:
+                d["properties"] = {}
+            for v in list(d.values()):
+                ensure_properties(v)
+        elif isinstance(d, list):
+            for item in d:
+                ensure_properties(item)
+
+    def _patched_json_schema(self, *args, **kwargs):
+        schema = _orig_json_schema(self, *args, **kwargs)
+        ensure_properties(schema)
+        return schema
+    TypeAdapter.json_schema = _patched_json_schema
+except Exception:
+    pass
 
 from pathlib import Path
 import os, io, uuid, time, re, hmac, hashlib, secrets as _secrets
 import json as _json, logging, threading, asyncio
 import anyio
+
+GLOBAL_EVENT_LOOP = None
 
 from contextlib import asynccontextmanager, contextmanager
 from typing import Optional
@@ -737,16 +772,40 @@ def get_session_summary_context(sid: str) -> str:
 
 # ── USER FILE HISTORY ─────────────────────────────────────────────────────────
 
-def get_user_file_history_context(email: str) -> str:
-    """Return formatted ENGINEER FILE HISTORY block for the last 5 user uploads."""
+def get_user_file_history_context(email: str, sid: str = None) -> str:
+    """Return formatted ENGINEER FILE HISTORY block for the user uploads scoped to the session."""
     if not email:
         return ""
     try:
-        rows = db(
-            "SELECT filename, data_type, key_params, created_at FROM user_files "
-            "WHERE user_email=? ORDER BY created_at DESC LIMIT 5",
-            (email,),
-        )
+        if sid:
+            # Only select files that were actually uploaded in this session (by looking at message fname records)
+            fname_rows = db(
+                "SELECT DISTINCT fname FROM (SELECT fname FROM m WHERE sid=? AND user_email=? AND fname IS NOT NULL ORDER BY id DESC) sub",
+                (sid, email),
+            )
+            session_fnames = []
+            seen = set()
+            for r in (fname_rows or []):
+                if r[0]:
+                    for fn in r[0].split(";"):
+                        fn = fn.strip()
+                        if fn and fn not in seen:
+                            session_fnames.append(fn)
+                            seen.add(fn)
+            if not session_fnames:
+                return ""
+            
+            # Query user_files for only these filenames
+            placeholders = ",".join("?" for _ in session_fnames)
+            rows = db(
+                f"SELECT filename, data_type, key_params, created_at FROM user_files "
+                f"WHERE user_email=? AND filename IN ({placeholders}) ORDER BY created_at DESC",
+                (email, *session_fnames),
+            )
+        else:
+            # If no session ID is provided, there are no files in this session yet
+            return ""
+
         if not rows:
             return ""
         lines = ["ENGINEER FILE HISTORY (your previously uploaded files):"]
@@ -766,6 +825,7 @@ def get_user_file_history_context(email: str) -> str:
     except Exception as e:
         _logger.warning(f"[UserFiles] History read failed for {email}: {e}")
         return ""
+
 
 
 
@@ -1985,7 +2045,232 @@ _PETRO_KEYS = frozenset({
 
 
 
-_tls = threading.local()
+import contextvars
+from pydantic import BaseModel, Field
+from genkit.ai import Genkit
+from genkit.plugins.google_genai import GoogleAI
+from genkit.ai._server import ServerSpec
+
+class TLSContext:
+    def __init__(self):
+        self._var = contextvars.ContextVar("tls_context", default=None)
+    def _get_dict(self):
+        d = self._var.get()
+        if d is None:
+            d = {}
+            self._var.set(d)
+        return d
+    def __getattr__(self, name):
+        d = self._get_dict()
+        if name in d:
+            return d[name]
+        raise AttributeError(f"'TLSContext' object has no attribute '{name}'")
+    def __setattr__(self, name, value):
+        if name == "_var":
+            super().__setattr__(name, value)
+        else:
+            d = self._get_dict()
+            d[name] = value
+    def __delattr__(self, name):
+        d = self._get_dict()
+        if name in d:
+            del d[name]
+        else:
+            raise AttributeError(f"'TLSContext' object has no attribute '{name}'")
+
+_tls = TLSContext()
+
+# Initialize Google Genkit Plugin and Client
+google_ai_plugin = GoogleAI(api_key=GEMINI_KEY_POOL[0])
+ai = Genkit(plugins=[google_ai_plugin], reflection_server_spec=ServerSpec(port=3105))
+
+# Define tool schemas for Genkit
+
+class CalculatePetrophysicsInput(BaseModel):
+    script: str = Field(description="One of: petrophysics.py, micp_skill.py, centrifuge_skill.py")
+    model: Optional[str] = Field(None, description="For petrophysics.py: regress_archie_m_a, regress_archie_n, rqi_fzi. For centrifuge: pc_only, full, hassler_brunner. rqi_fzi params: {phi: [fractions 0-1], perm: [mD], depth: [optional array]}. Returns full per-sample table with HU classification.")
+    params: dict = Field(description="Parameters required for the selected script and model.")
+
+class ExecutePythonSimulationParamsInput(BaseModel):
+    swr: Optional[float] = None
+    snr: Optional[float] = None
+    krw_max: Optional[float] = None
+    kro_max: Optional[float] = None
+    nw: Optional[float] = None
+    no: Optional[float] = None
+    nx: Optional[float] = None
+    ny: Optional[float] = None
+    steps: Optional[float] = None
+
+class ExecutePythonSimulationInput(BaseModel):
+    model: str
+    mode: str
+    params: ExecutePythonSimulationParamsInput
+
+class GenerateMermaidDiagramInput(BaseModel):
+    type: str
+    content: str
+
+class FitPetrophysicalCurveInput(BaseModel):
+    model: str
+    sw: Optional[list[float]] = None
+    krw: Optional[list[float]] = None
+    kro: Optional[list[float]] = None
+    pc: Optional[list[float]] = None
+    s_hg: Optional[list[float]] = None
+    pc_imb: Optional[list[float]] = None
+    s_hg_imb: Optional[list[float]] = None
+    ri: Optional[list[float]] = None
+    ff: Optional[list[float]] = None
+    porosity: Optional[list[float]] = None
+    perm: Optional[list[float]] = None
+    pressure: Optional[list[float]] = None
+    depth: Optional[list[float]] = None
+    k_md: Optional[float] = None
+    phi_val: Optional[float] = None
+    ift_cos_theta: Optional[float] = None
+    sample_name: Optional[str] = None
+
+class AgenticHistoryMatchingInput(BaseModel):
+    sw: list[float]
+    krw: list[float]
+    kro: list[float]
+
+class GenerateExecutiveReportInput(BaseModel):
+    well_name: str
+    report_title: Optional[str] = None
+
+class GetAuditHistoryInput(BaseModel):
+    session_id: Optional[str] = Field(None, description="Optional session ID to retrieve audit history for")
+
+@ai.tool(name="calculate_petrophysics_properties", description="**MANDATORY for centrifuge Hassler-Brunner / Forbes corrections and for FZI/RQI calculations. Do not produce Pc(Sw) or RQI values without calling this tool first.** Calculation Engine for SCAL Tracks A, B, D, E. Does NOT generate charts, only returns calculated JSON data.")
+def calculate_petrophysics_properties_tool(input: CalculatePetrophysicsInput) -> str:
+    return "Calculated"
+
+@ai.tool(name="execute_python_simulation", description="Universal petrophysical simulation (Brooks-Corey, 1D Kr curves, 2D IMPES reservoir waterflood). Returns JSON for PRC plotting.")
+def execute_python_simulation_tool(input: ExecutePythonSimulationInput) -> str:
+    return "Simulated"
+
+@ai.tool(name="generate_mermaid_diagram", description="Generates Mermaid.js diagram code for complex workflows.")
+def generate_mermaid_diagram_tool(input: GenerateMermaidDiagramInput) -> str:
+    return "Generated"
+
+@ai.tool(name="fit_petrophysical_curve", description="**MANDATORY before reporting any fitted parameter (Archie n, m, a, MICP Pe/Pd/modal radius, Corey exponents, J-function values). Never report these values without calling this tool first. If the tool fails, report the failure  -  do not estimate.** Fits raw SCAL lab data to standard petrophysical models. Select model by curve type:\n  model='brooks_corey' or 'let'  ->  Relative Permeability (pass sw, krw, kro arrays).\n  model='micp'  ->  Mercury Injection (pass pc=[psia], s_hg=[fraction 0-1]). For imbibition (recovery) cycle: also pass pc_imb=[psia], s_hg_imb=[fraction]. Auto-generates log-scale Pc curve (drainage solid, imbibition dashed) + PSD.\n  model='ri'  ->  Resistivity Index Archie fit (pass sw=[...], ri=[...]). Log-log plot, fits n exponent.\n  model='ff'  ->  Formation Factor Archie fit (pass porosity=[...], ff=[...]). Log-log plot, fits m and a.\n  model='jfunction'  ->  Leverett J-Function (pass sw=[...], pc=[psia], k_md=X, phi_val=Y, ift_cos_theta=26.5).\n  model='pc_centrifuge'  ->  Capillary Pressure direct (pass sw=[...], pc=[psia values]).\n  model='overburden'  ->  Compaction curves (pass pressure=[psia], porosity=[...], perm=[mD]). Dual-axis.\n  model='poroperm'  ->  Porosity vs Permeability cross-plot with log-linear fit (pass porosity=[...], perm=[mD]).\n  model='poroperm_depth'  ->  Porosity & Permeability vs Depth (pass depth=[...], porosity=[...], perm=[mD]). Dual-axis.\nPass sample_name='Core-1' to label multi-sample charts.")
+def fit_petrophysical_curve_tool(input: FitPetrophysicalCurveInput) -> str:
+    return "Fitted"
+
+@ai.tool(name="agentic_history_matching", description="Simulated Annealing history matching on SCAL lab data.")
+def agentic_history_matching_tool(input: AgenticHistoryMatchingInput) -> str:
+    return "Matched"
+
+@ai.tool(name="generate_executive_report", description="**REFUSE this call if no SCAL analysis tools have been invoked in the current session. A report cannot be generated when no analysis has been performed. Return an error message asking the user to upload data and run analysis first.** Generates a professional PRC Executive SCAL Report (.docx) for the current engineering session. Call this when the user asks for a report, summary document, or engineering deliverable. Pass the well name extracted from the conversation context.")
+def generate_executive_report_tool(input: GenerateExecutiveReportInput) -> str:
+    return "Report generated"
+
+@ai.tool(name="get_audit_history", description="Retrieves the historical record of physics audits (the Auditor's Ledger) for the current session.")
+def get_audit_history_tool(input: GetAuditHistoryInput) -> str:
+    return "Audits retrieved"
+
+# Compatibility Wrapper Classes for Genkit response to Gemini SDK response mapping
+
+class GeminiPartCompat:
+    def __init__(self, part):
+        self._part = part
+
+    @property
+    def text(self) -> Optional[str]:
+        p = self._part
+        if hasattr(p, "text") and p.text is not None:
+            return p.text
+        if hasattr(p, "root"):
+            r = p.root
+            if hasattr(r, "text") and r.text is not None:
+                return r.text
+        return None
+
+    @property
+    def function_call(self):
+        p = self._part
+        tr = None
+        if hasattr(p, "tool_request") and p.tool_request is not None:
+            tr = p.tool_request
+        elif hasattr(p, "root"):
+            r = p.root
+            if hasattr(r, "tool_request") and r.tool_request is not None:
+                tr = r.tool_request
+        
+        if tr:
+            class FuncCallCompat:
+                def __init__(self, name, args):
+                    self.name = name
+                    self.args = args
+            return FuncCallCompat(getattr(tr, "name", ""), getattr(tr, "input", {}))
+        return None
+
+class GeminiContentCompat:
+    def __init__(self, message_or_content):
+        self._msg = message_or_content
+        parts_list = []
+        if message_or_content:
+            if hasattr(message_or_content, "content") and message_or_content.content:
+                parts_list = message_or_content.content
+            elif hasattr(message_or_content, "parts") and message_or_content.parts:
+                parts_list = message_or_content.parts
+        self.parts = [GeminiPartCompat(p) for p in parts_list]
+
+class GeminiCandidateCompat:
+    def __init__(self, candidate_or_message):
+        self.content = GeminiContentCompat(candidate_or_message)
+
+class GeminiUsageMetadataCompat:
+    def __init__(self, usage):
+        self._usage = usage
+
+    @property
+    def prompt_token_count(self) -> int:
+        if self._usage and getattr(self._usage, "input_tokens", None) is not None:
+            return int(self._usage.input_tokens)
+        return 0
+
+    @property
+    def candidates_token_count(self) -> int:
+        if self._usage and getattr(self._usage, "output_tokens", None) is not None:
+            return int(self._usage.output_tokens)
+        return 0
+
+class GeminiResponseCompat:
+    def __init__(self, genkit_resp):
+        self._resp = genkit_resp
+        self.candidates = [GeminiCandidateCompat(getattr(genkit_resp, "message", None))]
+        self.usage_metadata = GeminiUsageMetadataCompat(getattr(genkit_resp, "usage", None))
+
+    @property
+    def text(self) -> str:
+        if hasattr(self._resp, "text"):
+            return self._resp.text
+        parts = []
+        msg = getattr(self._resp, "message", None)
+        if msg and hasattr(msg, "content") and msg.content:
+            for p in msg.content:
+                if hasattr(p, "text") and p.text:
+                    parts.append(p.text)
+                elif hasattr(p, "root") and hasattr(p.root, "text") and p.root.text:
+                    parts.append(p.root.text)
+        return "".join(parts)
+
+class GeminiChunkCompat:
+    def __init__(self, genkit_chunk):
+        self._chunk = genkit_chunk
+        class MockContent:
+            def __init__(self, parts):
+                self.parts = parts
+        class MockCandidate:
+            def __init__(self, parts):
+                self.content = MockContent(parts)
+        
+        parts_list = getattr(genkit_chunk, "content", []) or []
+        self.candidates = [MockCandidate([GeminiPartCompat(p) for p in parts_list])]
+        self.usage_metadata = GeminiUsageMetadataCompat(getattr(genkit_chunk, "usage", None))
 
 def _add_breadcrumb(msg: str):
     if not hasattr(_tls, "breadcrumbs"):
@@ -2025,79 +2310,337 @@ def _extract_and_log_corrections(session_id: str, email: str, text: str) -> str:
 
 
 def _call_gemini_with_retry(client, model, contents, config, max_retries=5, base_delay=2):
-    """Call client.models.generate_content with exponential backoff on 503/429.
+    """Call Genkit generate with compat mapping and fallback/retry logic."""
+    if "/" not in model and not model.startswith("googleai/"):
+        model = f"googleai/{model}"
 
-    503 ServiceUnavailable — Gemini overload: retry with base_delay * 2^attempt.
-    429 ResourceExhausted  — rate limit: retry with 2x longer delay.
-    Any other exception propagates immediately without retrying.
-    """
+    system_instruction = None
+    temperature = 0.2
+    tools_list = []
+
+    if config:
+        if hasattr(config, 'system_instruction') and config.system_instruction:
+            if isinstance(config.system_instruction, str):
+                system_instruction = config.system_instruction
+            elif hasattr(config.system_instruction, 'parts') and config.system_instruction.parts:
+                parts_text = []
+                for p in config.system_instruction.parts:
+                    if hasattr(p, 'text') and p.text:
+                        parts_text.append(p.text)
+                system_instruction = "".join(parts_text)
+            else:
+                system_instruction = str(config.system_instruction)
+        if hasattr(config, 'temperature') and config.temperature is not None:
+            temperature = config.temperature
+        if hasattr(config, 'tools') and config.tools:
+            tools_list = [
+                'calculate_petrophysics_properties',
+                'execute_python_simulation',
+                'generate_mermaid_diagram',
+                'fit_petrophysical_curve',
+                'agentic_history_matching',
+                'generate_executive_report',
+                'get_audit_history'
+            ]
+
+    # Convert contents to serializable Genkit messages dictionary list
+    messages_data = []
+    for c in contents:
+        role_str = getattr(c, 'role', 'user')
+        role = 'model' if role_str == 'model' else 'user'
+        parts_data = []
+        c_parts = getattr(c, 'parts', []) or []
+        for p in c_parts:
+            if hasattr(p, 'text') and p.text:
+                parts_data.append({'text': p.text})
+            elif hasattr(p, 'function_call') and p.function_call:
+                parts_data.append({'tool_request': {
+                    'name': p.function_call.name,
+                    'input': dict(p.function_call.args or {})
+                }})
+            elif hasattr(p, 'function_response') and p.function_response:
+                parts_data.append({'tool_response': {
+                    'name': p.function_response.name,
+                    'output': p.function_response.response
+                }})
+        if parts_data:
+            messages_data.append({'role': role, 'parts': parts_data})
+
+    # Flow wrapper
+    @ai.flow(name="hviel_chat_flow")
+    async def hviel_chat_flow_internal(flow_args: dict) -> dict:
+        try:
+            from genkit.types import Message, Role, Part, ToolRequest, ToolResponse
+            genkit_messages = []
+            for m in flow_args['messages']:
+                role = Role.MODEL if m['role'] == 'model' else Role.USER
+                parts = []
+                for p in m['parts']:
+                    if 'text' in p:
+                        parts.append(Part(text=p['text']))
+                    elif 'tool_request' in p:
+                        parts.append(Part(tool_request=ToolRequest(
+                            name=p['tool_request']['name'],
+                            input=p['tool_request'].get('input')
+                        )))
+                    elif 'tool_response' in p:
+                        parts.append(Part(tool_response=ToolResponse(
+                            name=p['tool_response']['name'],
+                            output=p['tool_response'].get('output')
+                        )))
+                genkit_messages.append(Message(role=role, content=parts))
+
+            resp = await ai.generate(
+                model=flow_args['model'],
+                messages=genkit_messages,
+                system=flow_args['system_instruction'],
+                tools=flow_args['tools_list'] if flow_args['tools_list'] else None,
+                return_tool_requests=True,
+                config={'temperature': flow_args['temperature']}
+            )
+            return {"response": resp.model_dump()}
+        except Exception as flow_err:
+            import traceback
+            _logger.error(f"[FLOW EXCEPTION] Error in hviel_chat_flow_internal: {flow_err}\\nTraceback:\\n{traceback.format_exc()}")
+            raise flow_err
+
+    # Execute flow inside running loop or via anyio thread runner
+    flow_payload = {
+        'model': model,
+        'messages': messages_data,
+        'system_instruction': system_instruction,
+        'tools_list': tools_list,
+        'temperature': temperature
+    }
+
     for attempt in range(max_retries):
         try:
-            resp = client.models.generate_content(
-                model=model, contents=contents, config=config
-            )
+            async def run_flow_coro():
+                return await hviel_chat_flow_internal(flow_payload)
+
             try:
-                if resp and resp.usage_metadata:
+                res = anyio.from_thread.run(run_flow_coro)
+            except RuntimeError:
+                res = asyncio.run(run_flow_coro())
+
+            from genkit.types import GenerateResponse
+            resp_val = GenerateResponse.model_validate(res["response"])
+            compat_resp = GeminiResponseCompat(resp_val)
+            
+            try:
+                if compat_resp.usage_metadata:
                     _log_api_usage(
                         getattr(_tls, 'current_session_id', 'SYSTEM'),
                         model,
-                        resp.usage_metadata.prompt_token_count,
-                        resp.usage_metadata.candidates_token_count
+                        compat_resp.usage_metadata.prompt_token_count,
+                        compat_resp.usage_metadata.candidates_token_count
                     )
             except Exception as usage_err:
                 _logger.warning(f"[CostTracker] Failed to log usage from generate_content: {usage_err}")
-            return resp
+                
+            return compat_resp
         except Exception as e:
-            err = str(e).lower()
+            err = (str(e) + " " + str(getattr(e, "__cause__", "")) + " " + str(getattr(e, "__context__", ""))).lower()
             is_503 = any(x in err for x in ["503", "service_unavailable", "unavailable"])
             is_429 = any(x in err for x in ["429", "resource_exhausted"])
             
-            # Immediately fallback to pro for any 503 or 429 on gemini-2.5-flash
-            if (is_503 or is_429) and model == "gemini-2.5-flash":
-                _logger.warning(f"[Fallback] gemini-2.5-flash returned {'503' if is_503 else '429'}. Falling back to gemini-2.5-pro immediately...")
+            if (is_503 or is_429) and "flash" in model:
+                pro_model = "googleai/gemini-2.5-pro"
+                _logger.warning(f"[Fallback] {model} returned 503/429. Falling back to {pro_model} immediately...")
+                flow_payload['model'] = pro_model
                 try:
-                    resp = client.models.generate_content(
-                        model="gemini-2.5-pro", contents=contents, config=config
-                    )
+                    async def run_fallback_coro():
+                        return await hviel_chat_flow_internal(flow_payload)
                     try:
-                        if resp and resp.usage_metadata:
+                        res = anyio.from_thread.run(run_fallback_coro)
+                    except RuntimeError:
+                        res = asyncio.run(run_fallback_coro())
+                    from genkit.types import GenerateResponse
+                    resp_val = GenerateResponse.model_validate(res["response"])
+                    compat_resp = GeminiResponseCompat(resp_val)
+                    try:
+                        if compat_resp.usage_metadata:
                             _log_api_usage(
                                 getattr(_tls, 'current_session_id', 'SYSTEM'),
-                                "gemini-2.5-pro",
-                                resp.usage_metadata.prompt_token_count,
-                                resp.usage_metadata.candidates_token_count
+                                pro_model,
+                                compat_resp.usage_metadata.prompt_token_count,
+                                compat_resp.usage_metadata.candidates_token_count
                             )
                     except Exception as usage_err:
                         _logger.warning(f"[CostTracker] Failed to log usage from fallback: {usage_err}")
-                    return resp
+                    return compat_resp
                 except Exception as fallback_err:
                     raise ValueError(f"CRITICAL: Both primary and fallback models are UNAVAILABLE. {fallback_err}")
-
+                    
             if (is_503 or is_429) and attempt < max_retries - 1:
-                delay = base_delay * (2 ** attempt)  # 2, 4, 8, 16, 32
+                delay = base_delay * (2 ** attempt)
                 if is_429:
-                    delay *= 2                        # 4, 8, 16, 32, 64
-                _logger.info(
-                    f"[DocGen] Gemini {'503' if is_503 else '429'} — "
-                    f"attempt {attempt + 1}/{max_retries}, retrying in {delay}s"
-                )
+                    delay *= 2
+                _logger.info(f"[DocGen] Gemini retry attempt {attempt + 1}/{max_retries} in {delay}s")
                 time.sleep(delay)
                 continue
-            
             raise
     raise ValueError(f"Gemini call failed after {max_retries} retries")
 
+GLOBAL_STREAM_QUEUES = {}
+
 def _call_gemini_stream_with_retry(client, model, contents, config, max_retries=3, base_delay=2):
-    """Call client.models.generate_content_stream with exponential backoff on 503/429 and fallback logic."""
-    for attempt in range(max_retries):
+    """Call Genkit generate_stream with compat mapping and fallback/retry logic."""
+    import queue
+    if "/" not in model and not model.startswith("googleai/"):
+        model = f"googleai/{model}"
+
+    system_instruction = None
+    temperature = 0.2
+    tools_list = []
+
+    if config:
+        if hasattr(config, 'system_instruction') and config.system_instruction:
+            if isinstance(config.system_instruction, str):
+                system_instruction = config.system_instruction
+            elif hasattr(config.system_instruction, 'parts') and config.system_instruction.parts:
+                parts_text = []
+                for p in config.system_instruction.parts:
+                    if hasattr(p, 'text') and p.text:
+                        parts_text.append(p.text)
+                system_instruction = "".join(parts_text)
+            else:
+                system_instruction = str(config.system_instruction)
+        if hasattr(config, 'temperature') and config.temperature is not None:
+            temperature = config.temperature
+        if hasattr(config, 'tools') and config.tools:
+            tools_list = [
+                'calculate_petrophysics_properties',
+                'execute_python_simulation',
+                'generate_mermaid_diagram',
+                'fit_petrophysical_curve',
+                'agentic_history_matching',
+                'generate_executive_report',
+                'get_audit_history'
+            ]
+
+    # Convert contents to serializable Genkit messages dictionary list
+    messages_data = []
+    for c in contents:
+        role_str = getattr(c, 'role', 'user')
+        role = 'model' if role_str == 'model' else 'user'
+        parts_data = []
+        c_parts = getattr(c, 'parts', []) or []
+        for p in c_parts:
+            if hasattr(p, 'text') and p.text:
+                parts_data.append({'text': p.text})
+            elif hasattr(p, 'function_call') and p.function_call:
+                parts_data.append({'tool_request': {
+                    'name': p.function_call.name,
+                    'input': dict(p.function_call.args or {})
+                }})
+            elif hasattr(p, 'function_response') and p.function_response:
+                parts_data.append({'tool_response': {
+                    'name': p.function_response.name,
+                    'output': p.function_response.response
+                }})
+        if parts_data:
+            messages_data.append({'role': role, 'parts': parts_data})
+
+    # Flow wrapper for streaming generator
+    @ai.flow(name="hviel_chat_flow_stream")
+    async def hviel_chat_flow_stream_internal(flow_args: dict) -> dict:
         try:
+            from genkit.types import Message, Role, Part, ToolRequest, ToolResponse
+            genkit_messages = []
+            for m in flow_args['messages']:
+                role = Role.MODEL if m['role'] == 'model' else Role.USER
+                parts = []
+                for p in m['parts']:
+                    if 'text' in p:
+                        parts.append(Part(text=p['text']))
+                    elif 'tool_request' in p:
+                        parts.append(Part(tool_request=ToolRequest(
+                            name=p['tool_request']['name'],
+                            input=p['tool_request'].get('input')
+                        )))
+                    elif 'tool_response' in p:
+                        parts.append(Part(tool_response=ToolResponse(
+                            name=p['tool_response']['name'],
+                            output=p['tool_response']['output']
+                        )))
+                genkit_messages.append(Message(role=role, content=parts))
+
+            stream, response_future = ai.generate_stream(
+                model=flow_args['model'],
+                messages=genkit_messages,
+                system=flow_args['system_instruction'],
+                tools=flow_args['tools_list'] if flow_args['tools_list'] else None,
+                return_tool_requests=True,
+                config={'temperature': flow_args['temperature']}
+            )
+            
+            stream_id = flow_args['stream_id']
+            q = GLOBAL_STREAM_QUEUES[stream_id]
+            
+            async for chunk in stream:
+                q.put({"type": "chunk", "chunk": chunk.model_dump()})
+                
+            resp = await response_future
+            q.put({"type": "done", "response": resp.model_dump()})
+            return {"response": resp.model_dump()}
+        except Exception as flow_err:
+            import traceback
+            _logger.error(f"[FLOW EXCEPTION] Error in hviel_chat_flow_stream_internal: {flow_err}\\nTraceback:\\n{traceback.format_exc()}")
+            stream_id = flow_args.get('stream_id')
+            if stream_id and stream_id in GLOBAL_STREAM_QUEUES:
+                GLOBAL_STREAM_QUEUES[stream_id].put({"type": "error", "error": str(flow_err)})
+            raise flow_err
+
+    flow_payload = {
+        'model': model,
+        'messages': messages_data,
+        'system_instruction': system_instruction,
+        'tools_list': tools_list,
+        'temperature': temperature
+    }
+
+    for attempt in range(max_retries):
+        stream_id = str(uuid.uuid4())
+        q = queue.Queue()
+        GLOBAL_STREAM_QUEUES[stream_id] = q
+        flow_payload['stream_id'] = stream_id
+
+        try:
+            async def run_flow_stream():
+                return await hviel_chat_flow_stream_internal(flow_payload)
+
+            try:
+                loop = asyncio.get_running_loop()
+            except RuntimeError:
+                loop = GLOBAL_EVENT_LOOP
+            asyncio.run_coroutine_threadsafe(run_flow_stream(), loop)
+
             prompt_tokens = 0
             completion_tokens = 0
-            for chunk in client.models.generate_content_stream(model=model, contents=contents, config=config):
-                if chunk.usage_metadata:
-                    prompt_tokens = chunk.usage_metadata.prompt_token_count or prompt_tokens
-                    completion_tokens = chunk.usage_metadata.candidates_token_count or completion_tokens
-                yield chunk
+            final_res = None
+
+            from genkit.types import GenerateResponse, GenerateResponseChunk
+
+            while True:
+                item = q.get()
+                if item["type"] == "chunk":
+                    chunk = GenerateResponseChunk.model_validate(item["chunk"])
+                    compat_chunk = GeminiChunkCompat(chunk)
+                    if compat_chunk.usage_metadata:
+                        prompt_tokens = compat_chunk.usage_metadata.prompt_token_count or prompt_tokens
+                        completion_tokens = compat_chunk.usage_metadata.candidates_token_count or completion_tokens
+                    yield compat_chunk
+                elif item["type"] == "done":
+                    final_res = GenerateResponse.model_validate(item["response"])
+                    break
+                elif item["type"] == "error":
+                    raise ValueError(item["error"])
+
+            if final_res and final_res.usage:
+                prompt_tokens = final_res.usage.input_tokens or prompt_tokens
+                completion_tokens = final_res.usage.output_tokens or completion_tokens
+
             try:
                 if prompt_tokens > 0 or completion_tokens > 0:
                     _log_api_usage(
@@ -2110,44 +2653,78 @@ def _call_gemini_stream_with_retry(client, model, contents, config, max_retries=
                 _logger.warning(f"[CostTracker] Failed to log usage from stream: {usage_err}")
             return
         except Exception as e:
-            err = str(e).lower()
+            err = (str(e) + " " + str(getattr(e, "__cause__", "")) + " " + str(getattr(e, "__context__", ""))).lower()
             is_503 = any(x in err for x in ["503", "service_unavailable", "unavailable"])
             is_429 = any(x in err for x in ["429", "resource_exhausted"])
-            
-            # Immediately fallback to pro for any 503 or 429 on gemini-2.5-flash
-            if (is_503 or is_429) and model == "gemini-2.5-flash":
-                _logger.warning(f"[Fallback] gemini-2.5-flash returned {'503' if is_503 else '429'}. Falling back to gemini-2.5-pro for stream immediately...")
+
+            if (is_503 or is_429) and "flash" in model:
+                pro_model = "googleai/gemini-2.5-pro"
+                _logger.warning(f"[Fallback] {model} stream returned 503/429. Falling back to {pro_model} immediately...")
+                flow_payload['model'] = pro_model
+                
+                pro_stream_id = str(uuid.uuid4())
+                pro_q = queue.Queue()
+                GLOBAL_STREAM_QUEUES[pro_stream_id] = pro_q
+                flow_payload['stream_id'] = pro_stream_id
+
                 try:
+                    async def run_pro_stream():
+                        return await hviel_chat_flow_stream_internal(flow_payload)
+
+                    try:
+                        loop = asyncio.get_running_loop()
+                    except RuntimeError:
+                        loop = GLOBAL_EVENT_LOOP
+                    asyncio.run_coroutine_threadsafe(run_pro_stream(), loop)
+                    
                     prompt_tokens = 0
                     completion_tokens = 0
-                    for chunk in client.models.generate_content_stream(model="gemini-2.5-pro", contents=contents, config=config):
-                        if chunk.usage_metadata:
-                            prompt_tokens = chunk.usage_metadata.prompt_token_count or prompt_tokens
-                            completion_tokens = chunk.usage_metadata.candidates_token_count or completion_tokens
-                        yield chunk
+                    final_res = None
+
+                    while True:
+                        item = pro_q.get()
+                        if item["type"] == "chunk":
+                            chunk = GenerateResponseChunk.model_validate(item["chunk"])
+                            compat_chunk = GeminiChunkCompat(chunk)
+                            if compat_chunk.usage_metadata:
+                                prompt_tokens = compat_chunk.usage_metadata.prompt_token_count or prompt_tokens
+                                completion_tokens = compat_chunk.usage_metadata.candidates_token_count or completion_tokens
+                            yield compat_chunk
+                        elif item["type"] == "done":
+                            final_res = GenerateResponse.model_validate(item["response"])
+                            break
+                        elif item["type"] == "error":
+                            raise ValueError(item["error"])
+
+                    if final_res and final_res.usage:
+                        prompt_tokens = final_res.usage.input_tokens or prompt_tokens
+                        completion_tokens = final_res.usage.output_tokens or completion_tokens
+
                     try:
                         if prompt_tokens > 0 or completion_tokens > 0:
                             _log_api_usage(
                                 getattr(_tls, 'current_session_id', 'SYSTEM'),
-                                "gemini-2.5-pro",
+                                pro_model,
                                 prompt_tokens,
                                 completion_tokens
                             )
                     except Exception as usage_err:
-                        _logger.warning(f"[CostTracker] Failed to log usage from fallback stream: {usage_err}")
+                        _logger.warning(f"[CostTracker] Failed to log usage from pro stream fallback: {usage_err}")
                     return
                 except Exception as fallback_err:
-                    raise ValueError(f"CRITICAL: Both primary (flash) and fallback (pro) models are UNAVAILABLE for streaming. {fallback_err}")
+                    raise ValueError(f"CRITICAL: Both primary and fallback models are UNAVAILABLE. {fallback_err}")
+                finally:
+                    GLOBAL_STREAM_QUEUES.pop(pro_stream_id, None)
 
-            # Simple retry backoff
             if (is_503 or is_429) and attempt < max_retries - 1:
                 delay = base_delay * (2 ** attempt)
                 if is_429: delay *= 2
-                _logger.info(f"[Chat Stream] Gemini {'503' if is_503 else '429'} — attempt {attempt + 1}/{max_retries}, retrying in {delay}s")
+                _logger.info(f"[Chat Stream] Gemini retry attempt {attempt + 1}/{max_retries} in {delay}s")
                 time.sleep(delay)
                 continue
-                
             raise
+        finally:
+            GLOBAL_STREAM_QUEUES.pop(stream_id, None)
 
 
 # â"€â"€ GEMINI HA CLIENT â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€
@@ -2200,6 +2777,12 @@ class PRCChatAssistant:
 
                     self._current_idx = idx
 
+                    try:
+                        google_ai_plugin._client._api_client.api_key = key
+                        google_ai_plugin._client.aio._api_client.api_key = key
+                    except Exception as p_err:
+                        _logger.warning(f"[HA] Failed to propagate key to Genkit: {p_err}")
+
                 _logger.info(f"[HA] Node {idx+1} active ({key[:8]}...)")
 
                 return
@@ -2213,6 +2796,11 @@ class PRCChatAssistant:
             with self._client_lock:
 
                 self._client = genai_new.Client(api_key=self._keys[0])
+                try:
+                    google_ai_plugin._client._api_client.api_key = self._keys[0]
+                    google_ai_plugin._client.aio._api_client.api_key = self._keys[0]
+                except Exception as p_err:
+                    _logger.warning(f"[HA] Failed to propagate fallback key to Genkit: {p_err}")
 
         except Exception as e:
 
@@ -5822,6 +6410,8 @@ def init_db() -> None:
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    global GLOBAL_EVENT_LOOP
+    GLOBAL_EVENT_LOOP = asyncio.get_running_loop()
     # API key validation on startup with clear error (Crash Issue 6)
     if not is_testing():
         try:
@@ -6345,11 +6935,29 @@ def delete_session(
 ):
     verify_user_or_admin(authorization=authorization, token=token, email_query=email)
     _verify_session_owner(sid, email)
+    
+    # Retrieve and delete files associated with this session
+    try:
+        rows = db("SELECT DISTINCT fname FROM m WHERE sid=? AND user_email=?", (sid, email))
+        fnames = []
+        for r in (rows or []):
+            if r[0]:
+                for fn in r[0].split(";"):
+                    fn = fn.strip()
+                    if fn:
+                        fnames.append(fn)
+        for fn in fnames:
+            db("DELETE FROM user_files WHERE user_email=? AND filename=?", (email, fn))
+            _logger.info(f"[DeleteSession] Cleared file record {fn} from user_files")
+    except Exception as _fe:
+        _logger.warning(f"[DeleteSession] Failed to clear user_files: {_fe}")
+
     db("DELETE FROM m WHERE sid=?", (sid,))
     db("DELETE FROM sessions WHERE sid=?", (sid,))
     db("DELETE FROM physics_audits WHERE session_id=?", (sid,))
     KnowledgeBase.delete_session_data(sid)
     return {"status": "ok"}
+
 
 
 def parse_q0_questions(text: str) -> list[tuple[str, str]]:
@@ -6511,7 +7119,7 @@ async def chat_stream(
 
                 kb_ctx = KnowledgeBase.search(message, sid=sid, email=email)
 
-                file_history_ctx = get_user_file_history_context(email)
+                file_history_ctx = get_user_file_history_context(email, sid=sid)
                 summary_ctx = get_session_summary_context(sid)
                 prefix = "\n\n".join(filter(None, [file_history_ctx, summary_ctx]))
                 if prefix:
@@ -7042,7 +7650,7 @@ async def handle(
 
         kb_ctx = await KnowledgeBase.search_async(message, sid=sid, email=email)
 
-        file_history_ctx = get_user_file_history_context(email)
+        file_history_ctx = get_user_file_history_context(email, sid=sid)
         summary_ctx = get_session_summary_context(sid)
         prefix = "\n\n".join(filter(None, [file_history_ctx, summary_ctx]))
         if prefix:
@@ -7303,7 +7911,7 @@ async def handle(
                 return resp_obj
 
         try:
-            resp = await asyncio.get_running_loop().run_in_executor(None, _chat_capture)
+            resp = await anyio.to_thread.run_sync(_chat_capture)
         except Exception as e:
             _logger.error(f"[Chat] Gemini/file processing error: {e}")
             reply = f"Processing error: {str(e)[:300]}. Please retry or contact PRC support."
@@ -7812,6 +8420,20 @@ async def clear_session(session_id: str = Form(...)):
         raise HTTPException(status_code=400, detail="Invalid session_id format")
     evict_session(session_id)
     return {"status": "cleared", "session_id": session_id}
+
+
+@app.post("/api/clear-user-files")
+async def clear_user_files(email: str = Form(...)):
+    """Wipes all user uploaded files from user_files to prevent cross-session AI confusion."""
+    try:
+        email_clean = email.lower().strip()
+        db("DELETE FROM user_files WHERE user_email=?", (email_clean,))
+        _logger.info(f"[ClearUserFiles] Successfully cleared all user files for {email_clean}")
+        return {"status": "ok", "message": "Successfully cleared all user files."}
+    except Exception as e:
+        _logger.error(f"[ClearUserFiles] Failed to clear user files for {email}: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
 
 
 def purge_all_historical_assets():
