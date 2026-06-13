@@ -7932,6 +7932,7 @@ _REPORT_LATENCY_LOCK: threading.Lock = threading.Lock()
 _MAX_UPLOAD_BYTES = 20 * 1024 * 1024
 
 import tempfile
+import aiofiles
 
 async def process_large_file_stream(file: UploadFile, temp_file_path: str, max_bytes: int):
     """
@@ -7939,7 +7940,7 @@ async def process_large_file_stream(file: UploadFile, temp_file_path: str, max_b
     If the file size exceeds the max_bytes limit, raises HTTP 413.
     """
     total_bytes = 0
-    with open(temp_file_path, "wb") as buffer:
+    async with aiofiles.open(temp_file_path, "wb") as buffer:
         while True:
             chunk = await file.read(512 * 1024)  # 512KB chunks
             if not chunk:
@@ -7950,7 +7951,7 @@ async def process_large_file_stream(file: UploadFile, temp_file_path: str, max_b
                     status_code=413,
                     detail=f"File size exceeds maximum allowed {max_bytes // (1024 * 1024)}MB limit."
                 )
-            buffer.write(chunk)
+            await buffer.write(chunk)
 
 
 def sync_document_generation_task(
