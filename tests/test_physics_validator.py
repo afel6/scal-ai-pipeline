@@ -160,3 +160,15 @@ def test_validate_compressibility():
     guard_cat.validate_compressibility(np.array([10e-6, 110e-6]))
     score_cat = guard_cat.generate_health_score()
     assert "CP_CATASTROPHIC" in [v["rule"] for v in score_cat["violations"]]
+
+
+def test_validate_micp_constant_saturation():
+    guard = PhysicsGuard()
+    pc = np.linspace(1, 100, 10)
+    hg_sat_const = np.full(10, 0.5)
+    guard.validate_micp(pc, hg_sat_const)
+    score = guard.generate_health_score()
+    assert score["score"] < 100
+    violations = [v["rule"] for v in score["violations"]]
+    assert "MICP_CONSTANT_SATURATION" in violations
+

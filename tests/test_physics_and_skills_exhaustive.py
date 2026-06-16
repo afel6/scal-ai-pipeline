@@ -239,7 +239,7 @@ class TestPhysicsGuardMicp:
         pc, hg = self._valid_micp()
         g = PhysicsGuard()
         g.validate_micp(pc, hg)
-        assert g.generate_health_score()["rules_checked"] == 5
+        assert g.generate_health_score()["rules_checked"] == 6
 
     def test_negative_pc_flagged(self):
         pc  = np.array([-5.0, 10.0, 50.0, 200.0])
@@ -541,7 +541,7 @@ class TestPhysicsGuardDeductionMath:
         g.validate_kr(sw, krw, kro)
         g.validate_micp(pc, hg)
         r = g.generate_health_score()
-        assert r["rules_checked"] == 7 + 5  # 7 Kr + 5 MICP
+        assert r["rules_checked"] == 7 + 6  # 7 Kr + 6 MICP
 
     def test_fresh_guard_starts_empty(self):
         g = PhysicsGuard()

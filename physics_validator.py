@@ -186,6 +186,16 @@ class PhysicsGuard:
             severity="MEDIUM",
         )
 
+        # 4.5 — Check if saturation column has near-zero variance / is constant
+        sat_range = float(np.max(shg_s) - np.min(shg_s))
+        self._check(
+            sat_range > 1e-4,
+            "MICP_CONSTANT_SATURATION",
+            f"Mercury saturation column has near-zero variance (range={sat_range:.6f}) — "
+            "saturation must vary with pressure. This column is likely constant noise/junk.",
+            severity="HIGH"
+        )
+
         # 5 — Detect if the saturation column appears to be incremental (delta), not cumulative.
         #     Incremental data has many near-zero or negative consecutive differences,
         #     and the running sum over the series is much larger than the max single value.

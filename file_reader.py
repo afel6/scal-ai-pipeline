@@ -676,6 +676,10 @@ _TEST_TYPE_RULES = [
         "relative perm", "kr data", " kro ", " krw ",
         "rel perm", "relative permeability",
     ]),
+    ("overburden_compaction", [
+        "overburden", "compaction", "compressibility", "stress sweep",
+        "phi_k", "phi & k", "pore volume compressibility",
+    ]),
 ]
 
 # Layer 2: semantic column aliases per test type.
@@ -734,6 +738,19 @@ _COLUMN_ALIASES = {
         "kro": ["Kro", "Kro/Kro_max", "Oil Kr", "K_ro", "kro"],
         "krw": ["Krw", "Krw/Krw_max", "Water Kr", "K_rw", "krw"],
     },
+    "overburden_compaction": {
+        "pressure": [
+            "Pressure_psi", "Pressure", "Net overburden pressure", "Overburden Pressure",
+            "Confining Pressure", "stress", "press", "net overburden", "pressure, Psi", "pressure, psi", "pressure (psi)"
+        ],
+        "porosity": [
+            "Porosity_percent", "Porosity", "porosity (%)", "poro", "phi", "porosity, %", "porosity %"
+        ],
+        "permeability": [
+            "Air_Permeability_md", "Klinkenberg_Permeability_md", "permeability",
+            "air permeability", "klinkenberg", "perm", "k_l", "kl", "ka"
+        ],
+    },
 }
 
 # Sheet names containing these keywords are aggregate/summary sheets — skip them
@@ -769,8 +786,15 @@ def _detect_test_type(filename: str, sheet_names: list, all_text: str) -> str:
     """Layer 1: detect SCAL test type from filename, sheet names, and header text."""
     combined = (filename + " " + " ".join(sheet_names) + " " + all_text).lower()
     for ttype, keywords in _TEST_TYPE_RULES:
-        if any(k in combined for k in keywords):
-            return ttype
+        for k in keywords:
+            k_clean = k.strip()
+            if len(k_clean) <= 4:
+                # use word boundary matching
+                if re.search(rf"\b{re.escape(k_clean)}\b", combined):
+                    return ttype
+            else:
+                if k_clean in combined:
+                    return ttype
     return "UNKNOWN"
 
 
@@ -930,6 +954,22 @@ def _scal_extract_sheet(sheet_data: dict, sample_id: str,
                 if field == "sw" and vals and max(vals) > 1.0:
                     vals = [round(v / 100.0, 6) for v in vals]
                     unit = "fraction (normalised from %)"
+                result[field] = {"values": vals, "unit": unit, "method": "series"}
+
+    # ── overburden_compaction: pressure, porosity, permeability series ─────
+    elif test_type == "overburden_compaction":
+        aliases = _COLUMN_ALIASES["overburden_compaction"]
+        for field, field_aliases in aliases.items():
+            match = _find_col(col_dict, field_aliases)
+            if match:
+                vals = match[1].get("values", [])
+                unit = "fraction" if field == "porosity" and vals and max(vals) <= 1.0 else "units"
+                if field == "porosity" and vals and max(vals) > 1.0:
+                    unit = "%"
+                elif field == "pressure":
+                    unit = "psi"
+                elif field == "permeability":
+                    unit = "mD"
                 result[field] = {"values": vals, "unit": unit, "method": "series"}
 
     return result

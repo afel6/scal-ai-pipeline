@@ -56,6 +56,10 @@ class MICPExtractor(BaseExtractor):
                 total_mvmt = np.sum(np.abs(np.diff(series)))
                 if total_mvmt > 1.8 * net_range and net_range > 0.01:
                     continue
+                
+                # ── HARD REJECT 4: Constant/junk column check ──
+                if net_range <= 1e-4:
+                    continue
 
             # ── POSITIVE SCORES ──
             if '%' in h_str:                                         score += 100

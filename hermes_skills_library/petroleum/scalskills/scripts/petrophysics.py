@@ -42,7 +42,23 @@ class PetrophysicsSkills:
         slope, intercept, r_value, p_value, std_err = linregress(log_phi, log_f)
         m = -slope
         a = 10**intercept
-        return {"m": m, "a": a, "r_squared": r_value**2}
+        
+        # If free-fit a is outside [0.5, 1.5], force a = 1.0 and perform a 1-parameter fit
+        if not (0.5 <= a <= 1.5):
+            a = 1.0
+            denom = np.sum(log_phi ** 2)
+            if denom > 1e-9:
+                m = - np.sum(log_phi * log_f) / denom
+            else:
+                m = 2.0
+            # Recalculate r_squared
+            ss_res = np.sum((log_f - (-m * log_phi)) ** 2)
+            ss_tot = np.sum((log_f - np.mean(log_f)) ** 2)
+            r_squared = 1.0 - (ss_res / ss_tot) if ss_tot > 0 else 0.0
+        else:
+            r_squared = r_value**2
+            
+        return {"m": m, "a": a, "r_squared": r_squared}
 
     @staticmethod
     def regress_archie_n(sw, ri):
@@ -503,15 +519,15 @@ class PetrophysicsSkills:
             
             is_fracture = bool(hu < 100.0)
             
-            if hu > 2500.0:
+            if hu >= 2500.0:
                 lith = "Anhydrite"
-            elif 2000.0 <= hu <= 2400.0:
+            elif 2100.0 <= hu < 2500.0:
                 lith = "Dolomite"
-            elif 1800.0 <= hu < 2100.0:
+            elif 1700.0 <= hu < 2100.0:
                 lith = "Limestone"
             elif 1200.0 <= hu < 1700.0:
                 lith = "Sandstone"
-            elif 800.0 <= hu < 1400.0:
+            elif 800.0 <= hu < 1200.0:
                 lith = "Shale"
             else:
                 lith = "Mixed/Unknown"

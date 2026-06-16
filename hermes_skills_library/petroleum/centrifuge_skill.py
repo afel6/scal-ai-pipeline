@@ -44,6 +44,35 @@ def hassler_brunner_correction(pc_inlet, avg_sw):
     sw_face = np.clip(sw_face, 0, 1)
     return sw_face
 
+def forbes_correction(pc_inlet, avg_sw, r1, r2):
+    """
+    Applies the Forbes correction method to convert average saturation
+    to local inlet face saturation.
+    
+    If r1 or r2 is missing, we fall back to Hassler-Brunner.
+    """
+    pc = np.array(pc_inlet)
+    sw_avg = np.array(avg_sw)
+    if len(pc) < 2 or r1 is None or r2 is None or r2 <= r1:
+        # Fall back to Hassler-Brunner
+        return hassler_brunner_correction(pc, avg_sw)
+        
+    # Calculate geometric parameters
+    B = 1.0 - (r1 / r2)**2
+    # Forbes radial correction parameter
+    sqrt_1_B = np.sqrt(1.0 - B)
+    a0 = (4.0 + 2.0 * sqrt_1_B) / (5.0 + sqrt_1_B)
+    
+    # Calculate derivative of sw_avg with respect to pc
+    dsw_dpc = np.gradient(sw_avg, pc)
+    
+    # Forbes' local saturation formulation:
+    sw_face = sw_avg + a0 * pc * dsw_dpc
+    
+    # Clip to valid saturation range [0, 1]
+    sw_face = np.clip(sw_face, 0.0, 1.0)
+    return sw_face
+
 if __name__ == "__main__":
     if len(sys.argv) < 2:
         print(json.dumps({"error": "Usage: python centrifuge_skill.py <params_json>"}))
@@ -69,8 +98,12 @@ if __name__ == "__main__":
             
             if mode == "full":
                 avg_sw = params.get("avg_sw")
+                method = params.get("method", "hassler_brunner")
                 if avg_sw is not None:
-                    sw_face = hassler_brunner_correction(pc, avg_sw)
+                    if method == "forbes":
+                        sw_face = forbes_correction(pc, avg_sw, r1, r2)
+                    else:
+                        sw_face = hassler_brunner_correction(pc, avg_sw)
                     result["sw_face"] = sw_face.tolist()
             
             print(json.dumps(result))
@@ -84,6 +117,19 @@ if __name__ == "__main__":
                 
             sw_face = hassler_brunner_correction(pc, avg_sw)
             print(json.dumps({"sw_face": sw_face.tolist()}))
+            
+        elif mode == "forbes":
+            pc = params.get("pc_psia")
+            avg_sw = params.get("avg_sw")
+            r1 = params.get("r1")
+            r2 = params.get("r2")
+            if None in [pc, avg_sw]:
+                print(json.dumps({"error": "Missing pc_psia or avg_sw for Forbes"}))
+                sys.exit(1)
+                
+            sw_face = forbes_correction(pc, avg_sw, r1, r2)
+            print(json.dumps({"sw_face": sw_face.tolist(), "note": "Forbes centrifuge correction applied"}))
+            
         else:
             print(json.dumps({"error": f"Unknown mode: {mode}"}))
             sys.exit(1)

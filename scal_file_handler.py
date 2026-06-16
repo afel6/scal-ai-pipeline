@@ -103,7 +103,8 @@ class SCALFileHandler:
         ],
         'RCAL': [
             'routine core', 'air permeability', 'klinkenberg',
-            'grain density', 'plug', 'horizontal perm', 'vertical perm'
+            'grain density', 'plug', 'horizontal perm', 'vertical perm',
+            'obp', 'phi_k', 'phi & k', 'compressibility', 'compaction'
         ],
         # Formation-damage / sensitivity test: KL (mD) vs cumulative PV injected.
         # 'sensitivity test' and 'kl' are scored higher to beat KR/RCAL.
@@ -126,9 +127,16 @@ class SCALFileHandler:
             )
             for data_type, keywords in self.KEYWORDS.items():
                 for kw in keywords:
-                    if kw in text:
-                        weight = (10 if kw in ['rpm', 'centrifuge', 'speed', 'produced volume', 'sensitivity test']
-                                  else 5 if kw == 'kl'
+                    kw_clean = kw.strip()
+                    # Enforce word boundary for short/abbreviated keywords
+                    if len(kw_clean) <= 4:
+                        found = bool(re.search(rf"\b{re.escape(kw_clean)}\b", text))
+                    else:
+                        found = kw_clean in text
+
+                    if found:
+                        weight = (10 if kw_clean in ['rpm', 'centrifuge', 'speed', 'produced volume', 'sensitivity test']
+                                  else 5 if kw_clean == 'kl'
                                   else 1)
                         scores[data_type] += weight
 
@@ -1336,8 +1344,9 @@ def _extract_metadata(df_raw, data_start_idx):
     return meta
 
 
-def _classify_track(headers, data):
+def _classify_track(headers, data, sheet_name=""):
     header_str = " ".join(str(h).lower() for h in headers if pd.notna(h))
+    sheet_str = str(sheet_name).lower()
 
     # FF checked before RI: "porosity" contains "ri" as a substring, which would
     # cause a false-positive RI match for Formation Factor sheets.
@@ -1361,6 +1370,9 @@ def _classify_track(headers, data):
         return "PC"
     if "porosity" in header_str and ("permeability" in header_str or " k " in header_str or "ka" in header_str):
         return "BCA"
+    if (any(k in header_str for k in ["overburden", "compressibility", "compaction", "stress", "x 10^-6", "phibase", "md"]) 
+            or any(k in sheet_str for k in ["obp", "comp", "press", "stress", "pore volume"])):
+        return "overburden_compaction"
     return "UNKNOWN"
 
 
@@ -1453,7 +1465,7 @@ def robust_extract_scal(filepath):
             "n_rows": len(clean_rows),
             "rows": clean_rows,
         }
-        sheet_info["track"] = _classify_track(headers, clean_rows)
+        sheet_info["track"] = _classify_track(headers, clean_rows, sheet_name)
         result["sheets"].append(sheet_info)
 
     return result
