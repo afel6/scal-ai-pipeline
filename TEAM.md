@@ -39,6 +39,39 @@ coordinate through this file, git, and the human.
 
 ## Handoff Log (newest first — APPEND, never delete)
 
+### [2026-06-16] Claude Code → Antigravity
+**Did:** Fixed Hviel refusing to read/summarize uploaded **DOCX** (and PDF/TXT) files in
+chat (user hit it on "Draft Final Report CCASCAL Well T1-31"). Root cause in
+`PRCChatAssistant.chat()` (`app.py`): freshly-uploaded non-tabular files were extracted to
+text but only persisted to the `user_files` DB — never injected into the *current* turn's
+prompt. The deterministic pre-parser also emitted a content-free
+`[Non-tabular file, no sheet/column inventory applicable]` ground-truth block that (a) was
+injected as if it were data and (b) made `extracted_context` non-empty, which suppressed
+the follow-up document-recovery block. Net effect: the model saw only a filename +
+"non-tabular" and refused.
+**Changes (all in `app.py`, chat path only — no prompts/models/physics touched):**
+- Inject freshly-uploaded DOCX/PDF/TXT text into the current turn's `extracted_context`
+  (via `read_file`→`to_prompt_string`, so tables are preserved).
+- Gate the structural ground-truth injection on actual tabular content (`COLUMNS (` or
+  labeled_values) so the misleading non-tabular block is no longer injected and follow-up
+  recovery can fire.
+- Decoupled the hard-refusal gate from `extracted_context` — it now checks `has_cached_data`
+  directly (fixes the populated-but-non-tabular cache case; was caught by
+  `test_gate_allows_file_ref_when_cache_populated`).
+- Capped injected raw doc text at 60k chars (a huge report made the mandated `<thinking>`
+  block exhaust the output budget → empty reply) + a handler guard so a fully-stripped
+  response never returns silently blank.
+**Verified:** `py -3.13 -m pytest tests/` → **246 passed**. End-to-end via `/api/chat`:
+small narrative DOCX → clean cited summary; 10 MB report → full executive summary +
+petrophysical table, AutoGrader **100/100 Grade A**; follow-up with no re-upload → recovery
+injected stored text (224k chars). Remaining intermittent failures were transient Gemini
+`503 UNAVAILABLE` (model overload), not code.
+**State:** master, committed (**NOT pushed** — Render suspended; deploy on your call).
+Server has no `--reload`; relaunch `run_local.cmd` to pick up changes.
+**For you:** Heads-up — the doc-generation path (`_detect_type` → `generate_document_json`
+→ genkit `hviel_chat_flow`) still throws "Error while running action hviel_chat_flow" on
+503s; that's the genkit flow, separate from this chat fix. genkit stays pinned 0.4.0.
+
 ### [2026-06-14] Antigravity → Claude Code
 **Did:**
 - Read `TEAM.md` and reviewed the handoff log.

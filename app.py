@@ -4926,6 +4926,22 @@ class PRCChatAssistant:
             except: pass
 
         extracted_context = ""
+        # Accumulates raw text from NON-TABULAR files (DOCX/PDF/TXT) uploaded THIS turn so
+        # the model can read/summarize them immediately. Spreadsheets continue to flow
+        # through the structural ground-truth + labeled-values path below.
+        fresh_file_context = ""
+
+        def _cap_doc_text(t: str, limit: int = 60000) -> str:
+            # Guardrail: a very large extracted document can push the model's mandated
+            # <thinking> block past the output-token limit, leaving an empty visible answer.
+            # Cap the raw text dump (summaries and section lookups still work fine) and mark
+            # the truncation so the model knows more content exists.
+            if t and len(t) > limit:
+                return t[:limit] + (
+                    f"\n\n[... {len(t) - limit} more characters truncated for length. "
+                    f"Ask about a specific section or table for its full detail ...]"
+                )
+            return t
 
         import tempfile
 
@@ -4982,6 +4998,12 @@ class PRCChatAssistant:
                     # ALWAYS persist raw text to user_files so follow-up messages can recover it
                     fr_data = read_file(tmp_path, target_identifier=None)
                     fr_text, _ = to_prompt_string(fr_data)
+                    # Surface freshly-uploaded WORD DOCUMENT text in THIS turn's prompt so
+                    # Hviel can read/summarize narrative reports (and their tables) right away.
+                    # Spreadsheets keep using the structural ground-truth path, not this dump.
+                    if is_docx and fr_text:
+                        _doc_label = "WORD DOCUMENT" if ext == ".docx" else "DOCUMENT"
+                        fresh_file_context += f"\n\n[{_doc_label}: {fname}]\n{_cap_doc_text(fr_text)}\n"
                     if email and fr_text:
                         _fhash_store = hashlib.sha256(data_bytes).hexdigest()
                         db(
@@ -5000,6 +5022,8 @@ class PRCChatAssistant:
             elif "pdf" in safe_mime:
                 try:
                     text = _sfh_extract_pdf(data_bytes)
+                    if text.strip():
+                        fresh_file_context += f"\n\n[PDF DOCUMENT: {fname}]\n{_cap_doc_text(text)}\n"
                     if text.strip() and email:
                         _fhash_store = hashlib.sha256(data_bytes).hexdigest()
                         db(
@@ -5017,6 +5041,8 @@ class PRCChatAssistant:
             elif "text/plain" in safe_mime or ext in (".txt", ".text"):
                 try:
                     content = data_bytes.decode("utf-8", errors="ignore")
+                    if content.strip():
+                        fresh_file_context += f"\n\n[DOCUMENT: {fname}]\n{_cap_doc_text(content)}\n"
                     if content.strip() and email:
                         _fhash_store = hashlib.sha256(data_bytes).hexdigest()
                         db(
@@ -5032,6 +5058,10 @@ class PRCChatAssistant:
                     _logger.warning(f"[TXT Extract] {fname}: {e}")
 
 
+        # Surface freshly-uploaded document text (DOCX/PDF/TXT) in THIS turn's prompt.
+        if fresh_file_context:
+            extracted_context += fresh_file_context
+
         # ── DIRECTLY HYDRATE THE CHAT PROMPT WITH TRUE CACHE ──
         has_cached_data = False
         cached_gt = ""
@@ -5044,9 +5074,15 @@ class PRCChatAssistant:
                     cached_gt = SESSION_DATA_CACHE[sid].get("ground_truth", "")
                     labeled_values = SESSION_DATA_CACHE[sid].get("labeled_values", {})
 
-        # Inject the full un-truncated database structures directly into the context payload
+        # Inject the full un-truncated database structures directly into the context payload.
+        # Only inject the structural ground-truth inventory when it actually describes tabular
+        # data. For non-tabular files (DOCX/PDF/TXT) the inventory is content-free
+        # ("[Non-tabular file, no sheet/column inventory applicable]") — injecting it would both
+        # mislead the model into refusing AND (by making extracted_context non-empty) suppress
+        # the document-recovery block below on follow-up turns.
         if has_cached_data:
-            if cached_gt:
+            gt_has_tables = bool(cached_gt) and ("COLUMNS (" in cached_gt or bool(labeled_values))
+            if gt_has_tables:
                 extracted_context += f"\n\n[MANDATORY GROUND TRUTH INVENTORY]:\n{cached_gt}\n\n"
             if labeled_values:
                 extracted_context += f"[FULLY-VERIFIED EXTRACTION PARAMETERS]:\n{str(labeled_values)}\n\n"
@@ -5078,7 +5114,7 @@ class PRCChatAssistant:
                     if stored and stored[0][0]:
                         _ext = Path(_sfname).suffix.lower()
                         _label = "SPREADSHEET" if _ext in (".xlsx", ".xls", ".csv") else "WORD DOCUMENT" if _ext == ".docx" else "DOCUMENT"
-                        extracted_context += f"\n\n[{_label}: {_sfname}]\n{stored[0][0]}\n"
+                        extracted_context += f"\n\n[{_label}: {_sfname}]\n{_cap_doc_text(stored[0][0])}\n"
                         _logger.info(f"[Chat] Recovered stored document text for {_sfname} ({len(stored[0][0])} chars)")
             except Exception as _dbe:
                 _logger.warning(f"[Chat] Could not retrieve stored document context: {_dbe}")
@@ -5094,7 +5130,7 @@ class PRCChatAssistant:
             r"spreadsheet|excel|uploaded|extract|tabulate|the\s+file|the\s+data|"
             r"the\s+report|the\s+table|values?)\b"
         )
-        if (not extracted_context) and (not f_parts) and msg and _scal_data_ref.search(msg):
+        if (not extracted_context) and (not has_cached_data) and (not f_parts) and msg and _scal_data_ref.search(msg):
             _refusal = (
                 "⚠️ I can't answer that from this session. No SCAL file data is currently "
                 "loaded in this conversation (the session cache is empty), so I have no "
@@ -7931,6 +7967,17 @@ async def handle(
             resp_text = clean_citation_clutter(resp_text, filenames)
             resp_text = compress_traceability_ledger(resp_text)
             resp_text = _extract_and_log_corrections(sid, email, resp_text)
+            if not resp_text.strip():
+                # Empty after post-processing almost always means the model's mandated
+                # <thinking> block consumed the output-token budget on a very large file,
+                # leaving no visible answer. Surface a clear, actionable message instead of
+                # returning a silent blank reply.
+                resp_text = (
+                    "⚠️ I read the file, but the answer came back empty — this usually happens "
+                    "when an uploaded document is very large and the response gets cut off. "
+                    "Please ask about a specific part (e.g. \"summarize the conclusions\" or "
+                    "\"show me the porosity table\") and I'll pull it directly."
+                )
             await async_db("INSERT INTO m (sid,role,text,ts,user_email) VALUES (?,?,?,?,?)",
                (sid, "model", resp_text, time.time(), email))
 
