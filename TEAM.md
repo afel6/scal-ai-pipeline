@@ -39,6 +39,71 @@ coordinate through this file, git, and the human.
 
 ## Handoff Log (newest first — APPEND, never delete)
 
+### [2026-06-16] Claude Code → Antigravity (session 2 — ingestion hardening for tomorrow's data-science demo)
+
+**Context:** Pre-demo push to make Hviel ingest ANY core-lab data type. Ran a 3-agent
+parallel audit (ingestion / novel formats / petrophysics) over the real corpus at
+`C:\Users\Asus\Downloads\Datasets_and_Spreadsheets\`. Verdict: math engines are sound
+(97/97 physics tests), but ~41% of the corpus silently mis-extracted, Petrel XML exports
+were 100% unreadable, and a few isolated physics gaps remain.
+
+**DID — committed, all in `file_reader.py` + `scal_file_handler.py`, 246/246 tests green:**
+1. **#1 ingestion bug fixed.** `_detect_data_block` (scal_file_handler.py) tested
+   `isinstance(v,(int,float))` on `smart_read_csv(header=None)` output — which is ALL strings
+   → counted 0 numeric cells → "no data block" on every header-bearing CSV. Added
+   `_is_numeric_cell` / `_coerce_number` (coerce numeric strings, tolerate thousands
+   separators); used them in block detection + row cleaning. Recovered 9 corpus CSVs
+   (3_FF_Ambient 0→5 rows, 4_FF_OBP 0→39, real_data_extracted 0→115, Master_* , etc.).
+2. **`.xls` content-sniff.** New `_excel_engine()` (file_reader.py): ZIP magic → openpyxl for
+   xlsx-mislabeled-as-`.xls`, else xlrd. Wired into `_read_excel`, `SCALFileHandler.read`,
+   `robust_extract_scal`, `extract_absolute_file_truth`. The 1 MB `HU...55plug.xls` (a real
+   xlsx) now reads (was dead on every path).
+3. **NEW: Petrel/KAPPA XML ingestion.** Added `_read_xml` + `_df_columns_stats` (file_reader.py),
+   registered `.xml` in `read_file`, added `.xml` branches to `extract_file_data` and
+   `extract_absolute_file_truth`. Parses the `<TabularData>` CDATA (markdown tables / whitespace
+   RCAL / CSV templates) → excel/csv-shaped dicts. `Petrel_Export_1775421246.xml` → 3 typed
+   tables (overburden φ/k/PV-compressibility, resistivity, MICP); `...3242.xml` → RCAL table with
+   correct cols (SAMPLE_NO/DEPTH_FT/POR_PCT/...); `...4195.xml` → txt (template, no real data).
+4. **DOCX tables in report pipeline.** `extract_file_data`'s `.docx` branch now routes through
+   the table-aware `file_reader.read_file` (was `_extract_docx`, paragraphs-only → silently
+   dropped every table), with fallback. (Session 1 also fixed the chat DOCX/PDF/TXT
+   summarization refusal — commit 6872dbe.)
+
+**Verified:** 246/246 pytest; module-level battery over the whole corpus (every
+previously-failing file now `status=success` with real row counts); ground-truth inventory
+now covers XML + .xls.
+
+**YOU (Antigravity) — petrophysics correctness gaps (NOT fixed; these are math/guard files and
+need your physics + PhysicsGuard care). Ranked by demo risk:**
+1. **Archie FF free fit returns impossible a≈2.85, m≈1.44** on the real 7-sample data (lab pins
+   a=1, m≈1.9–2.0). The unconstrained 2-param log-log fit is ill-conditioned over the narrow φ
+   range; PhysicsGuard already flags ARCHIE_A_RANGE. **Fix:** force/offer the a=1 single-param
+   Archie fit or constrain a∈[0.5,1.5]. File: the calc-skills `petrophysics.py::regress_archie_m_a`
+   (grep for `regress_archie_m_a`). HIGHEST risk — a self-contradicting result on screen.
+2. **MICP column-binding guard gap.** In `2_Mercury_Injection.csv` the obvious `'Sat. Hg'` column
+   is constant junk (=7.0); the real curve is `'Sat. Hg.1'`. PhysicsGuard scores the WRONG column
+   100/A. **Fix:** `physics_validator.PhysicsGuard.validate_micp` — reject near-zero-variance /
+   constant saturation columns, prefer cumulative-intrusion. HIGH — wrong-column MICP is the most
+   likely live failure on messy CSVs (extraction is the LLM's job and these files are pathological).
+3. **Forbes centrifuge correction is advertised but has NO implementation anywhere** (only
+   Hassler-Brunner exists in `centrifuge_skill.py`). **Fix:** implement Forbes, OR make dispatch
+   fall back to HB with an explicit note so a "Forbes" request never errors mid-demo.
+4. **CT-scan lithology bands overlap + dead branch** (`petrophysics.py::interpret_ct_scan`):
+   shale [800,1400) is shadowed by sandstone [1200,1700); dolomite/limestone overlap. Make the HU
+   thresholds mutually exclusive and ordered. Low blast radius (no CT file in corpus).
+5. **Two test-type classifiers disagree** (`SCALFileHandler.identify()` vs
+   `file_reader._detect_test_type`) → some files still mislabel (5_Phi_K_OBP, 6_Compressibility
+   now extract rows fine but come back `data_type=UNKNOWN`; generic substrings porosity/phi/
+   saturation pollute scoring). Down-weight those substrings or unify to one scorer. Medium — data
+   is correct, only the label / chart-type is wrong.
+
+**Notes:** genkit stays pinned 0.4.0. Server has **no --reload** → restart `run_local.cmd` to load
+the file_reader/scal_file_handler changes. Gemini free-tier `gemini-2.5-flash` was intermittently
+**503**-ing tonight (transient capacity, not code). Rel-perm (Brooks-Corey/LET) work but **no
+Kr-bearing file is in the corpus** — load one before demoing that track.
+
+**State:** master, committed (NOT pushed — Render suspended; deploy on your call).
+
 ### [2026-06-16] Claude Code → Antigravity
 **Did:** Fixed Hviel refusing to read/summarize uploaded **DOCX** (and PDF/TXT) files in
 chat (user hit it on "Draft Final Report CCASCAL Well T1-31"). Root cause in

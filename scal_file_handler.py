@@ -17,7 +17,7 @@ import pandas as pd
 import numpy as np
 import json
 
-from file_reader import smart_read_csv
+from file_reader import smart_read_csv, _excel_engine
 
 
 class SCALFileHandler:
@@ -43,10 +43,7 @@ class SCALFileHandler:
         and let the extractor decide what is relevant.
         """
         if self.extension in ('.xlsx', '.xlsm', '.xls', '.ods'):
-            engine = (
-                'openpyxl' if self.extension in ('.xlsx', '.xlsm')
-                else ('xlrd' if self.extension == '.xls' else 'odf')
-            )
+            engine = _excel_engine(self.file_path)
             xl = pd.ExcelFile(self.file_path, engine=engine)
             self.sheet_names = xl.sheet_names
 
@@ -540,10 +537,7 @@ def extract_absolute_file_truth(temp_file_paths: list) -> str:
 
         try:
             if ext in ('.xlsx', '.xlsm', '.xls', '.ods'):
-                engine = (
-                    'openpyxl' if ext in ('.xlsx', '.xlsm')
-                    else ('xlrd' if ext == '.xls' else 'odf')
-                )
+                engine = _excel_engine(file_path)
                 xl = pd.ExcelFile(file_path, engine=engine)
                 sheet_names = xl.sheet_names
                 sanitized_sheet_names = [sanitize_prompt(s) for s in sheet_names]
@@ -590,6 +584,30 @@ def extract_absolute_file_truth(temp_file_paths: list) -> str:
                     ]
                     lines.append(f"    ROW {row_idx}: {row_vals}")
                 lines.append("")
+
+            elif ext == '.xml':
+                import file_reader as _fr
+                data = _fr.read_file(file_path)
+                if data.get("type") == "excel":
+                    sheets = data.get("sheets", {})
+                    lines.append(f"TOTAL SHEETS: {len(sheets)} (Petrel/XML export)")
+                    lines.append(f"SHEET NAMES: {[sanitize_prompt(s) for s in sheets.keys()]}")
+                    for sname, sdata in sheets.items():
+                        ncols = sdata.get("numeric_columns", {})
+                        lines.append(f"  SHEET: \"{sanitize_prompt(sname)}\"")
+                        lines.append(f"    COLUMNS ({len(ncols)}): {[sanitize_prompt(str(c)) for c in ncols.keys()]}")
+                    lines.append("")
+                elif data.get("type") == "csv":
+                    cols = data.get("columns", {})
+                    lines.append("TOTAL SHEETS: 1 (Petrel/XML export)")
+                    lines.append("SHEET NAMES: ['Sheet1']")
+                    lines.append("  SHEET: \"Sheet1\"")
+                    lines.append(f"    COLUMNS ({len(cols)}): {[sanitize_prompt(str(c)) for c in cols.keys()]}")
+                    lines.append("")
+                else:
+                    _txt = data.get("content", "") or ""
+                    lines.append(f"  [Petrel/XML document — free-text payload, {len(_txt)} chars]")
+                    lines.append("")
 
             else:
                 lines.append(f"  [Non-tabular file, no sheet/column inventory applicable]")
@@ -1198,6 +1216,55 @@ def _merge_header_rows(df_raw, header_row: int, data_start: int) -> list:
     return merged
 
 
+def _is_numeric_cell(v):
+    """True if v is a real number OR a numeric-looking string.
+
+    smart_read_csv(header=None) returns all-string columns, so a bare
+    isinstance(v, (int, float)) check matches zero cells and the data-block
+    detector wrongly reports "no numeric data" for any header-bearing CSV.
+    Coercing strings here (tolerating thousands separators) is what lets the
+    robust CSV/whitespace fallback actually detect data.
+    """
+    if isinstance(v, bool):
+        return False
+    if isinstance(v, (int, float, np.integer, np.floating)):
+        return not pd.isna(v)
+    if isinstance(v, str):
+        s = v.strip()
+        if not s:
+            return False
+        try:
+            float(s)
+            return True
+        except ValueError:
+            try:
+                float(s.replace(",", ""))
+                return True
+            except ValueError:
+                return False
+    return False
+
+
+def _coerce_number(v):
+    """Return float(v) for a number or numeric-looking string, else None."""
+    if isinstance(v, bool):
+        return None
+    if isinstance(v, (int, float, np.integer, np.floating)):
+        return None if pd.isna(v) else float(v)
+    if isinstance(v, str):
+        s = v.strip()
+        if not s:
+            return None
+        try:
+            return float(s)
+        except ValueError:
+            try:
+                return float(s.replace(",", ""))
+            except ValueError:
+                return None
+    return None
+
+
 def _detect_data_block(df_raw):
     n_rows, n_cols = df_raw.shape
     if n_rows < 2 or n_cols < 2:
@@ -1206,7 +1273,7 @@ def _detect_data_block(df_raw):
     numeric_counts = []
     for i in range(n_rows):
         row = df_raw.iloc[i]
-        count = sum(1 for v in row if pd.notna(v) and isinstance(v, (int, float)) and not isinstance(v, bool))
+        count = sum(1 for v in row if _is_numeric_cell(v))
         numeric_counts.append(count)
 
     for i in range(n_rows - 2):
@@ -1232,9 +1299,7 @@ def _detect_data_block(df_raw):
                 row_vals = df_raw.iloc[candidate].tolist()
                 str_count = sum(1 for v in row_vals
                                 if isinstance(v, str) and v.strip())
-                num_count = sum(1 for v in row_vals
-                                if pd.notna(v) and isinstance(v, (int, float))
-                                and not isinstance(v, bool))
+                num_count = sum(1 for v in row_vals if _is_numeric_cell(v))
                 if str_count >= 2 and str_count >= num_count:
                     header_row = candidate
                     break
@@ -1309,10 +1374,11 @@ def robust_extract_scal(filepath):
 
     ext = Path(filepath).suffix.lower()
     engines_to_try = []
-    if ext == ".xls":
-        engines_to_try = ["xlrd"]
-    elif ext == ".xlsx" or ext == ".xlsm":
-        engines_to_try = ["openpyxl"]
+    if ext in (".xls", ".xlsx", ".xlsm", ".ods"):
+        # Sniff the real engine by content first (handles xlsx mislabeled .xls),
+        # then fall back to the others so a wrong extension never blocks ingestion.
+        primary = _excel_engine(filepath)
+        engines_to_try = [primary] + [e for e in ["openpyxl", "xlrd", "odf"] if e != primary]
     elif ext == ".xlsb":
         engines_to_try = ["pyxlsb"]
     elif ext in (".csv", ".tsv"):
@@ -1370,10 +1436,11 @@ def robust_extract_scal(filepath):
         for row in data_rows:
             clean_row = []
             for v in row:
-                if pd.isna(v):
+                num = _coerce_number(v)
+                if num is not None:
+                    clean_row.append(num)
+                elif pd.isna(v):
                     clean_row.append(None)
-                elif isinstance(v, (int, float, np.integer, np.floating)):
-                    clean_row.append(float(v))
                 else:
                     clean_row.append(str(v))
             clean_rows.append(clean_row)
@@ -1425,12 +1492,56 @@ def extract_file_data(filepath):
 
     if ext in ('.docx', '.doc'):
         try:
-            with open(filepath, 'rb') as f:
-                text = _extract_docx(f.read())
+            # Prefer the table-aware reader (file_reader._read_docx) so embedded
+            # tables are preserved; fall back to paragraph-only extraction.
+            text = ""
+            try:
+                import file_reader as _fr
+                _d = _fr.read_file(filepath)
+                if "error" not in _d:
+                    text, _ = _fr.to_prompt_string(_d)
+            except Exception:
+                text = ""
+            if not text:
+                with open(filepath, 'rb') as f:
+                    text = _extract_docx(f.read())
             return {
                 "data_type": "DOCX", "sheet_names": [], "row_count": len(text),
                 "extracted": {"raw_text": text}, "status": "success",
             }
+        except Exception as e:
+            return {
+                "status": "parsing_failed", "data_type": "UNKNOWN",
+                "sheet_names": [], "row_count": 0, "extracted": {}, "errors": [str(e)],
+            }
+
+    if ext == '.xml':
+        try:
+            import file_reader as _fr
+            data = _fr.read_file(filepath)
+            if "error" in data:
+                raise ValueError(data["error"])
+            t = data.get("type")
+            if t == "excel":
+                sheets = data.get("sheets", {})
+                row_count = sum(
+                    len(c.get("values", []))
+                    for s in sheets.values()
+                    for c in s.get("numeric_columns", {}).values()
+                    if isinstance(c, dict) and "values" in c
+                )
+                return {"data_type": data.get("scal", {}).get("test_type", "XML"),
+                        "sheet_names": list(sheets.keys()), "row_count": row_count,
+                        "extracted": data, "status": "success"}
+            if t == "csv":
+                cols = data.get("columns", {})
+                row_count = max((c.get("count", 0) for c in cols.values()
+                                 if isinstance(c, dict)), default=0)
+                return {"data_type": "XML", "sheet_names": ["Sheet1"], "row_count": row_count,
+                        "extracted": data, "status": "success"}
+            _txt = data.get("content", "") or ""
+            return {"data_type": "XML", "sheet_names": [], "row_count": len(_txt),
+                    "extracted": {"raw_text": _txt}, "status": "success"}
         except Exception as e:
             return {
                 "status": "parsing_failed", "data_type": "UNKNOWN",
