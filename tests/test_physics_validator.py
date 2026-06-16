@@ -160,3 +160,166 @@ def test_validate_compressibility():
     guard_cat.validate_compressibility(np.array([10e-6, 110e-6]))
     score_cat = guard_cat.generate_health_score()
     assert "CP_CATASTROPHIC" in [v["rule"] for v in score_cat["violations"]]
+
+def test_validate_archie():
+    guard = PhysicsGuard()
+
+    # Empty inputs
+    guard.validate_archie([], [])
+    score = guard.generate_health_score()
+    assert score["score"] == 100
+
+    # Valid FF
+    guard.validate_archie([0.1, 0.2], [10.0, 5.0], model_type="FF")
+    score = guard.generate_health_score()
+    assert score["score"] == 100
+
+    # FF monotonicity violation (increases as porosity increases)
+    guard_bad_ff_mono = PhysicsGuard()
+    guard_bad_ff_mono.validate_archie([0.1, 0.2], [5.0, 10.0], model_type="FF")
+    score_bad_ff_mono = guard_bad_ff_mono.generate_health_score()
+    assert "FF_MONOTONICITY" in [v["rule"] for v in score_bad_ff_mono["violations"]]
+
+    # FF range violation (< 1.0)
+    guard_bad_ff_range = PhysicsGuard()
+    guard_bad_ff_range.validate_archie([0.1, 0.2], [0.5, 0.4], model_type="FF")
+    score_bad_ff_range = guard_bad_ff_range.generate_health_score()
+    assert "FF_RANGE" in [v["rule"] for v in score_bad_ff_range["violations"]]
+
+    # Valid RI
+    guard_ri = PhysicsGuard()
+    guard_ri.validate_archie([0.5, 1.0], [4.0, 1.0], model_type="RI")
+    score_ri = guard_ri.generate_health_score()
+    assert score_ri["score"] == 100
+
+    # RI monotonicity violation (increases as Sw increases)
+    guard_bad_ri_mono = PhysicsGuard()
+    guard_bad_ri_mono.validate_archie([0.5, 1.0], [1.0, 4.0], model_type="RI")
+    score_bad_ri_mono = guard_bad_ri_mono.generate_health_score()
+    assert "RI_MONOTONICITY" in [v["rule"] for v in score_bad_ri_mono["violations"]]
+
+    # RI range violation (< 1.0)
+    guard_bad_ri_range = PhysicsGuard()
+    guard_bad_ri_range.validate_archie([0.5, 1.0], [0.8, 0.5], model_type="RI")
+    score_bad_ri_range = guard_bad_ri_range.generate_health_score()
+    assert "RI_RANGE" in [v["rule"] for v in score_bad_ri_range["violations"]]
+
+    # RI endpoint violation (> 1.1 at max Sw)
+    guard_bad_ri_end = PhysicsGuard()
+    guard_bad_ri_end.validate_archie([0.5, 1.0], [4.0, 1.5], model_type="RI")
+    score_bad_ri_end = guard_bad_ri_end.generate_health_score()
+    assert "RI_ENDPOINT" in [v["rule"] for v in score_bad_ri_end["violations"]]
+
+def test_validate_pc():
+    guard = PhysicsGuard()
+
+    # Empty inputs
+    guard.validate_pc([], [])
+    score = guard.generate_health_score()
+    assert score["score"] == 100
+
+    # Valid drainage
+    guard_drain = PhysicsGuard()
+    guard_drain.validate_pc([0.2, 0.8], [100.0, 10.0], cycle="drainage")
+    score_drain = guard_drain.generate_health_score()
+    assert score_drain["score"] == 100
+
+    # Valid imbibition (negative Pc allowed)
+    guard_imb = PhysicsGuard()
+    guard_imb.validate_pc([0.2, 0.8], [10.0, -10.0], cycle="imbibition")
+    score_imb = guard_imb.generate_health_score()
+    assert score_imb["score"] == 100
+
+    # Pc monotonicity violation (increases as Sw increases)
+    guard_bad_mono = PhysicsGuard()
+    guard_bad_mono.validate_pc([0.2, 0.8], [10.0, 100.0])
+    score_bad_mono = guard_bad_mono.generate_health_score()
+    assert "PC_MONOTONICITY" in [v["rule"] for v in score_bad_mono["violations"]]
+
+    # Pc range violation (negative in drainage)
+    guard_bad_range = PhysicsGuard()
+    guard_bad_range.validate_pc([0.2, 0.8], [10.0, -5.0], cycle="drainage")
+    score_bad_range = guard_bad_range.generate_health_score()
+    assert "PC_RANGE" in [v["rule"] for v in score_bad_range["violations"]]
+
+
+def test_validate_compressibility_empty():
+    guard = PhysicsGuard()
+    # Test with array of zeros that gets filtered out to an empty array
+    guard.validate_compressibility(np.array([0.0, 0.0]))
+    score = guard.generate_health_score()
+    assert score["score"] == 100
+
+def test_validate_j_function_entry_no_mask():
+    guard = PhysicsGuard()
+    # Provide Sw array where Sw < 0.95 is false everywhere
+    j_arr = np.array([0.1, 0.2, 0.3])
+    sw_arr = np.array([0.96, 0.97, 0.98])
+    guard.validate_j_function(j_arr, sw_arr)
+    score = guard.generate_health_score()
+    assert score["score"] == 100
+
+
+def test_validate_j_function_boundaries():
+    guard = PhysicsGuard()
+
+    # Boundary: Exactly 0.0 (Should not trigger J_NEGATIVE)
+    guard.validate_j_function(np.array([0.0, 0.1]))
+    score = guard.generate_health_score()
+    assert "J_NEGATIVE" not in [v["rule"] for v in score["violations"]]
+
+    # Boundary: -1e-7 (Should not trigger J_NEGATIVE due to < -1e-6 check)
+    guard_neg_tiny = PhysicsGuard()
+    guard_neg_tiny.validate_j_function(np.array([-1e-7, 0.1]))
+    score_neg_tiny = guard_neg_tiny.generate_health_score()
+    assert "J_NEGATIVE" not in [v["rule"] for v in score_neg_tiny["violations"]]
+
+    # Boundary: J at entry exactly 0.5 (Valid)
+    guard_entry_exact = PhysicsGuard()
+    guard_entry_exact.validate_j_function(np.array([0.5, 0.6]), np.array([0.9, 0.8]))
+    score_entry_exact = guard_entry_exact.generate_health_score()
+    assert "J_ENTRY_IFT_MISMATCH" not in [v["rule"] for v in score_entry_exact["violations"]]
+
+    # Boundary: J at entry exactly 0.5001 (Invalid)
+    guard_entry_over = PhysicsGuard()
+    guard_entry_over.validate_j_function(np.array([0.5001, 0.6]), np.array([0.9, 0.8]))
+    score_entry_over = guard_entry_over.generate_health_score()
+    assert "J_ENTRY_IFT_MISMATCH" in [v["rule"] for v in score_entry_over["violations"]]
+
+    # Boundary: Sw = 0.95 (Should not be considered entry due to < 0.95 check)
+    guard_sw_boundary = PhysicsGuard()
+    guard_sw_boundary.validate_j_function(np.array([0.6, 0.7]), np.array([0.95, 0.95]))
+    score_sw_boundary = guard_sw_boundary.generate_health_score()
+    assert "J_ENTRY_IFT_MISMATCH" not in [v["rule"] for v in score_sw_boundary["violations"]]
+
+    # Boundary: Max J exactly 2.0 (Valid)
+    guard_max_exact = PhysicsGuard()
+    guard_max_exact.validate_j_function(np.array([1.0, 2.0]))
+    score_max_exact = guard_max_exact.generate_health_score()
+    assert "J_MAX_IMPOSSIBLE" not in [v["rule"] for v in score_max_exact["violations"]]
+
+    # Boundary: Max J exactly 2.0001 (Invalid)
+    guard_max_over = PhysicsGuard()
+    guard_max_over.validate_j_function(np.array([1.0, 2.0001]))
+    score_max_over = guard_max_over.generate_health_score()
+    assert "J_MAX_IMPOSSIBLE" in [v["rule"] for v in score_max_over["violations"]]
+
+    # Boundary: Max J exactly 5.0 (Triggers MAX_IMPOSSIBLE but NOT CATASTROPHIC)
+    guard_max_cat_exact = PhysicsGuard()
+    guard_max_cat_exact.validate_j_function(np.array([1.0, 5.0]))
+    score_max_cat_exact = guard_max_cat_exact.generate_health_score()
+    violations_cat_exact = [v["rule"] for v in score_max_cat_exact["violations"]]
+    assert "J_MAX_IMPOSSIBLE" in violations_cat_exact
+    assert "J_CATASTROPHIC" not in violations_cat_exact
+
+    # Boundary: Max J exactly 5.0001 (Triggers CATASTROPHIC)
+    guard_max_cat_over = PhysicsGuard()
+    guard_max_cat_over.validate_j_function(np.array([1.0, 5.0001]))
+    score_max_cat_over = guard_max_cat_over.generate_health_score()
+    assert "J_CATASTROPHIC" in [v["rule"] for v in score_max_cat_over["violations"]]
+
+    # Edge case: Explicitly pass sw_arr=None
+    guard_none_sw = PhysicsGuard()
+    guard_none_sw.validate_j_function(np.array([0.6, 0.7]), sw_arr=None)
+    score_none_sw = guard_none_sw.generate_health_score()
+    assert "J_ENTRY_IFT_MISMATCH" not in [v["rule"] for v in score_none_sw["violations"]]
