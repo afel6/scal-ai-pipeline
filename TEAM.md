@@ -41,17 +41,19 @@ coordinate through this file, git, and the human.
 
 ### [2026-06-17] Antigravity → Claude Code & User (Fixing Physics Gaps & Classifier Alignment)
 
-**DID — committed, all 248 tests green (9 files changed):**
+**DID — committed, all 248 tests green (10 files changed):**
 1. **Archie Fit constraint (Gap 1):** Constrained $a \in [0.5, 1.5]$ in `regress_archie_m_a` (`petrophysics.py`). If violated, falls back to single-parameter fit with $a=1.0$, re-estimates $m$, and recalculates $R^2$ to ensure mathematical consistency.
 2. **Constant MICP Saturation Rejection (Gap 2):** In `_pick_micp_sat_col` (`extractors/micp.py`), we reject columns with a numerical range $\le 10^{-4}$ (e.g. constant/zero-variance columns). Added a corresponding `HIGH` violation check `MICP_CONSTANT_SATURATION` in `PhysicsGuard.validate_micp` (`physics_validator.py`). Added `test_validate_micp_constant_saturation` in `tests/test_physics_validator.py`.
 3. **Forbes Centrifuge Correction (Gap 3):** Implemented `forbes_correction` in `centrifuge_skill.py` using standard radial geometry parameters $B$ and $a_0$. Fallback to Hassler-Brunner occurs if inner/outer radii are missing/invalid. Added `test_forbes_correction` in `tests/test_centrifuge.py`.
 4. **CT-scan lithology thresholds (Gap 4):** Refactored `interpret_ct_scan` (`petrophysics.py`) to make HU thresholds mutually exclusive and ordered.
 5. **Classifier Alignment & OBP Support (Gap 5):** Unified test-type classification between `SCALFileHandler.identify()` and `file_reader._detect_test_type()` by enforcing word boundaries (`\b...\b`) on short keywords ($\le 4$ chars) like `'ro'`, `'phi'`. Added geomechanics/OBP keywords to `RCAL`. Added `"overburden_compaction"` test type rules and custom extraction to `file_reader.py` and `scal_file_handler.py`.
-6. **Local Server Setup:** Forcefully terminated any process locked on port 8000 using `kill_8000.cmd` to clean up the port.
+6. **Incomplete/Truncated Empty Responses Resolution:** Large document contexts caused Gemini's `<thinking>` block to consume the entire output budget. Fixed by adding a strict `<thinking>` length budget (4–5 sentences) in `prompts/hviel_system_prompt.md`, clearing the database query cache (`response_cache`), and deleting empty database responses.
+7. **Local Server Setup:** Forcefully terminated any process locked on port 8000 using `kill_8000.cmd` to clean up the port and restarted the uvicorn background server task.
 
 **Verified:**
 - `py -3.13 -m pytest tests/` -> **248/248 tests passed** (0 failures).
-- Real corpus verification run (`test_classify.py`) confirms `5_Phi_K_OBP.csv` and `6_Compressibility.csv` now correctly classify as `overburden_compaction` with correct row counts.
+- Real corpus verification run (`test_classify.py`) confirms `5_Phi_K_OBP.csv` and `6_Compressibility.csv` now classify as `overburden_compaction` with correct row counts.
+
 
 ### [2026-06-16] Claude Code → Antigravity (session 2 — ingestion hardening for tomorrow's data-science demo)
 
