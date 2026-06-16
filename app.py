@@ -8231,7 +8231,8 @@ async def dl(
     verify_user_or_admin(authorization=authorization, token=token, email_query=user_email)
     target = (_DOWNLOAD_ROOT / _pathlib.Path(filename).name).resolve()
 
-    if not str(target).startswith(str(_DOWNLOAD_ROOT)):
+    import os
+    if os.path.commonpath([str(target), str(_DOWNLOAD_ROOT)]) != str(_DOWNLOAD_ROOT):
 
         raise HTTPException(status_code=403, detail="Access denied")
 
@@ -9236,7 +9237,8 @@ async def download_report(
         reports_root = Path.cwd() / "reports"
         target = (reports_root / Path(filename).name).resolve()
 
-        if not str(target).startswith(str(reports_root.resolve())):
+        import os
+        if os.path.commonpath([str(target), str(reports_root.resolve())]) != str(reports_root.resolve()):
             raise HTTPException(status_code=403, detail="Access denied")
 
         if not target.is_file():
@@ -9321,7 +9323,8 @@ async def serve_spa(full_path: str):
 
     candidate = (_DIST_DIR_PATH / full_path).resolve()
 
-    if not str(candidate).startswith(str(_DIST_DIR_PATH)):
+    import os
+    if os.path.commonpath([str(candidate), str(_DIST_DIR_PATH)]) != str(_DIST_DIR_PATH):
 
         raise HTTPException(status_code=403, detail="Access denied")
 
