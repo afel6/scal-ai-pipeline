@@ -52,6 +52,20 @@ def test_physics_plausibility_guards_compressibility():
     # Invalid final porosity
     with pytest.raises(ValueError, match="Final porosity under elevated pressure cannot exceed initial porosity"):
         calculate_pore_compressibility(25.0, 26.0, 100.0)
+    # Exact calculation test
+    assert calculate_pore_compressibility(20.0, 19.0, 1000.0) == 0.00005
+
+    # Invalid final porosity (<=0 or >100)
+    with pytest.raises(ValueError, match="Final porosity must be strictly greater than zero and less than or equal to 100."):
+        calculate_pore_compressibility(25.0, 0.0, 100.0)
+    with pytest.raises(ValueError, match="Final porosity must be strictly greater than zero and less than or equal to 100."):
+        calculate_pore_compressibility(100.0, 105.0, 100.0)
+
+    # Invalid pressure delta
+    with pytest.raises(ValueError, match="Pressure delta must be strictly greater than zero."):
+        calculate_pore_compressibility(25.0, 24.0, 0.0)
+    with pytest.raises(ValueError, match="Pressure delta must be strictly greater than zero."):
+        calculate_pore_compressibility(25.0, 24.0, -10.0)
 
 def test_physics_plausibility_guards_washburn():
     # Valid
