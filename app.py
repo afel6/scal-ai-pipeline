@@ -299,6 +299,76 @@ def verify_user_or_admin(
 
     return True
 
+
+def safe_parse_list(s: str) -> list:
+    """Safely parse string representations of Python lists.
+    Handles single quotes, None, True, False, and nan without using ast.literal_eval.
+    Mitigates DoS vulnerabilities.
+    """
+    s = s.strip()
+    if not s.startswith("[") or not s.endswith("]"):
+        return [c.strip().strip("'\"[]") for c in s.split(",")]
+
+    try:
+        content = s[1:-1].strip()
+        if not content:
+            return []
+
+        result = []
+        i = 0
+        n = len(content)
+
+        while i < n:
+            while i < n and content[i].isspace(): i += 1
+            if i >= n: break
+
+            char = content[i]
+            if char in ("'", '"'):
+                quote = char
+                i += 1
+                val = ""
+                while i < n:
+                    if content[i] == '\\':
+                        i += 1
+                        if i < n: val += content[i]
+                        i += 1
+                    elif content[i] == quote:
+                        break
+                    else:
+                        val += content[i]
+                        i += 1
+                result.append(val)
+                i += 1
+            else:
+                start = i
+                while i < n and content[i] not in (',', ']', '}', '{', '['):
+                    i += 1
+                raw_val = content[start:i].strip()
+
+                if raw_val == "None": result.append(None)
+                elif raw_val == "True": result.append(True)
+                elif raw_val == "False": result.append(False)
+                elif raw_val in ("nan", "NaN"): result.append(float('nan'))
+                elif raw_val in ("inf", "Infinity"): result.append(float('inf'))
+                elif raw_val in ("-inf", "-Infinity"): result.append(float('-inf'))
+                elif raw_val:
+                    try:
+                        if '.' in raw_val or 'e' in raw_val.lower():
+                            result.append(float(raw_val))
+                        else:
+                            result.append(int(raw_val))
+                    except ValueError:
+                        result.append(raw_val)
+
+            while i < n and content[i] != ',':
+                i += 1
+            if i < n and content[i] == ',':
+                i += 1
+
+        return result
+    except Exception:
+        return [c.strip().strip("'\"[]") for c in s.split(",")]
+
 def sanitize_prompt(prompt: str) -> str:
     """Sanitizes user prompt inputs against prompt injection attacks (Security Issue 3)."""
     if not prompt:
@@ -838,7 +908,6 @@ def populate_cache_from_ground_truth(sid: str, gt_text: str):
         if "labeled_values" not in SESSION_DATA_CACHE[sid]:
             SESSION_DATA_CACHE[sid]["labeled_values"] = {}
             
-        import ast
         
         # Split by SHEET:
         sheets = gt_text.split("  SHEET: ")
@@ -858,13 +927,13 @@ def populate_cache_from_ground_truth(sid: str, gt_text: str):
                 if "COLUMNS (" in line:
                     col_str = line.partition("):")[2].strip()
                     try:
-                        cols = ast.literal_eval(col_str)
+                        cols = safe_parse_list(col_str)
                     except Exception:
                         cols = [c.strip().strip("'\"[]") for c in col_str.split(",")]
                 elif "    ROW " in line:
                     row_vals_str = line.partition(":")[2].strip()
                     try:
-                        row_vals = ast.literal_eval(row_vals_str)
+                        row_vals = safe_parse_list(row_vals_str)
                         grid.append(row_vals)
                     except Exception:
                         continue
