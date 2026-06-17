@@ -704,9 +704,9 @@ def fix_markdown_spacing(text: str) -> str:
     # 1. Enforce padding before markdown headings (##, ###) if they lack a preceding double newline.
     text = re.sub(r'([^\n])\s*(#{2,}\s)', r'\1\n\n\2', text)
     # 2. Enforce padding before the first row of a markdown table.
-    text = re.sub(r'(^|\n)([^|\n]+)\s*(\|)', r'\1\2\n\n\3', text)
+    text = re.sub(r'(^|\n)([^|\n]+)\s*(\|(?:[^|\n]*\|)+)', r'\1\2\n\n\3', text)
     # 3. Enforce newlines between concatenated table rows.
-    text = re.sub(r'\|\s+(?=\|)', r'|\n', text)
+    text = re.sub(r'(\|(?:[^\n|]+\|){2,})\s+(?=\|(?:[^\n|]+\|){2,})', r'\1\n', text)
     return text
 
 
