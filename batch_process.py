@@ -37,11 +37,11 @@ _log = logging.getLogger("PRC-Batch")
 
 # ── DATA-TYPE DETECTION ────────────────────────────────────────────────────────
 
-_KR_KEYWORDS   = {"krw", "kro", "krg", "relative permeability", "sor", "swi"}
+_KR_KEYWORDS   = {"krw", "kro", "krg", "relative_permeability", "sor", "swi"}
 _MICP_KEYWORDS = {"hg", "mercury", "s_hg", "sw_hg", "hg_sat", "hg_pressure",
                   "pc_psia", "pressure_psia", "micp", "intrusion"}
-_RI_KEYWORDS   = {"ri", "resistivity index", "ro", "rw", "archie_n"}
-_FF_KEYWORDS   = {"formation factor", "ff", "archie_m", "cementation"}
+_RI_KEYWORDS   = {"ri", "resistivity_index", "ro", "rw", "archie_n"}
+_FF_KEYWORDS   = {"formation_factor", "ff", "archie_m", "cementation"}
 
 
 def _col_set(df: pd.DataFrame) -> set:
