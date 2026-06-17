@@ -1,0 +1,401 @@
+7904:def sync_document_generation_task(
+7905-    session_id: str,
+7906-    temp_file_path: str,
+7907-    filename: str,
+7908-    email: str = None,
+7909-    message: str = None
+7910-):
+7911-    try:
+7912-        # Progress 0-10%
+7913-        TASKS_DB[session_id].update({"status": "processing", "progress": 5})
+7914-        ext = Path(filename.lower()).suffix
+7915-        is_docx = ext == ".docx"
+7916-        is_spreadsheet = ext in [".xlsx", ".xls", ".csv"]
+7917-
+7918-        # Read the file
+7919-        fr_data = read_file(temp_file_path, target_identifier=None)
+7920-        fr_text, _ = to_prompt_string(fr_data)
+7921-        if not fr_text:
+7922-            raise ValueError("Empty or unreadable file content.")
+7923-
+7924-        TASKS_DB[session_id].update({"progress": 15})
+7925-
+7926-        # Phase 0b: Generate GROUND TRUTH structural inventory from the actual file
+7927-        phase0b_inventory = None
+7928-        phase0b_inventory_text = ""
+7929-        mandatory_ground_truth = ""
+7930-        if is_spreadsheet or is_docx:
+7931-            try:
+7932-                # Deterministic pre-parser: raw pd.ExcelFile, zero SCALFileHandler dependency
+7933-                mandatory_ground_truth = extract_absolute_file_truth(
+7934-                    [(temp_file_path, filename)]
+7935-                )
+7936-                if session_id:
+7937-                    with SESSION_DATA_CACHE_LOCK:
+7938-                        SESSION_DATA_CACHE[session_id] = {
+7939-                            "ground_truth": mandatory_ground_truth,
+7940-                            "timestamp": time.time()
+7941-                        }
+7942-                    populate_cache_from_ground_truth(session_id, mandatory_ground_truth)
+7943-                    if is_spreadsheet:
+7944-                        cache_excel_data_vectors(session_id, temp_file_path)
+7945-                _logger.info(f"[Phase 0b BG] Deterministic MANDATORY_GROUND_TRUTH_INVENTORY generated for {filename}")
+7946-            except Exception as mgt_err:
+7947-                _logger.warning(f"[Phase 0b BG] extract_absolute_file_truth failed for {filename}: {mgt_err}")
+7948-
+7949-        if is_spreadsheet:
+7950-            try:
+7951-                _handler = SCALFileHandler(temp_file_path)
+7952-                _handler.read()
+7953-                phase0b_inventory = _handler.generate_structural_inventory()
+7954-                phase0b_inventory_text = _handler.generate_structural_inventory_text()
+7955-                _logger.info(f"[Phase 0b BG] Generated structural inventory for {filename}: "
+7956-                             f"{len(phase0b_inventory.get('sheets_found', []))} sheets")
+7957-                if phase0b_inventory.get("multi_well_alert"):
+7958-                    _logger.warning(f"[Phase 0b BG] MULTI-WELL ALERT in {filename}: "
+7959-                                    f"{phase0b_inventory['multi_well_alert']}")
+7960-            except Exception as inv_err:
+7961-                _logger.warning(f"[Phase 0b BG] Inventory generation failed for {filename}: {inv_err}")
+7962-
+7963-        # Progress 10-30%: Extract structure from Gemini with HA client
+7964-        extraction_prompt_path = str(Path(__file__).parent / "prompts" / "extraction_system_prompt.md")
+7965-        with open(extraction_prompt_path, "r", encoding="utf-8") as f:
+7966-            system_instruction = f.read()
+7967-
+7968-        # Inject MANDATORY_GROUND_TRUTH_INVENTORY into the SYSTEM INSTRUCTION
+7969-        if mandatory_ground_truth:
+7970-            system_instruction = (
+7971-                f"{system_instruction}\n\n"
+7972-                f"## MANDATORY_GROUND_TRUTH_INVENTORY\n\n"
+7973-                f"You are provided with a MANDATORY_GROUND_TRUTH_INVENTORY extracted "
+7974-                f"programmatically by the Python server from the actual binary file. "
+7975-                f"This inventory is ABSOLUTE TRUTH and supersedes ANY text analysis you perform.\n\n"
+7976-                f"RULES:\n"
+7977-                f"1. If your analysis references a sheet name that does NOT exist in this inventory, "
+7978-                f"you MUST immediately output STRUCTURAL_HALT and fail.\n"
+7979-                f"2. If your analysis references a column label that does NOT exist in this inventory, "
+7980-                f"you MUST immediately output STRUCTURAL_HALT and fail.\n"
+7981-                f"3. You are FORBIDDEN from recycling numbers, columns, or sheet names from previous "
+7982-                f"chat turns or cached context. Only use what is in the current file.\n"
+7983-                f"4. For permeability fields (KL, Ka, Air_Permeability_md, Klinkenberg_Permeability_md), "
+7984-                f"the source column header MUST contain 'mD', 'Permeability', 'KL', or 'Ka'. "
+7985-                f"You MUST REJECT columns with '(cc)', 'Volume', 'Cum.vol', or 'Cumulative' for permeability extraction.\n"
+7986-                f"5. If a cell explicitly states 'Swi = <value>' or 'Sor = <value>', bind that value "
+7987-                f"directly to explicit_Swi or explicit_Sor. These override ALL derived calculations.\n\n"
+7988-                f"{mandatory_ground_truth}\n"
+7989-            )
+7990-
+7991-        msg = message or "Analyze petrophysical data from uploaded file."
+7992-        full_markdown_variable = (
+7993-            f"--- START OF FULL DOCUMENT MARKDOWN ---\n{fr_text}\n--- END OF FULL DOCUMENT MARKDOWN ---\n\n"
+7994-        )
+7995-
+7996-        # Also inject Phase 0b inventory text into user prompt for cross-validation
+7997-        if phase0b_inventory_text:
+7998-            full_markdown_variable += (
+7999-                f"--- GROUND TRUTH: PHASE 0b STRUCTURAL INVENTORY (generated by Python parser) ---\n"
+8000-                f"{phase0b_inventory_text}\n"
+8001-                f"--- END GROUND TRUTH ---\n"
+8002-                f"IMPORTANT: The inventory above was generated by the Python file parser from the actual binary file. "
+8003-                f"Your Phase 0b output MUST match this exactly. If your output diverges, you are hallucinating.\n\n"
+8004-            )
+8005-
+8006-        full_markdown_variable += (
+8007-            f"USER REQUEST: {msg}\n\n"
+8008-            f"CRITICAL: Only extract the specific table(s) or data requested by the user above. "
+8009-            f"If the user specifies a specific table (e.g., 'Table 2.1.1'), only extract the rows for that table. "
+8010-            f"Do not extract rows from other tables or other core plug sweeps.\n\n"
+8011-            f"MANDATORY PHASE 0b — PROOF OF READ:\n"
+8012-            f"Before ANY extraction, you MUST output a structural file inventory proving you have inspected the actual file.\n"
+8013-            f"You are FORBIDDEN from relying on remembered file structures or historical context.\n\n"
+8014-            f"MANDATORY PROTOCOLS FOR EXTRACTION:\n"
+8015-            f"0b. You must execute and return Phase 0b (PROOF OF READ: filename, sheets_found, per-sheet header/shape/first 2 rows inventory, multi_well_alert).\n"
+8016-            f"1. You must execute and return Protocol 1 (FILE-OPEN PROOF: sheet names and raw column headers target sheet inventory).\n"
+8017-            f"2. You must execute and return Protocol 2 (HEADER & UNIT DOUBLE-CHECK: print literal column headers/units for every extracted data value).\n"
+8018-            f"3. You must execute and return Protocol 3 (LABELED-VALUE ABSOLUTE PRIORITY: extract explicitly stated Swi/Sor laboratory values and list them under overridden_endpoints).\n"
+8019-            f"Your JSON output MUST match the structured schema format: a single object containing 'phase_0b_proof_of_read', 'protocol_1_file_open_proof', 'protocol_2_header_unit_double_check', 'protocol_3_labeled_value_absolute_priority', and the final rows array as 'extracted_data'.\n\n"
+8020-            f"STRUCTURAL HALT: If you cite a sheet name or column header NOT in your own Phase 0b inventory, HALT and output a STRUCTURAL_HALT error."
+8021-        )
+8022-
+8023-        contents = [
+8024-            genai_types.Content(
+8025-                role="user",
+8026-                parts=[genai_types.Part.from_text(text=full_markdown_variable)]
+8027-            )
+8028-        ]
+8029-        config = genai_types.GenerateContentConfig(
+8030-            system_instruction=system_instruction,
+8031-            response_mime_type="application/json"
+8032-        )
+8033-
+8034-        TASKS_DB[session_id].update({"progress": 20})
+8035-
+8036-        client = assistant._client or genai_new.Client(api_key=GEMINI_KEY_POOL[0])
+8037-        try:
+8038-            response = _call_gemini_with_retry(
+8039-                client=client,
+8040-                model="gemini-2.5-flash",
+8041-                contents=contents,
+8042-                config=config,
+8043-                max_retries=3,
+8044-                base_delay=2
+8045-            )
+8046-        except Exception as e:
+8047-            _logger.warning(f"[Background Task Fallback] gemini-2.5-flash overloaded (503): {e}. Falling back to gemini-2.5-pro...")
+8048-            response = _call_gemini_with_retry(
+8049-                client=client,
+8050-                model="gemini-2.5-pro",
+8051-                contents=contents,
+8052-                config=config,
+8053-                max_retries=3,
+8054-                base_delay=2
+8055-            )
+8056-
+8057-        response_text = response.text or ""
+8058-        clean_text = response_text.strip()
+8059-        if clean_text.startswith("```"):
+8060-            lines = clean_text.splitlines()
+8061-            if lines[0].startswith("```"):
+8062-                lines = lines[1:]
+8063-            if lines[-1].startswith("```"):
+8064-                lines = lines[:-1]
+8065-            clean_text = "\n".join(lines).strip()
+8066-
+8067-        # Strip <thinking> blocks from response
+8068-        clean_text = strip_thinking_blocks(clean_text)
+8069-
+8070-        def salvage_and_clean_json(text_to_parse: str) -> list:
+8071-            parsed = None
+8072-            try:
+8073-                parsed = _json.loads(text_to_parse)
+8074-            except Exception:
+8075-                clean_t = text_to_parse.strip()
+8076-                last_brace = clean_t.rfind('}')
+8077-                if last_brace != -1:
+8078-                    if clean_t.startswith("{"):
+8079-                        for suffix in ["}", "]}", "]} }", "] }"]:
+8080-                            try:
+8081-                                parsed = _json.loads(clean_t[:last_brace + 1] + suffix)
+8082-                                break
+8083-                            except Exception:
+8084-                                continue
+8085-                    else:
+8086-                        try:
+8087-                            parsed = _json.loads(clean_t[:last_brace + 1] + ']')
+8088-                        except Exception:
+8089-                            pass
+8090-
+8091-            if parsed is None:
+8092-                raise ValueError("Could not parse or salvage valid JSON from LLM extraction response.")
+8093-
+8094-            # Phase 0b: Check for STRUCTURAL_HALT from LLM
+8095-            if isinstance(parsed, dict) and "STRUCTURAL_HALT" in parsed:
+8096-                halt_msg = parsed["STRUCTURAL_HALT"]
+8097-                _logger.error(f"[Phase 0b] STRUCTURAL HALT in background task: {halt_msg}")
+8098-                raise ValueError(f"STRUCTURAL_HALT: LLM detected hallucinated reference — {halt_msg}")
+8099-
+8100-            # Phase 0b: Python-side structural validation against ground truth
+8101-            if isinstance(parsed, dict) and phase0b_inventory:
+8102-                violations = validate_extraction_against_inventory(parsed, phase0b_inventory)
+8103-                if violations:
+8104-                    for v in violations:
+8105-                        _logger.error(f"[Phase 0b BG] {v}")
+8106-                    raise ValueError(
+8107-                        f"STRUCTURAL_HALT: Python-side validation caught {len(violations)} "
+8108-                        f"hallucinated reference(s): {'; '.join(violations[:3])}"
+8109-                    )
+8110-
+8111-            # Permeability column binding validation
+8112-            if isinstance(parsed, dict):
+8113-                perm_violations = validate_permeability_column_binding(parsed)
+8114-                if perm_violations:
+8115-                    for pv in perm_violations:
+8116-                        _logger.error(f"[Phase 0b BG] {pv}")
+8117-                    raise ValueError(
+8118-                        f"PERM_COLUMN_HALT: {len(perm_violations)} permeability "
+8119-                        f"data-shuffling error(s): {'; '.join(perm_violations[:3])}"
+8120-                    )
+8121-
+8122-            if isinstance(parsed, dict) and "extracted_data" in parsed:
+8123-                _logger.info("[Pipeline] Successfully parsed Phase 0b + mandatory protocols and structured data in background task.")
+8124-                overrides = parsed.get("protocol_3_labeled_value_absolute_priority", {}).get("overridden_endpoints", {})
+8125-                data_list = parsed.get("extracted_data", [])
+8126-                if isinstance(data_list, list) and isinstance(overrides, dict):
+8127-                    for row in data_list:
+8128-                        if isinstance(row, dict):
+8129-                            for ok, ov in overrides.items():
+8130-                                if ov is not None:
+8131-                                    if ok.lower() == "swi":
+8132-                                        row["explicit_Swi"] = float(ov)
+8133-                                    elif ok.lower() == "sor":
+8134-                                        row["explicit_Sor"] = float(ov)
+8135-                return data_list
+8136-            return parsed if isinstance(parsed, list) else []
+8137-
+8138-        try:
+8139-            extracted_json = salvage_and_clean_json(clean_text)
+8140-        except Exception as je:
+8141-            raise ValueError(f"Failed to parse Gemini extraction output as JSON: {je}")
+8142-
+8143-        def merge_and_deduplicate_sweeps(samples):
+8144-            if not samples or not isinstance(samples, list): return []
+8145-            samples = [s for s in samples if isinstance(s, dict)]
+8146-            if not samples: return []
+8147-            sweeps = []
+8148-            current_sweep = []
+8149-            last_p = None
+8150-            for s in samples:
+8151-                p = s.get("Pressure_psi")
+8152-                if p is not None:
+8153-                    if last_p is not None and p <= last_p:
+8154-                        if current_sweep: sweeps.append(current_sweep)
+8155-                        current_sweep = []
+8156-                current_sweep.append(s)
+8157-                last_p = p
+8158-            if current_sweep: sweeps.append(current_sweep)
+8159-
+8160-            merged_sweeps = []
+8161-            for sweep in sweeps:
+8162-                matched = False
+8163-                for ms in merged_sweeps:
+8164-                    if len(sweep) == len(ms):
+8165-                        match = True
+8166-                        for i in range(len(sweep)):
+8167-                            if sweep[i].get("Pressure_psi") != ms[i].get("Pressure_psi") or sweep[i].get("Porosity_percent") != ms[i].get("Porosity_percent"):
+8168-                                match = False
+8169-                                break
+8170-                        if match:
+8171-                            for i in range(len(sweep)):
+8172-                                for k, v in sweep[i].items():
+8173-                                    if v is not None and ms[i].get(k) is None:
+8174-                                        ms[i][k] = v
+8175-                            matched = True
+8176-                            break
+8177-                if not matched:
+8178-                    merged_sweeps.append(sweep)
+8179-
+8180-            result = []
+8181-            for ms in merged_sweeps:
+8182-                result.extend(ms)
+8183-            return result
+8184-
+8185-        extracted_json = merge_and_deduplicate_sweeps(extracted_json)
+8186-        TASKS_DB[session_id].update({"progress": 30})
+8187-
+8188-        # Progress 30-70%: Physics Audit, DB Inserts, isolated geomech md, dashboard and plots
+8189-        validation_result = data_validator.validate_scal_data(extracted_json)
+8190-        physics_score = 100
+8191-        physics_status = "PASS"
+8192-        violations = []
+8193-
+8194-        if validation_result.get("status") == "error":
+8195-            physics_status = "FAIL"
+8196-            physics_score = max(0, 100 - 15 * len(validation_result.get("errors", [])))
+8197-            violations = validation_result.get("errors", [])
+8198-
+8199-        detected_type = detect_test_type(extracted_json)
+8200-        _log_physics_audit(
+8201-            sid=session_id,
+8202-            data_type=detected_type,
+8203-            audit_res={"score": physics_score, "violations": violations},
+8204-            file_name=filename
+8205-        )
+8206-
+8207-        TASKS_DB[session_id].update({"progress": 40})
+8208-
+8209-        from prc_physics import calculate_compressibility_sweep, enrich_json_with_brooks_corey
+8210-        try:
+8211-            extracted_json = calculate_compressibility_sweep(extracted_json)
+8212-            extracted_json = enrich_json_with_brooks_corey(extracted_json)
+8213-        except Exception as pe:
+8214-            _logger.warning(f"Error during deterministic physics calculation in bg: {pe}")
+8215-
+8216-        TASKS_DB[session_id].update({"progress": 45})
+8217-
+8218-        # Insert consecutively in DB
+8219-        db("INSERT INTO m (sid,role,text,ts,user_email,fname) VALUES (?,?,?,?,?,?)",
+8220-           (session_id, "user", msg, time.time() - 2.0, email, filename))
+8221-
+8222-        violations_str = "\n".join(f"- {v}" for v in violations) if violations else "No physical violations found."
+8223-        audit_text = f"PHYSICS HEALTH AUDIT: {physics_score}% | STATUS: {physics_status}\n{violations_str}"
+8224-        db("INSERT INTO m (sid,role,text,ts,user_email) VALUES (?,?,?,?,?)",
+8225-           (session_id, "model", audit_text, time.time() - 1.0, email))
+8226-
+8227-        pressures = []
+8228-        porosities = []
+8229-        perms = []
+8230-        for r in extracted_json:
+8231-            p = r.get("Pressure_psi")
+8232-            phi = r.get("Porosity_percent")
+8233-            k = r.get("Air_Permeability_md")
+8234-            if p is not None and phi is not None:
+8235-                pressures.append(p)
+8236-                porosities.append(phi)
+8237-                perms.append(k if k is not None else 0.0)
+8238-
+8239-        plot_json = {
+8240-            "title": "Porosity & Permeability vs Overburden Pressure",
+8241-            "curves": [
+8242-                {"name": "Porosity (%)", "x": pressures, "y": porosities, "yId": "left"},
+8243-                {"name": "Permeability (mD)", "x": pressures, "y": perms, "yId": "right"}
+8244-            ],
+8245-            "dualAxis": True,
+8246-            "y_label": "Porosity (%)",
+8247-            "y_label2": "Air Permeability (mD)",
+8248-            "x_label": "Overburden Pressure (psi)"
+8249-        }
+8250-        plot_text = f"__PRC_PLOT__\n{_json.dumps(plot_json)}\n\n"
+8251-        db("INSERT INTO m (sid,role,text,ts,user_email) VALUES (?,?,?,?,?)",
+8252-           (session_id, "model", plot_text, time.time(), email))
+8253-
+8254-        TASKS_DB[session_id].update({"progress": 55})
+8255-
+8256-        base_dir = _os.path.dirname(_os.path.abspath(__file__))
+8257-        outputs_dir = _os.path.join(base_dir, "outputs", session_id)
+8258-        _os.makedirs(outputs_dir, exist_ok=True)
+8259-
+8260-        active_key = GEMINI_KEY_POOL[0]
+8261-        master_eng = MasterEngineerNode(api_key=active_key)
+8262-        engineer_report = master_eng.analyze_scal_data(extracted_json)
+8263-
+8264-        report_path = _os.path.join(outputs_dir, "reservoir_report.md")
+8265-        with open(report_path, "w", encoding="utf-8") as f:
+8266-            f.write(engineer_report)
+8267-
+8268-        well_name = "PROVISIONAL WELL"
+8269-        if isinstance(fr_data, dict):
+8270-            well_name = fr_data.get("well_name") or fr_data.get("well") or "PROVISIONAL WELL"
+8271-
+8272-        _dash_audit = {"score": physics_score, "status": physics_status, "violations": violations}
+8273-        dash_output_path = _os.path.join(outputs_dir, "app_dashboard.py")
+8274-
+8275-        streamlit_code = generate_universal_dashboard(
+8276-            validated_json=extracted_json,
+8277-            well_name=well_name,
+8278-            test_type=detected_type,
+8279-            physics_audit=_dash_audit,
+8280-            output_path=dash_output_path,
+8281-        )
+8282-
+8283-        visualizer.generate_plots(extracted_json, output_dir=outputs_dir, streamlit_code=streamlit_code)
+8284-
+8285-        try:
+8286-            with open(temp_file_path, "rb") as f:
+8287-                data_bytes = f.read()
+8288-            _fhash_store = hashlib.sha256(data_bytes).hexdigest()
+8289-            db(
+8290-                "INSERT INTO user_files"
+8291-                " (user_email, filename, file_hash, extracted_text, data_type, created_at)"
+8292-                " VALUES (?,?,?,?,?,?)"
+8293-                " ON CONFLICT(user_email, file_hash)"
+8294-                " DO UPDATE SET extracted_text=EXCLUDED.extracted_text,"
+8295-                " filename=EXCLUDED.filename",
+8296-                (email, filename, _fhash_store, fr_text, "SCAL", time.time()),
+8297-            )
+8298-        except Exception as _ufe:
+8299-            _logger.warning(f"Could not log file to user_files in bg task: {_ufe}")
+8300-
+8301-        TASKS_DB[session_id].update({"progress": 70})
+8302-
+8303-        start_time = time.time()
+8304-        filename_report = PRCReportEngine().generate(session_id, well_name)
