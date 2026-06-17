@@ -85,7 +85,7 @@ from petrophysical_curves import Endpoints, KrCurveFitter
 from physics_validator import PhysicsGuard
 
 from scal_file_handler import SCALFileHandler, extract_file_data, _extract_pdf as _sfh_extract_pdf, _extract_docx as _sfh_extract_docx, strip_thinking_blocks, strip_placeholder_artifacts, clean_citation_clutter, validate_extraction_against_inventory, extract_absolute_file_truth, validate_permeability_column_binding, compress_traceability_ledger
-from file_reader import read_file, to_prompt_string, build_gemini_message
+from file_reader import read_file, to_prompt_string
 
 from report_generator import PRCReportEngine
 from grader import grade_ai_response
