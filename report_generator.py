@@ -83,7 +83,7 @@ class PRCReportEngine:
         run.italic = italic
         return p
 
-    def generate(self, session_id, well_name="Unknown Well"):
+    def generate(self, session_id, well_name="Unknown Well", output_dir=None):
         doc = Document()
         
         # --- COVER PAGE ---
@@ -114,9 +114,10 @@ class PRCReportEngine:
         self._add_footer(doc, well_name)
 
         filename = f"PRC_SCAL_Report_{well_name}_{session_id[:6]}.docx"
-        # Write to the central shared PRC vault (sister to PVT/Aviel exports).
-        vault = os.getenv("PRC_AI_VAULT", r"C:/Users/Asus/Downloads/PRC_AI_Vault")
-        output_path = os.path.join(vault, filename)
+        # Destination precedence: explicit output_dir (the app passes the shared
+        # PRC vault) -> PRC_AI_VAULT env -> the original local reports/ folder.
+        base = output_dir or os.getenv("PRC_AI_VAULT") or os.path.join(os.getcwd(), "reports")
+        output_path = os.path.join(base, filename)
         os.makedirs(os.path.dirname(output_path), exist_ok=True)
         doc.save(output_path)
         return filename

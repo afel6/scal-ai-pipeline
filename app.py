@@ -562,6 +562,8 @@ def _get_conn():
 
             conn.execute("PRAGMA busy_timeout=10000")
 
+            conn.execute("PRAGMA foreign_keys = ON;")
+
             try:
 
                 yield conn, "?"
@@ -3240,7 +3242,7 @@ class PRCChatAssistant:
 
                     # Use generate() method as defined in report_generator.py
 
-                    filename = PRCReportEngine().generate(session_id=sid, well_name=well)
+                    filename = PRCReportEngine().generate(session_id=sid, well_name=well, output_dir=str(PRC_VAULT))
 
                     result = f"REPORT_READY:{filename}"
 
@@ -6514,7 +6516,7 @@ app.add_middleware(
 
     allow_origins=_CORS_ORIGINS,
 
-    allow_origin_regex=r"https?://.*",
+    allow_origin_regex=r"^https?://(localhost|127\.0\.0\.1)(:\d+)?$",
 
     allow_credentials=True,
 
@@ -9029,7 +9031,7 @@ def sync_document_generation_task(
         TASKS_DB[session_id].update({"progress": 70})
         
         start_time = time.time()
-        filename_report = PRCReportEngine().generate(session_id, well_name)
+        filename_report = PRCReportEngine().generate(session_id, well_name, output_dir=str(PRC_VAULT))
         duration = time.time() - start_time
         with _REPORT_LATENCY_LOCK:
             _REPORT_LATENCY_LIST.append(duration)
@@ -9059,7 +9061,7 @@ def async_report_compile_task(session_id: str, well_name: str):
     try:
         TASKS_DB[session_id]["progress"] = 30
         start_time = time.time()
-        filename = PRCReportEngine().generate(session_id, well_name)
+        filename = PRCReportEngine().generate(session_id, well_name, output_dir=str(PRC_VAULT))
         duration = time.time() - start_time
         with _REPORT_LATENCY_LOCK:
             _REPORT_LATENCY_LIST.append(duration)
@@ -9391,7 +9393,7 @@ async def serve_spa(full_path: str):
 
     # This prevents returning index.html (200 OK) for ../app.py or other system files.
 
-    if "." in _pathlib.Path(full_path).name:
+    if "." in Path(full_path).name:
 
         raise HTTPException(status_code=404, detail="File not found")
 

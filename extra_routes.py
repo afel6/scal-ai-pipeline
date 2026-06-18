@@ -3,10 +3,13 @@ Extra API Routes: Feedback, Analytics, User Registration
 """
 import os
 import time
-from fastapi import Form
+from fastapi import Form, Depends
 
 
-def register_extra_routes(app, db):
+def register_extra_routes(app, db, verify_admin=None):
+
+    # Admin endpoints are gated by the host app's admin verifier when provided.
+    _admin_deps = [Depends(verify_admin)] if verify_admin else []
 
     @app.post("/api/feedback")
     async def submit_feedback(
@@ -41,7 +44,7 @@ def register_extra_routes(app, db):
             pass
         return {"status": "ok"}
 
-    @app.get("/api/admin/analytics")
+    @app.get("/api/admin/analytics", dependencies=_admin_deps)
     def get_analytics():
         try:
             events = db("SELECT user_email, event_type, event_data, ts FROM analytics_events ORDER BY ts DESC LIMIT 200")
@@ -49,7 +52,7 @@ def register_extra_routes(app, db):
         except Exception:
             return {"events": []}
 
-    @app.get("/api/admin/feedback")
+    @app.get("/api/admin/feedback", dependencies=_admin_deps)
     def get_feedback():
         try:
             rows = db("SELECT user_email, bug_report, ts FROM feedback ORDER BY ts DESC LIMIT 100")
@@ -57,7 +60,7 @@ def register_extra_routes(app, db):
         except Exception:
             return {"feedback": []}
 
-    @app.get("/api/admin/users")
+    @app.get("/api/admin/users", dependencies=_admin_deps)
     def get_users():
         try:
             rows = db("SELECT email, name, created_at FROM users ORDER BY created_at DESC")
@@ -65,7 +68,7 @@ def register_extra_routes(app, db):
         except Exception:
             return {"users": []}
 
-    @app.get("/api/admin/summary")
+    @app.get("/api/admin/summary", dependencies=_admin_deps)
     def get_summary():
         """Aggregated stats for the Admin Dashboard."""
         try:

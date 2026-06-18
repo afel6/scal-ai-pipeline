@@ -209,3 +209,17 @@ ingest. Override via `SCAL_MAX_UPLOAD_MB`.
 on-prem box — keep behind the LAN. **Verified:** `/health` ok; `py_compile` clean.
 **For Antigravity:** run `python -m pytest tests/` before any push (a hardened constant
 changed). Frontend untouched this round.
+
+### [2026-06-18] Claude Code — Production Readiness Audit fixes
+**Did:**
+- `app.py`: fixed `NameError` in the SPA catch-all (`_pathlib.Path` -> `Path`);
+  restricted CORS `allow_origin_regex` to localhost/loopback (matches the PVT
+  backend); enabled `PRAGMA foreign_keys = ON` in the sqlite `_get_conn` handler;
+  the three report call sites now pass `output_dir=str(PRC_VAULT)` explicitly.
+- `report_generator.py`: `generate(..., output_dir=None)` with precedence
+  `output_dir -> PRC_AI_VAULT env -> os.getcwd()/reports` (restores the unit-test
+  default while the app writes to the shared vault).
+- `extra_routes.py`: `/api/admin/*` routes gated with `Depends(verify_admin)`,
+  injected via `register_extra_routes(app, db, verify_admin=None)`.
+- Removed root clutter: `app.py.bak`, `6.31.1`.
+**Verified:** `python -m pytest tests/` -> 248 passed. py_compile clean.
