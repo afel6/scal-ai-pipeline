@@ -7575,14 +7575,13 @@ async def handle(
 
         _tls.current_session_id = sid
 
-        _MAX_UPLOAD_BYTES = 20 * 1024 * 1024  # 20 MB
-
         for file in valid_files:
 
             b = await file.read(_MAX_UPLOAD_BYTES + 1)
 
             if len(b) > _MAX_UPLOAD_BYTES:
-                raise HTTPException(status_code=413, detail=f"File '{file.filename}' exceeds the 20 MB limit.")
+                _mb = _MAX_UPLOAD_BYTES // (1024 * 1024)
+                raise HTTPException(status_code=413, detail=f"File '{file.filename}' exceeds the {_mb} MB limit.")
 
             if b:
 
@@ -8604,7 +8603,9 @@ def get_filenames_from_cache(sid: Optional[str]) -> list[str]:
 
 _REPORT_LATENCY_LIST: list[float] = []
 _REPORT_LATENCY_LOCK: threading.Lock = threading.Lock()
-_MAX_UPLOAD_BYTES = 20 * 1024 * 1024
+# Upload cap for large lab reports. Default 75 MB on the sovereign on-prem box;
+# override via SCAL_MAX_UPLOAD_MB. Streaming guard still enforces the limit.
+_MAX_UPLOAD_BYTES = int(os.getenv("SCAL_MAX_UPLOAD_MB", "75")) * 1024 * 1024
 
 import tempfile
 

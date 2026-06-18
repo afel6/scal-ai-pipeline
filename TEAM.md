@@ -197,3 +197,15 @@ bdbdebf.)
 **Verified:** `/health` ok; frontend build green (2.85s). Genkit pins untouched.
 **For Antigravity:** keep `PRC_AI_VAULT` consistent with PVT; rebuild the frontend if you
 touch JSX/CSS.
+
+### [2026-06-18] Claude Code — Larger upload cap for big lab reports
+**Did:** `app.py` `_MAX_UPLOAD_BYTES` is now
+`int(os.getenv("SCAL_MAX_UPLOAD_MB","75")) * 1024 * 1024` (was a hard 20 MB), and the
+per-file chat-upload guard uses the same constant with a dynamic limit message. The
+512 KB streaming size guard is unchanged. SCAL's `file_reader.py` (pdfplumber / docx /
+pandas) already reads tables — this only lifts the size ceiling so large PDFs/workbooks
+ingest. Override via `SCAL_MAX_UPLOAD_MB`.
+**Security note:** this deliberately raises the CWE-400 DoS ceiling for the sovereign
+on-prem box — keep behind the LAN. **Verified:** `/health` ok; `py_compile` clean.
+**For Antigravity:** run `python -m pytest tests/` before any push (a hardened constant
+changed). Frontend untouched this round.
