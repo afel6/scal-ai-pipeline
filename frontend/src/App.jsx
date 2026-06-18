@@ -23,6 +23,7 @@ import KrCurvePlot from './components/KrCurvePlot';
 import AdminDashboard    from './AdminDashboard';
 import Login             from './components/Login';
 import PetrophysicalTable from './components/PetrophysicalTable';
+import StudioView         from './components/StudioView';
 import { renderMessageContent } from './components/MessageRenderer';
 import { FeedbackModal, PrivacyModal, TermsModal, CookieConsent, AdminLoginModal,
 trackEvent } from './PrcModals';
@@ -372,9 +373,13 @@ export default function App() {
           } else if (data.type === 'error') {
             es.close();
             const isDocErr = data.msg?.toLowerCase().includes('document') || data.msg?.toLowerCase().includes('generat');
+            // Surface the upstream reason (already filtered server-side) so the
+            // engineer sees *why* it paused (e.g. "Upstream 503 — Gemini unavailable")
+            // instead of an opaque generic notice.
+            const detail   = data.msg ? ` (${data.msg})` : '';
             const userMsg  = isDocErr
-              ? ' Document generation paused. Please retry or request a different format.'
-              : ' Analysis paused. An error occurred during processing. Please retry your query.';
+              ? ` Document generation paused.${detail} Please retry or request a different format.`
+              : ` Analysis paused. An error occurred during processing.${detail} Please retry your query.`;
             setMessages(prev => [...prev, {
               role: 'model', text: userMsg, isError: true,
               isDocEngineError: isDocErr,
@@ -542,7 +547,7 @@ export default function App() {
         <div className="p-4 border-b border-slate-800/60 flex items-center justify-between shrink-0">
           <div className="flex items-center gap-2">
             <Database className="w-5 h-5 text-yellow-500 shrink-0" />
-            <span className="text-sm font-black tracking-widest text-yellow-50">PRC STUDIES</span>
+            <span className="glow-amber text-sm font-black tracking-widest">PRC STUDIES</span>
           </div>
           <div className="flex items-center gap-2">
             <button
@@ -584,7 +589,7 @@ export default function App() {
       </aside>
 
       {/* ── Main ───────────────────────────────────────────────────────────── */}
-      <div className="flex-1 flex flex-col min-w-0 h-full">
+      <div className="flex-1 flex flex-col min-w-0 h-full scanlines">
 
         {/* Header */}
         <header className="bg-gloss border-b border-white/5 px-3 md:px-4 py-3 flex items-center justify-between shrink-0 gap-2 z-10 !border-x-0 !border-t-0 !rounded-none">
@@ -595,7 +600,7 @@ export default function App() {
             >
               <Menu className="w-5 h-5" />
             </button>
-            <span className="text-sm font-bold tracking-[0.2em] text-yellow-500 uppercase truncate hidden sm:block">
+            <span className="glow-amber text-sm font-bold tracking-[0.2em] uppercase truncate hidden sm:block">
               PRC PETROPHYSICS ENGINE
             </span>
           </div>
@@ -905,6 +910,17 @@ export default function App() {
               </div>
             </footer>
           </>
+        ) : activeTab === 'studio' ? (
+          <StudioView
+            messages={messages}
+            input={input}
+            setInput={setInput}
+            handleSend={handleSend}
+            loading={loading}
+            files={files}
+            setFiles={setFiles}
+            serverStatus={serverStatus}
+          />
         ) : activeTab === 'audit' ? (
           <VisualAudit />
         ) : (

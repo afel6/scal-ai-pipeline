@@ -182,3 +182,18 @@ live Brooks-Corey plot, SSE chat). Render is intentionally **suspended-by-user**
 the chat flow — wire it in or remove it, your call.
 **Left uncommitted:** nothing of mine. (Your earlier app.py work is committed in
 bdbdebf.)
+
+### [2026-06-18] Claude Code — PRC AI Hub Synchronization
+**Did:**
+- Shared PRC vault: `app.py` now defines `PRC_VAULT` (env `PRC_AI_VAULT`, default
+  `C:/Users/Asus/Downloads/PRC_AI_Vault`). `HvielDocEngine(output_dir=PRC_VAULT)`,
+  `_DOWNLOAD_ROOT = PRC_VAULT`, and `/api/report/download` now serve from the vault.
+  `report_generator.PRCReportEngine.generate` writes the executive `.docx` there too.
+- Frontend Glass-Brutalist sync: ported PVT/Aviel tokens + scanline terminal overlay +
+  brutalist borders + typewriter cursor into `frontend/src/index.css` (additive — nothing
+  removed; PVT global body/scrollbar resets intentionally NOT copied so SCAL keeps its
+  Outfit prose font + scroll model). `App.jsx`: scanline overlay on the main panel and
+  amber glow on the brand marks. `npm run build` re-run → `frontend/dist` current.
+**Verified:** `/health` ok; frontend build green (2.85s). Genkit pins untouched.
+**For Antigravity:** keep `PRC_AI_VAULT` consistent with PVT; rebuild the frontend if you
+touch JSX/CSS.

@@ -6528,9 +6528,14 @@ app.add_middleware(
 
 assistant = PRCChatAssistant(GEMINI_KEY_POOL)
 
+# Central shared PRC vault — all exported decks/spreadsheets/Word/PDF reports
+# from BOTH Hviel (SCAL) and Aviel (PVT) are written here. Overridable via env.
+PRC_VAULT = Path(os.getenv("PRC_AI_VAULT", r"C:/Users/Asus/Downloads/PRC_AI_Vault"))
+PRC_VAULT.mkdir(parents=True, exist_ok=True)
+
 try:
 
-    hviel_engine = HvielDocEngine(output_dir=".")
+    hviel_engine = HvielDocEngine(output_dir=str(PRC_VAULT))
 
 except Exception as _he:
 
@@ -8260,11 +8265,12 @@ async def list_skills_endpoint():
     return {"skills": skills_list}
 
 
-# Resolved once at startup; files are written to CWD by HvielDocEngine(output_dir=".")
+# Resolved once at startup; chat-generated docs are written to the shared PRC vault
+# by HvielDocEngine(output_dir=str(PRC_VAULT)) and served from here.
 
 import pathlib as _pathlib
 
-_DOWNLOAD_ROOT = _pathlib.Path(".").resolve()
+_DOWNLOAD_ROOT = PRC_VAULT.resolve()
 
 
 
@@ -9279,8 +9285,8 @@ async def download_report(
         if "\x00" in filename:
             raise HTTPException(status_code=400, detail="Null bytes are strictly prohibited.")
             
-        # Serve from the reports/ subdirectory with path-containment guard (CWE-22)
-        reports_root = Path.cwd() / "reports"
+        # Serve from the shared PRC vault with path-containment guard (CWE-22)
+        reports_root = PRC_VAULT
         target = (reports_root / Path(filename).name).resolve()
 
         if not str(target).startswith(str(reports_root.resolve())):
