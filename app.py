@@ -46,7 +46,7 @@ except Exception:
     pass
 
 from pathlib import Path
-import os, io, uuid, time, re, hmac, hashlib, secrets as _secrets
+import os, io, uuid, time, re, hmac, hashlib, csv, secrets as _secrets
 import json as _json, logging, threading, asyncio
 import anyio
 
@@ -6961,7 +6961,6 @@ def delete_session(
 
 
 def parse_q0_questions(text: str) -> list[tuple[str, str]]:
-    import csv
     questions = []
     lines = text.split('\n')
     in_q0_sheet = False
