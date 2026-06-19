@@ -1,6 +1,5 @@
 from pathlib import Path
 import re
-import json
 import numpy as np
 
 def _read_excel(filepath):
