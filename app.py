@@ -6085,23 +6085,29 @@ class KnowledgeBase:
 
                 
 
-                for source, chunk, vec in chunk_data:
+                BATCH_SIZE = 100
+                for i in range(0, len(chunk_data), BATCH_SIZE):
+                    batch = chunk_data[i:i+BATCH_SIZE]
+                    kb_data = [(sid, email, source, chunk) for source, chunk, _ in batch]
+
+                    placeholders = ",".join([f"({ph},{ph},{ph},{ph})"] * len(batch))
+                    flat_kb_data = [item for sublist in kb_data for item in sublist]
 
                     if ph == "?":
-
-                        cur.execute("INSERT INTO kb (sid, user_email, source, chunk) VALUES (?,?,?,?)", (sid, email, source, chunk))
-
-                        chunk_id = cur.lastrowid
-
+                        cur.execute(f"INSERT INTO kb (sid, user_email, source, chunk) VALUES {placeholders} RETURNING id", flat_kb_data)
                     else:
+                        cur.execute(f"INSERT INTO kb (sid, user_email, source, chunk) VALUES {placeholders} RETURNING id", flat_kb_data)
 
-                        cur.execute("INSERT INTO kb (sid, user_email, source, chunk) VALUES (%s,%s,%s,%s) RETURNING id", (sid, email, source, chunk))
+                    ids = [row[0] for row in cur.fetchall()]
 
-                        chunk_id = cur.fetchone()[0]
+                    vec_data = []
+                    for j, (_, _, vec) in enumerate(batch):
+                        if vec is not None:
+                            vec_data.extend([ids[j], vec.tobytes()])
 
-                    if vec is not None:
-
-                        cur.execute(f"INSERT INTO kb_vectors (chunk_id, embedding) VALUES ({ph},{ph})", (chunk_id, vec.tobytes()))
+                    if vec_data:
+                        vec_placeholders = ",".join([f"({ph},{ph})"] * (len(vec_data) // 2))
+                        cur.execute(f"INSERT INTO kb_vectors (chunk_id, embedding) VALUES {vec_placeholders}", tuple(vec_data))
 
                 conn.commit()
 
