@@ -46,7 +46,7 @@ except Exception:
     pass
 
 from pathlib import Path
-import os, io, uuid, time, re, hmac, hashlib, secrets as _secrets
+import os, uuid, time, re, hmac, hashlib, secrets as _secrets
 import json as _json, logging, threading, asyncio
 import anyio
 
