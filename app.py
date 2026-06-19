@@ -6682,7 +6682,7 @@ async def user_login(pin: str = Form(...)):
 
     target_pin = ADMIN_PIN
 
-    if pin != target_pin:
+    if not hmac.compare_digest(pin, target_pin):
 
         _logger.warning(f"[AUTH] Failed user login attempt with code: {pin}")
 
@@ -6702,7 +6702,7 @@ async def admin_login(pin: str = Form(...)):
 
     target_pin = ADMIN_PIN
 
-    if pin != target_pin:
+    if not hmac.compare_digest(pin, target_pin):
 
         _logger.warning(f"[ADMIN] Failed login attempt with PIN: {pin}")
 
@@ -8231,7 +8231,7 @@ async def dl(
     verify_user_or_admin(authorization=authorization, token=token, email_query=user_email)
     target = (_DOWNLOAD_ROOT / _pathlib.Path(filename).name).resolve()
 
-    if not str(target).startswith(str(_DOWNLOAD_ROOT)):
+    if not target.is_relative_to(_DOWNLOAD_ROOT):
 
         raise HTTPException(status_code=403, detail="Access denied")
 
@@ -9236,7 +9236,7 @@ async def download_report(
         reports_root = Path.cwd() / "reports"
         target = (reports_root / Path(filename).name).resolve()
 
-        if not str(target).startswith(str(reports_root.resolve())):
+        if not target.is_relative_to(reports_root.resolve()):
             raise HTTPException(status_code=403, detail="Access denied")
 
         if not target.is_file():
@@ -9321,7 +9321,7 @@ async def serve_spa(full_path: str):
 
     candidate = (_DIST_DIR_PATH / full_path).resolve()
 
-    if not str(candidate).startswith(str(_DIST_DIR_PATH)):
+    if not candidate.is_relative_to(_DIST_DIR_PATH):
 
         raise HTTPException(status_code=403, detail="Access denied")
 
