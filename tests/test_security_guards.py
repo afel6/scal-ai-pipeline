@@ -97,3 +97,62 @@ def test_scal_sanitize_prompt():
         except Exception:
             pass
 
+
+def test_path_traversal_startswith_vulnerability():
+    from fastapi.testclient import TestClient
+    import app as main_app
+    from pathlib import Path
+    import os
+
+    # We will test the `serve_spa` route which takes `/{full_path:path}`
+    client = TestClient(main_app.app)
+
+    # Set up a mock "dist" and "dist_hacked" directory structure
+    import tempfile
+    with tempfile.TemporaryDirectory() as tmp_base:
+        base_dir = Path(tmp_base)
+        dist_dir = base_dir / "dist"
+        dist_hacked = base_dir / "dist_hacked"
+        dist_dir.mkdir()
+        dist_hacked.mkdir()
+
+        # Create a file in dist_hacked that should NOT be accessible
+        secret_file = dist_hacked / "secret.txt"
+        secret_file.write_text("SUPER_SECRET")
+
+        # Create a legitimate file in dist
+        legit_file = dist_dir / "app.js"
+        legit_file.write_text("console.log('hi');")
+
+        # Mock _DIST_DIR_PATH in app module
+        original_dist_dir = main_app._DIST_DIR_PATH
+        main_app._DIST_DIR_PATH = dist_dir.resolve()
+
+        try:
+            import httpx
+
+            # 1. Access legitimate file
+            response = client.get("/app.js")
+            assert response.status_code == 200, f"Expected 200 for legit file, got {response.status_code}"
+            assert response.text == "console.log('hi');"
+
+            # 2. Access the hacked file using traversal: `../dist_hacked/secret.txt`
+            # Starlette TestClient strips `../` by default before it reaches the app.
+            # We must use raw HTTPX Transport to test the path matching logic accurately,
+            # using an unnormalized path string to bypass client-side sanitization.
+            transport = httpx.ASGITransport(app=main_app.app)
+            async_client = httpx.AsyncClient(transport=transport, base_url="http://testserver")
+            import asyncio
+
+            async def send_traversal_request():
+                req = async_client.build_request("GET", "http://testserver/%2E%2E/dist_hacked/secret.txt")
+                return await async_client.send(req)
+
+            response = asyncio.run(send_traversal_request())
+
+            # If the vulnerability is fixed, it should return 403 Access denied
+            assert response.status_code == 403, f"Expected 403 Forbidden due to traversal, got {response.status_code}"
+
+        finally:
+            # Restore original state
+            main_app._DIST_DIR_PATH = original_dist_dir
