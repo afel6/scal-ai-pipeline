@@ -1,0 +1,4 @@
+## 2025-02-27 - [Fix Path Traversal in File Download and SPA Serve Routes]
+**Vulnerability:** Path traversal bypasses were possible because `str.startswith()` was used to verify path containment in `/api/download`, `/api/report/download`, and SPA serve routes. An attacker could craft a payload (e.g., matching a prefix like `/dist-secret` if `/dist` was the root) to escape the intended directory and access unauthorized files.
+**Learning:** `str.startswith()` is insecure for validating path hierarchies because it matches string prefixes, not path segments. This allows bypasses when a sibling directory shares the same prefix.
+**Prevention:** Always use `pathlib.Path.is_relative_to()` or `os.path.commonpath()` for path containment checks, which correctly parse and enforce directory boundaries.
