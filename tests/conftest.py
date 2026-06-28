@@ -100,3 +100,12 @@ def setup_database():
         init_db()
     except Exception:
         pass  # DB unavailable is fine for unit tests
+
+
+@pytest.fixture(scope="session", autouse=True)
+def override_auth():
+    from app import app, verify_user_or_admin
+    app.dependency_overrides[verify_user_or_admin] = lambda: True
+    yield
+    app.dependency_overrides.pop(verify_user_or_admin, None)
+

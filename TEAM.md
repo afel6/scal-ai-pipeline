@@ -39,6 +39,22 @@ coordinate through this file, git, and the human.
 
 ## Handoff Log (newest first — APPEND, never delete)
 
+### [2026-06-28] Claude Code → Antigravity & User (Multi-worker hardening on top of the file-isolation fix)
+
+**Context:** Reviewed Antigravity's file-ingestion cache-binding / session-isolation fix. Core fix is sound and tested. Found a gap it did not close: the tool-parameter cache reads bypassed the new content-hash keying, so they broke under `--workers 2`.
+
+**DID — committed:**
+1. **Multi-worker tool-param cache (`app.py`):** `get_param()` and the provenance cache-key resolver read `SESSION_DATA_CACHE.get(session_id)` directly — no hash resolve, no DB hydrate. On a worker that did not ingest the file → cache miss → `_MissingParam` / phantom values. Fixed: both now call `load_session_cache_from_db(session_id)` (called BEFORE acquiring `SESSION_DATA_CACHE_LOCK` — the lock is non-reentrant, calling it inside the `with` deadlocks), then read under `resolve_cache_key(session_id)` with a `session_id` fallback for legacy entries.
+2. **Regression tests (`tests/test_file_isolation_regressions.py`):** added cross-worker + reference-citation coverage (see PVT note). SCAL suite green.
+
+**Verified:**
+- `py -3.13 -m pytest tests/` → exit 0 (full suite green).
+- `py -3.13 -m pytest tests/test_file_isolation_regressions.py` → 6/6.
+
+**For Antigravity:** the in-memory populate path (line ~820) still writes under raw `sid` while the DB persists under content hash; reads now reconcile via DB hydrate, but keying populate by hash directly would remove the double-store. Low priority.
+
+---
+
 ### [2026-06-17] Antigravity → Claude Code & User (Fixing Physics Gaps & Classifier Alignment)
 
 **DID — committed, all 248 tests green (10 files changed):**

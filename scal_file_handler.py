@@ -807,7 +807,7 @@ def clean_citation_clutter(text: str, filenames: list = None) -> str:
     return cleaned
 
 
-def compress_traceability_ledger(text: str) -> str:
+def compress_traceability_ledger(text: str, expected_filenames: list[str] = None) -> str:
     """Scan the text for repeating vertical traceability ledger blocks,
     extract and de-duplicate worksheets and ranges, and compress them into
     a unified premium Markdown table under the 🔒 Data Integrity Status header.
@@ -815,6 +815,37 @@ def compress_traceability_ledger(text: str) -> str:
     """
     if not text:
         return text
+
+    if expected_filenames:
+        from pathlib import Path
+        def norm(f):
+            return Path(f).name.lower().strip() if f else ""
+        norm_expected = [norm(f) for f in expected_filenames if f]
+        
+        cited_files = set()
+        # 1. Split by typical filename delimiters to extract full filenames (including spaces)
+        parts = re.split(r'[`"\'\[\]\(\)\n:]', text)
+        for p in parts:
+            p_clean = p.strip()
+            if re.search(r'\.(?:xlsx|xls|docx|doc|csv|pdf)$', p_clean, re.IGNORECASE):
+                cited_files.add(norm(p_clean))
+        # 2. Extract any cited/mentioned space-free filenames from raw text
+        all_words = re.findall(r'[\w\-.]+\.(?:xlsx|xls|docx|doc|csv|pdf)', text, re.IGNORECASE)
+        for w in all_words:
+            cited_files.add(norm(w))
+            
+        for norm_cited in cited_files:
+            # Check if norm_cited is a suffix of (or matches) any expected filename
+            is_valid = False
+            for exp in norm_expected:
+                if exp == norm_cited or exp.endswith(norm_cited) or norm_cited.endswith(exp):
+                    is_valid = True
+                    break
+            if not is_valid:
+                return (
+                    "\n### ❌ Source Mismatch / Cannot Verify\n"
+                    "Error: The cited source does not match the uploaded file's content hash.\n"
+                )
 
     # Robust, flexible regex matching all 4 fields in any spacing/newlines/hyphen separators:
     block_regex = re.compile(

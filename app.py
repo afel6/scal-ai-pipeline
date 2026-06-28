@@ -49,6 +49,7 @@ from pathlib import Path
 import os, io, uuid, time, re, hmac, hashlib, secrets as _secrets
 import json as _json, logging, threading, asyncio
 import anyio
+from config import settings
 
 GLOBAL_EVENT_LOOP = None
 
@@ -101,14 +102,8 @@ defusedxml.defuse_stdlib()
 
 
 
-logging.basicConfig(
-
-    level=logging.INFO,
-
-    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
-
-)
-
+from logger_setup import request_id_var, setup_logging
+setup_logging(settings.DEBUG)
 _logger = logging.getLogger("PRC-Hub")
 
 
@@ -127,9 +122,11 @@ except Exception:
 
 
 
-# -- RATE LIMITER (optional dep) -----------------------------------------------
+# -- RATE LIMITER --------------------------------------------------------------
 
 try:
+
+    import sys
 
     from slowapi import Limiter, _rate_limit_exceeded_handler
 
@@ -137,7 +134,12 @@ try:
 
     from slowapi.errors import RateLimitExceeded
 
-    _limiter = Limiter(key_func=get_remote_address)
+    _limiter = Limiter(
+        key_func=get_remote_address,
+        default_limits=["60/minute"],
+        storage_uri=settings.REDIS_URL or "memory://",
+        enabled=not (settings.TESTING or "pytest" in sys.modules or "PYTEST_CURRENT_TEST" in os.environ)
+    )
 
     _RATE_LIMIT = True
 
@@ -151,27 +153,11 @@ except ImportError:
 
 # -- SECRETS -------------------------------------------------------------------
 
-_GEMINI_POOL_RAW: list[str] = []
+GEMINI_KEY_POOL: list[str] = settings.gemini_keys
 
-for _k, _v in os.environ.items():
+KB_INGEST_SECRET = settings.KB_INGEST_SECRET
 
-    if _k.startswith("GEMINI_API_KEY"):
-
-        _GEMINI_POOL_RAW.extend(x.strip() for x in _v.split(",") if x.strip())
-
-
-
-GEMINI_KEY_POOL: list[str] = list(dict.fromkeys(_GEMINI_POOL_RAW)) or [
-
-    os.getenv("GEMINI_API_KEY", "DUMMY_KEY").strip(' \n\r\t"\'')
-
-]
-
-
-
-KB_INGEST_SECRET = os.getenv("KB_INGEST_SECRET", "").strip()
-
-ADMIN_PIN        = os.getenv("ADMIN_PIN", "").strip()
+ADMIN_PIN        = settings.ADMIN_PIN
 
 
 
@@ -183,9 +169,9 @@ _ADMIN_TOKEN_TTL: int              = 900  # 15 min
 
 # -- DATABASE LAYER ------------------------------------------------------------
 
-DATABASE_URL  = os.getenv("DATABASE_URL", "").strip()
+DATABASE_URL  = settings.DATABASE_URL
 
-DB_PATH       = str(Path(os.getenv("DB_DIR", ".")) / "chat_history.db")
+DB_PATH       = str(Path(settings.DB_DIR) / "chat_history.db")
 
 
 
@@ -235,7 +221,7 @@ _sqlite_executor = ThreadPoolExecutor(max_workers=1)
 
 def is_testing() -> bool:
     """Returns True if running in a test suite (pytest)."""
-    return "pytest" in sys.modules or "PYTEST_CURRENT_TEST" in os.environ or os.getenv("TESTING") == "true"
+    return "pytest" in sys.modules or "PYTEST_CURRENT_TEST" in os.environ or settings.TESTING
 
 def normalize_porosity_array(arr: np.ndarray) -> np.ndarray:
     """Normalize porosity numpy array: convert percentage format (e.g. > 1.0) into fractional format (Security/Data issue 1)."""
@@ -263,17 +249,13 @@ def verify_user_or_admin(
     user_email: Optional[str] = Form(None),
     email_query: Optional[str] = Query(None)
 ):
-    """Enforces token-based or email-based authentication on all user-facing endpoints (Security Issue 1)."""
-    # 1. Allow bypass in pytest/testing environment
-    if is_testing():
-        return True
+    """Enforces token-based authentication on all user-facing endpoints (Security Issue 1)."""
+
 
     # Safely extract string values from FastAPI defaults
     auth_str = authorization if isinstance(authorization, str) else None
     token_str = token if isinstance(token, str) else None
     token_form_str = token_form if isinstance(token_form, str) else None
-    user_email_str = user_email if isinstance(user_email, str) else None
-    email_query_str = email_query if isinstance(email_query, str) else None
 
     # Normalize token input
     t = None
@@ -292,12 +274,7 @@ def verify_user_or_admin(
             return True
         raise HTTPException(status_code=401, detail="Invalid or expired token")
 
-    # 3. Fallback to user email if provided
-    req_email = normalize_email(user_email_str or email_query_str)
-    if not req_email:
-        raise HTTPException(status_code=401, detail="Authentication required: Token or email must be provided.")
-
-    return True
+    raise HTTPException(status_code=401, detail="Authentication token required")
 
 def sanitize_prompt(prompt: str) -> str:
     """Sanitizes user prompt inputs against prompt injection attacks (Security Issue 3)."""
@@ -684,6 +661,8 @@ def _extract_petrophysical_summary(response_text: str, file_name: str) -> dict:
     try:
         client = genai_new.Client(api_key=GEMINI_KEY_POOL[0])
         resp = client.models.generate_content(model="gemini-2.5-flash", contents=prompt)
+        import alerting
+        alerting.record_llm_success()
         raw = ""
         if resp and resp.candidates and resp.candidates[0].content:
             raw = "".join(p.text for p in (resp.candidates[0].content.parts or []) if p.text)
@@ -695,6 +674,8 @@ def _extract_petrophysical_summary(response_text: str, file_name: str) -> dict:
                 raw = raw[4:]
         return _json.loads(raw.strip())
     except Exception as e:
+        import alerting
+        alerting.record_llm_failure(str(e))
         _logger.warning(f"[Summary] Extraction failed for {file_name}: {e}")
         return {}
 
@@ -1179,9 +1160,10 @@ def find_cached_vector(sid: str, aliases: list) -> list:
     """Fuzzy matches keys in flat_vectors to aliases and returns the first matched list of floats."""
     if not sid:
         return []
-    load_session_cache_from_db(sid)
+    fhash = resolve_cache_key(sid)
+    load_session_cache_from_db(fhash)
     with SESSION_DATA_CACHE_LOCK:
-        flat = SESSION_DATA_CACHE.get(sid, {}).get("flat_vectors", {})
+        flat = SESSION_DATA_CACHE.get(fhash, {}).get("flat_vectors", {})
         for alias in aliases:
             a_clean = alias.lower().replace(" ", "").replace("_", "")
             for k, vals in flat.items():
@@ -1202,14 +1184,15 @@ def find_aligned_bca_columns(sid: str):
     if not sid:
         return None, None, None, None, False
         
-    load_session_cache_from_db(sid)
+    fhash = resolve_cache_key(sid)
+    load_session_cache_from_db(fhash)
     
     porosity_aliases = ["porosity", "por", "phit", "phi", "porosity (%)", "por (%)"]
     permeability_aliases = ["k air", "kair", "k_air", "perm", "k (md)", "kh", "ka", "permeability", "k horizontal"]
     depth_aliases = ["depth", "depth (ft)", "depth (m)", "md", "tvd"]
     
     with SESSION_DATA_CACHE_LOCK:
-        raw_excel = SESSION_DATA_CACHE.get(sid, {}).get("raw_excel_data", {})
+        raw_excel = SESSION_DATA_CACHE.get(fhash, {}).get("raw_excel_data", {})
         if not raw_excel:
             return None, None, None, None, False
             
@@ -1293,10 +1276,11 @@ def find_aligned_columns(sid: str, expected_aliases: dict):
     if not sid:
         return None
         
-    load_session_cache_from_db(sid)
+    fhash = resolve_cache_key(sid)
+    load_session_cache_from_db(fhash)
     
     with SESSION_DATA_CACHE_LOCK:
-        raw_excel = SESSION_DATA_CACHE.get(sid, {}).get("raw_excel_data", {})
+        raw_excel = SESSION_DATA_CACHE.get(fhash, {}).get("raw_excel_data", {})
         if not raw_excel:
             return None
             
@@ -1377,9 +1361,14 @@ def calculate_derived_value(formula_id: str, inputs_str: str, session_id: str):
         name_lower = name.lower()
         if name_lower in inputs:
             return inputs[name_lower]
-        # Fallback strictly to validated cache lookup only
+        # Fallback strictly to validated cache lookup only.
+        # Resolve to the content-hash key and hydrate from DB first so any
+        # worker (multi-process) sees the upload, not just the one that ingested.
+        load_session_cache_from_db(session_id)          # acquires lock itself
+        _fhash = resolve_cache_key(session_id)
         with SESSION_DATA_CACHE_LOCK:
-            cache = SESSION_DATA_CACHE.get(session_id, {})
+            cache = (SESSION_DATA_CACHE.get(_fhash)
+                     or SESSION_DATA_CACHE.get(session_id, {}))
             labeled = cache.get("labeled_values", {})
             if name_lower in labeled:
                 return float(labeled[name_lower])
@@ -1469,8 +1458,11 @@ def process_provenance_tokens(llm_response_text: str, session_id: str) -> str:
             
         cache_key_norm = normalize_key(cache_key)
         val = None
+        load_session_cache_from_db(session_id)          # acquires lock itself
+        _fhash = resolve_cache_key(session_id)
         with SESSION_DATA_CACHE_LOCK:
-            cache = SESSION_DATA_CACHE.get(session_id, {})
+            cache = (SESSION_DATA_CACHE.get(_fhash)
+                     or SESSION_DATA_CACHE.get(session_id, {}))
             labeled = cache.get("labeled_values", {})
             
             # Direct match
@@ -2440,8 +2432,12 @@ def _call_gemini_with_retry(client, model, contents, config, max_retries=5, base
             except Exception as usage_err:
                 _logger.warning(f"[CostTracker] Failed to log usage from generate_content: {usage_err}")
                 
+            import alerting
+            alerting.record_llm_success()
             return compat_resp
         except Exception as e:
+            import alerting
+            alerting.record_llm_failure(str(e))
             err = (str(e) + " " + str(getattr(e, "__cause__", "")) + " " + str(getattr(e, "__context__", ""))).lower()
             is_503 = any(x in err for x in ["503", "service_unavailable", "unavailable"])
             is_429 = any(x in err for x in ["429", "resource_exhausted"])
@@ -2470,8 +2466,10 @@ def _call_gemini_with_retry(client, model, contents, config, max_retries=5, base
                             )
                     except Exception as usage_err:
                         _logger.warning(f"[CostTracker] Failed to log usage from fallback: {usage_err}")
+                    alerting.record_llm_success()
                     return compat_resp
                 except Exception as fallback_err:
+                    alerting.record_llm_failure(str(fallback_err))
                     raise ValueError(f"CRITICAL: Both primary and fallback models are UNAVAILABLE. {fallback_err}")
                     
             if (is_503 or is_429) and attempt < max_retries - 1:
@@ -2635,6 +2633,8 @@ def _call_gemini_stream_with_retry(client, model, contents, config, max_retries=
                     yield compat_chunk
                 elif item["type"] == "done":
                     final_res = GenerateResponse.model_validate(item["response"])
+                    import alerting
+                    alerting.record_llm_success()
                     break
                 elif item["type"] == "error":
                     raise ValueError(item["error"])
@@ -2655,6 +2655,8 @@ def _call_gemini_stream_with_retry(client, model, contents, config, max_retries=
                 _logger.warning(f"[CostTracker] Failed to log usage from stream: {usage_err}")
             return
         except Exception as e:
+            import alerting
+            alerting.record_llm_failure(str(e))
             err = (str(e) + " " + str(getattr(e, "__cause__", "")) + " " + str(getattr(e, "__context__", ""))).lower()
             is_503 = any(x in err for x in ["503", "service_unavailable", "unavailable"])
             is_429 = any(x in err for x in ["429", "resource_exhausted"])
@@ -2694,6 +2696,7 @@ def _call_gemini_stream_with_retry(client, model, contents, config, max_retries=
                             yield compat_chunk
                         elif item["type"] == "done":
                             final_res = GenerateResponse.model_validate(item["response"])
+                            alerting.record_llm_success()
                             break
                         elif item["type"] == "error":
                             raise ValueError(item["error"])
@@ -2714,6 +2717,7 @@ def _call_gemini_stream_with_retry(client, model, contents, config, max_retries=
                         _logger.warning(f"[CostTracker] Failed to log usage from pro stream fallback: {usage_err}")
                     return
                 except Exception as fallback_err:
+                    alerting.record_llm_failure(str(fallback_err))
                     raise ValueError(f"CRITICAL: Both primary and fallback models are UNAVAILABLE. {fallback_err}")
                 finally:
                     GLOBAL_STREAM_QUEUES.pop(pro_stream_id, None)
@@ -3053,9 +3057,10 @@ class PRCChatAssistant:
                     elif model == "xrd_mineralogy":
                         minerals = p.get("minerals")
                         if not minerals:
-                            load_session_cache_from_db(sid)
+                            fhash_xrd = resolve_cache_key(sid)
+                            load_session_cache_from_db(fhash_xrd)
                             with SESSION_DATA_CACHE_LOCK:
-                                raw_excel = SESSION_DATA_CACHE.get(sid, {}).get("raw_excel_data", {})
+                                raw_excel = SESSION_DATA_CACHE.get(fhash_xrd, {}).get("raw_excel_data", {})
                             if raw_excel:
                                 for sheet_name, sheet_dict in raw_excel.items():
                                     aligned = sheet_dict.get("__aligned_vectors__")
@@ -4466,9 +4471,10 @@ class PRCChatAssistant:
                         _, s_name = find_aligned_columns(sid, expected_dict)
                         sheet_name = s_name
                     elif model == "xrd_mineralogy":
-                        load_session_cache_from_db(sid)
+                        fhash_xrd2 = resolve_cache_key(sid)
+                        load_session_cache_from_db(fhash_xrd2)
                         with SESSION_DATA_CACHE_LOCK:
-                            raw_excel = SESSION_DATA_CACHE.get(sid, {}).get("raw_excel_data", {})
+                            raw_excel = SESSION_DATA_CACHE.get(fhash_xrd2, {}).get("raw_excel_data", {})
                         if raw_excel:
                             for s_name, sheet_dict in raw_excel.items():
                                 aligned = sheet_dict.get("__aligned_vectors__")
@@ -5096,23 +5102,32 @@ class PRCChatAssistant:
         # This is what makes Hviel work like Claude/Gemini — the full document is always available.
         if not extracted_context and sid and email:
             try:
-                fname_rows = db(
-                    "SELECT DISTINCT fname FROM (SELECT fname FROM m WHERE sid=? AND user_email=? AND fname IS NOT NULL ORDER BY id DESC) sub",
+                file_rows = db(
+                    "SELECT DISTINCT fname, file_hash FROM (SELECT fname, file_hash FROM m WHERE sid=? AND user_email=? AND fname IS NOT NULL ORDER BY id DESC) sub",
                     (sid, email),
                 )
                 _seen_fn: set = set()
-                session_fnames: list = []
-                for _raw_fn in [r[0] for r in (fname_rows or []) if r[0]]:
-                    for _fn in _raw_fn.split(";"):
-                        _fn = _fn.strip()
-                        if _fn and _fn not in _seen_fn:
-                            session_fnames.append(_fn)
-                            _seen_fn.add(_fn)
-                for _sfname in session_fnames[:5]:  # Up to 5 files per session
-                    stored = db(
-                        "SELECT extracted_text FROM user_files WHERE user_email=? AND filename=?",
-                        (email, _sfname),
-                    )
+                session_files: list = []
+                for row in (file_rows or []):
+                    _raw_fn = row[0]
+                    _fhash = row[1]
+                    if _raw_fn:
+                        for _fn in _raw_fn.split(";"):
+                            _fn = _fn.strip()
+                            if _fn and _fn not in _seen_fn:
+                                session_files.append((_fn, _fhash))
+                                _seen_fn.add(_fn)
+                for _sfname, _sfhash in session_files[:5]:  # Up to 5 files per session
+                    if _sfhash:
+                        stored = db(
+                            "SELECT extracted_text FROM user_files WHERE user_email=? AND file_hash=?",
+                            (email, _sfhash),
+                        )
+                    else:
+                        stored = db(
+                            "SELECT extracted_text FROM user_files WHERE user_email=? AND filename=?",
+                            (email, _sfname),
+                        )
                     if stored and stored[0][0]:
                         _ext = Path(_sfname).suffix.lower()
                         _label = "SPREADSHEET" if _ext in (".xlsx", ".xls", ".csv") else "WORD DOCUMENT" if _ext == ".docx" else "DOCUMENT"
@@ -5799,25 +5814,32 @@ class PRCChatAssistant:
         # document generation request.
         if not file_context and sid and email:
             try:
-                fname_rows = db(
-                    "SELECT DISTINCT fname FROM (SELECT fname FROM m WHERE sid=? AND user_email=? AND fname IS NOT NULL ORDER BY id DESC) sub",
+                file_rows = db(
+                    "SELECT DISTINCT fname, file_hash FROM (SELECT fname, file_hash FROM m WHERE sid=? AND user_email=? AND fname IS NOT NULL ORDER BY id DESC) sub",
                     (sid, email),
                 )
-                # fname values may be semicolon-delimited (multiple files uploaded
-                # in one message) — split and de-duplicate while preserving order.
                 _seen_fn: set = set()
-                session_fnames: list = []
-                for _raw_fn in [r[0] for r in (fname_rows or []) if r[0]]:
-                    for _fn in _raw_fn.split(";"):
-                        _fn = _fn.strip()
-                        if _fn and _fn not in _seen_fn:
-                            session_fnames.append(_fn)
-                            _seen_fn.add(_fn)
-                for _sfname in session_fnames[:10]:
-                    stored = db(
-                        "SELECT extracted_text FROM user_files WHERE user_email=? AND filename=?",
-                        (email, _sfname),
-                    )
+                session_files: list = []
+                for row in (file_rows or []):
+                    _raw_fn = row[0]
+                    _fhash = row[1]
+                    if _raw_fn:
+                        for _fn in _raw_fn.split(";"):
+                            _fn = _fn.strip()
+                            if _fn and _fn not in _seen_fn:
+                                session_files.append((_fn, _fhash))
+                                _seen_fn.add(_fn)
+                for _sfname, _sfhash in session_files[:10]:
+                    if _sfhash:
+                        stored = db(
+                            "SELECT extracted_text FROM user_files WHERE user_email=? AND file_hash=?",
+                            (email, _sfhash),
+                        )
+                    else:
+                        stored = db(
+                            "SELECT extracted_text FROM user_files WHERE user_email=? AND filename=?",
+                            (email, _sfname),
+                        )
                     if stored and stored[0][0]:
                         file_context += f"\n\n[UPLOADED FILE: {_sfname}]\n{stored[0][0]}\n"
                         _logger.info(f"[DocGen] Recovered stored extracted_text for {_sfname} ({len(stored[0][0])} chars)")
@@ -6334,7 +6356,7 @@ def init_db() -> None:
 
     base_stmts = [
 
-        "CREATE TABLE IF NOT EXISTS m (id INTEGER PRIMARY KEY AUTOINCREMENT, sid TEXT, role TEXT, text TEXT, url TEXT, ts REAL, user_email TEXT, fname TEXT)",
+        "CREATE TABLE IF NOT EXISTS m (id INTEGER PRIMARY KEY AUTOINCREMENT, sid TEXT, role TEXT, text TEXT, url TEXT, ts REAL, user_email TEXT, fname TEXT, file_hash TEXT)",
 
         "CREATE TABLE IF NOT EXISTS sessions (sid TEXT PRIMARY KEY, title TEXT NOT NULL DEFAULT 'New Study', user_email TEXT, created_at REAL, updated_at REAL)",
 
@@ -6422,6 +6444,14 @@ def init_db() -> None:
         except Exception: 
             pass
 
+    try:
+        with _get_conn() as (conn, ph):
+            cur = conn.cursor()
+            cur.execute("ALTER TABLE m ADD COLUMN file_hash TEXT")
+            conn.commit()
+    except Exception:
+        pass
+
     # Backfill existing m rows  ->  sessions table (migration for pre-existing installs)
 
     try:
@@ -6476,6 +6506,37 @@ async def lifespan(app: FastAPI):
         limiter.total_tokens = 100
     except Exception as e:
         _logger.warning(f"Failed to set AnyIO thread limit: {e}")
+        
+    # Write openapi.json on startup
+    try:
+        from fastapi.openapi.utils import get_openapi
+        openapi_schema = get_openapi(
+            title=app.title,
+            version=app.version,
+            openapi_version=app.openapi_version,
+            description=app.description,
+            routes=app.routes,
+        )
+        written = False
+        try:
+            vault_dir = Path(settings.PRC_AI_VAULT)
+            vault_dir.mkdir(parents=True, exist_ok=True)
+            openapi_path = vault_dir / "openapi.json"
+            with open(openapi_path, "w", encoding="utf-8") as f:
+                _json.dump(openapi_schema, f, indent=2)
+            _logger.info(f"OpenAPI schema successfully written to vault: {openapi_path}")
+            written = True
+        except Exception as vault_err:
+            _logger.warning(f"Could not write OpenAPI schema to vault ({vault_err}). Trying fallback to current directory.")
+            
+        if not written:
+            openapi_path = Path("openapi.json")
+            with open(openapi_path, "w", encoding="utf-8") as f:
+                _json.dump(openapi_schema, f, indent=2)
+            _logger.info(f"OpenAPI schema successfully written to fallback: {openapi_path.resolve()}")
+    except Exception as oe:
+        _logger.error(f"Failed to export OpenAPI schema: {oe}")
+
     try:
         yield
     finally:
@@ -6483,24 +6544,108 @@ async def lifespan(app: FastAPI):
 
 
 
-app = FastAPI(lifespan=lifespan)
+is_prod = not (settings.DEBUG or settings.TESTING)
+docs_url = None if is_prod else "/docs"
+redoc_url = None if is_prod else "/redoc"
+openapi_url = None if is_prod else "/openapi.json"
+
+app = FastAPI(
+    lifespan=lifespan,
+    docs_url=docs_url,
+    redoc_url=redoc_url,
+    openapi_url=openapi_url
+)
 
 if _RATE_LIMIT:
-
     app.state.limiter = _limiter
 
-    app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
+# Global Exception Handlers
+from fastapi.exceptions import RequestValidationError
+from starlette.exceptions import HTTPException as StarletteHTTPException
+import traceback
+import alerting
 
+@app.exception_handler(RateLimitExceeded)
+async def rate_limit_handler(request: Request, exc: RateLimitExceeded):
+    req_id = request_id_var.get("-")
+    headers = {"Retry-After": "60"}
+    content = {
+        "error": f"Rate limit exceeded: {exc.detail or str(exc)}",
+        "code": 429,
+        "request_id": req_id
+    }
+    _logger.warning(f"Rate limit exceeded for client {request.client.host if request.client else 'unknown'}: {exc.detail}")
+    return JSONResponse(status_code=429, content=content, headers=headers)
 
+@app.exception_handler(StarletteHTTPException)
+async def http_exception_handler(request: Request, exc: StarletteHTTPException):
+    req_id = request_id_var.get("-")
+    content = {
+        "error": exc.detail,
+        "code": exc.status_code,
+        "request_id": req_id
+    }
+    _logger.error(f"HTTPException status={exc.status_code} detail={exc.detail} request_id={req_id}")
+    return JSONResponse(status_code=exc.status_code, content=content)
+
+@app.exception_handler(RequestValidationError)
+async def validation_exception_handler(request: Request, exc: RequestValidationError):
+    req_id = request_id_var.get("-")
+    errors_detail = str(exc.errors())
+    content = {
+        "error": f"Validation failed: {errors_detail}",
+        "code": 422,
+        "request_id": req_id
+    }
+    _logger.error(f"Validation error: {errors_detail} request_id={req_id}")
+    return JSONResponse(status_code=422, content=content)
 
 @app.exception_handler(Exception)
-async def _global_exception_handler(request: Request, exc: Exception):
-    import traceback
-    _logger.error(f"UNHANDLED ERROR {request.method} {request.url.path}: {traceback.format_exc()}")
-    return JSONResponse(
-        status_code=500,
-        content={"error": "Internal server error. Please try again.", "detail": str(exc)},
-    )
+async def unhandled_exception_handler(request: Request, exc: Exception):
+    req_id = request_id_var.get("-")
+    _logger.error(f"Unhandled exception: {str(exc)}\n{traceback.format_exc()} request_id={req_id}")
+    
+    try:
+        alerting.trigger_500_alert(request.url.path, exc)
+    except Exception as alert_err:
+        _logger.error(f"Failed to send alert for unhandled exception: {alert_err}")
+
+    is_prod_env = not (settings.DEBUG or settings.TESTING)
+    if is_prod_env:
+        error_msg = "Internal server error. Please try again."
+    else:
+        error_msg = f"Internal server error: {str(exc)}"
+        
+    content = {
+        "error": error_msg,
+        "code": 500,
+        "request_id": req_id
+    }
+    return JSONResponse(status_code=500, content=content)
+
+# Request ID & Duration Alerting Middleware
+@app.middleware("http")
+async def add_request_id_and_timer(request: Request, call_next):
+    req_id = request.headers.get("X-Request-ID") or request.headers.get("x-request-id") or str(uuid.uuid4())
+    token = request_id_var.set(req_id)
+    start_time = time.time()
+    try:
+        response = await call_next(request)
+        duration = time.time() - start_time
+        
+        # Check if response took > 30s and is not SSE
+        if duration > 30.0:
+            content_type = response.headers.get("content-type", "")
+            if "text/event-stream" not in content_type:
+                try:
+                    alerting.trigger_latency_alert(request.url.path, duration)
+                except Exception as alert_err:
+                    _logger.error(f"Failed to send alert for slow response: {alert_err}")
+                    
+        response.headers["X-Request-ID"] = req_id
+        return response
+    finally:
+        request_id_var.reset(token)
 
 
 
@@ -6570,8 +6715,44 @@ def _verify_session_owner(sid: str, email: str):
 
 
 @app.get("/health")
+def health():
+    db_ok = False
+    db_err = ""
+    try:
+        db("SELECT 1")
+        db_ok = True
+    except Exception as e:
+        db_ok = False
+        db_err = str(e)
 
-def health(): return {"status": "ok", "db": "postgres" if _PG_AVAILABLE else "sqlite"}
+    # Check key pool
+    with _FAILED_KEYS_LOCK:
+        snap = dict(_FAILED_KEYS)
+    now = time.time()
+    cooldown = sum(1 for v in snap.values() if (now - v.get("ts", 0)) < v.get("wait", 0))
+    keys_degraded = len(GEMINI_KEY_POOL) == 0 or (cooldown >= len(GEMINI_KEY_POOL))
+
+    if not db_ok or keys_degraded:
+        details = []
+        if not db_ok:
+            details.append(f"Database connectivity failed: {db_err}")
+        if keys_degraded:
+            details.append(f"AI API Keys pool is degraded (All {len(GEMINI_KEY_POOL)} keys are in cooldown or pool is empty).")
+        
+        try:
+            alerting.send_alert(
+                subject="Degraded Health Check Alert (SCAL Pipeline)",
+                message="\n".join(details)
+            )
+        except Exception as alert_err:
+            _logger.error(f"Failed to send alert for degraded health: {alert_err}")
+            
+        return JSONResponse(
+            status_code=503,
+            content={"status": "degraded", "db": "ok" if db_ok else "fail", "api_keys": "degraded" if keys_degraded else "ok"}
+        )
+
+    return {"status": "ok", "db": "postgres" if _PG_AVAILABLE else "sqlite"}
 
 
 
@@ -7075,14 +7256,19 @@ def detect_multi_question(message: str, sid: str, email: str) -> list[tuple[str,
     # 2. Check if the message is a trigger to answer Q0 questions
     is_trigger = any(x in message.lower() for x in ["solve all", "answer all", "q0", "comprehensive report", "advanced report"])
     if is_trigger and sid and email:
-        rows = db("SELECT fname FROM m WHERE sid=? AND role='user' AND fname IS NOT NULL ORDER BY id DESC LIMIT 1", (sid,))
+        rows = db("SELECT fname, file_hash FROM m WHERE sid=? AND role='user' AND fname IS NOT NULL ORDER BY id DESC LIMIT 1", (sid,))
         fname = rows[0][0] if rows else None
+        fhash = rows[0][1] if rows else None
         if not fname:
-            rows = db("SELECT filename FROM user_files WHERE user_email=? ORDER BY created_at DESC LIMIT 1", (email,))
+            rows = db("SELECT filename, file_hash FROM user_files WHERE user_email=? ORDER BY created_at DESC LIMIT 1", (email,))
             fname = rows[0][0] if rows else None
+            fhash = rows[0][1] if rows else None
         if fname:
             for f in fname.split(';'):
-                row = db("SELECT extracted_text FROM user_files WHERE user_email=? AND filename=?", (email, f))
+                if fhash:
+                    row = db("SELECT extracted_text FROM user_files WHERE user_email=? AND file_hash=?", (email, fhash))
+                else:
+                    row = db("SELECT extracted_text FROM user_files WHERE user_email=? AND filename=?", (email, f))
                 if row and row[0][0]:
                     qs = parse_q0_questions(row[0][0])
                     if qs:
@@ -7090,18 +7276,21 @@ def detect_multi_question(message: str, sid: str, email: str) -> list[tuple[str,
     return []
 
 
-@app.get("/api/chat/stream")
-
+@app.get(
+    "/api/chat/stream",
+    description="Stream chat responses from the SCAL AI Assistant.",
+    responses={
+        429: {"description": "Rate limit exceeded"},
+        500: {"description": "Internal server error"}
+    }
+)
+@_limiter.limit("10/minute")
 async def chat_stream(
-
+    request: Request,
     message:       str,
-
     background_tasks: BackgroundTasks,
-
     session_id:    Optional[str]   = None,
-
     user_email:    Optional[str]   = None,
-
 ):
 
     if session_id in ("null", "undefined", "", None):
@@ -7276,7 +7465,8 @@ async def chat_stream(
                             sub_reply = strip_thinking_blocks(sub_reply)
                             sub_reply = strip_placeholder_artifacts(sub_reply)
                             sub_reply = process_provenance_tokens(sub_reply, sid)
-                            sub_reply = compress_traceability_ledger(sub_reply)
+                            filenames = get_filenames_from_cache(sid)
+                            sub_reply = compress_traceability_ledger(sub_reply, filenames)
                             sub_reply = _extract_and_log_corrections(sid, email, sub_reply)
                             
                             sub_reply += f"\n<!-- CHECKPOINT {q_num} -->"
@@ -7329,7 +7519,8 @@ async def chat_stream(
                         full_reply = strip_thinking_blocks(full_reply)
                         full_reply = strip_placeholder_artifacts(full_reply)
                         full_reply = process_provenance_tokens(full_reply, sid)
-                        full_reply = compress_traceability_ledger(full_reply)
+                        filenames = get_filenames_from_cache(sid)
+                        full_reply = compress_traceability_ledger(full_reply, filenames)
                         full_reply = _extract_and_log_corrections(sid, email, full_reply)
                         db("INSERT INTO m (sid,role,text,ts,user_email) VALUES (?,?,?,?,?)",
                            (sid, "model", full_reply, time.time(), email))
@@ -7486,37 +7677,48 @@ def verify_file_signature(file_bytes: bytes, filename: str) -> bool:
     if not file_bytes:
         return True
     
-    ext = Path(filename.lower()).suffix
-    
-    if ext in ('.xlsx', '.xlsm', '.docx'):
-        # ZIP magic bytes: 'PK\x03\x04'
-        return file_bytes.startswith(b'PK\x03\x04')
+    ext = filename.split(".")[-1].lower() if "." in filename else ""
+    if not ext:
+        return False
         
-    elif ext in ('.xls', '.doc'):
-        # OLE magic bytes: d0 cf 11 e0 a1 b1 1a e1
-        return file_bytes.startswith(b'\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1')
+    # Enforce magic bytes for PDF
+    if ext == "pdf":
+        return file_bytes.startswith(b"%PDF")
         
-    elif ext == '.pdf':
-        # PDF magic bytes: '%PDF-'
-        return file_bytes.startswith(b'%PDF-')
+    # Enforce magic bytes for ZIP/DOCX/PPTX/XLSX/XLSM
+    if ext in ["docx", "pptx", "xlsx", "xlsm", "zip"]:
+        return file_bytes.startswith(b"PK\x03\x04")
         
-    elif ext in ('.csv', '.txt'):
-        # Must not contain dangerous binary executable signatures
-        if file_bytes.startswith(b'MZ') or file_bytes.startswith(b'\x7fELF'):
+    # Enforce magic bytes for legacy OLE formats XLS/DOC
+    if ext in ["xls", "doc"]:
+        return file_bytes.startswith(b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1")
+        
+    # For text, csv, md, markdown, json, xml, check that they do not contain binary header markers or null bytes
+    if ext in ["txt", "csv", "md", "markdown", "json", "xml"]:
+        # Ensure no executable headers
+        if file_bytes.startswith(b"MZ") or file_bytes.startswith(b"\x7fELF"):
             return False
-        # Avoid files with null bytes (binary indicators) in the first kilobyte
-        chunk = file_bytes[:1024]
-        if b'\x00' in chunk:
+        # Ensure no null bytes in the first 1024 bytes (indicates binary data)
+        sample = file_bytes[:1024]
+        if b"\x00" in sample:
             return False
         return True
+        
+    return False
 
-    return True
 
 
-@app.post("/api/chat")
-
+@app.post(
+    "/api/chat",
+    description="Handle POST request chat messages with optional file attachments.",
+    responses={
+        429: {"description": "Rate limit exceeded"},
+        500: {"description": "Internal server error"}
+    }
+)
+@_limiter.limit("10/minute")
 async def handle(
-
+    request: Request,
     background_tasks: BackgroundTasks,
 
     message:       Optional[str]    = Form(None),
@@ -7578,12 +7780,17 @@ async def handle(
         _tls.current_session_id = sid
 
         for file in valid_files:
-
-            b = await file.read(_MAX_UPLOAD_BYTES + 1)
-
-            if len(b) > _MAX_UPLOAD_BYTES:
-                _mb = _MAX_UPLOAD_BYTES // (1024 * 1024)
-                raise HTTPException(status_code=413, detail=f"File '{file.filename}' exceeds the {_mb} MB limit.")
+            max_bytes = settings.SCAL_MAX_UPLOAD_MB * 1024 * 1024
+            chunk_size = 64 * 1024
+            content = bytearray()
+            while True:
+                chunk = await file.read(chunk_size)
+                if not chunk:
+                    break
+                content.extend(chunk)
+                if len(content) > max_bytes:
+                    raise HTTPException(status_code=413, detail=f"File '{file.filename}' exceeds the {settings.SCAL_MAX_UPLOAD_MB} MB limit.")
+            b = bytes(content)
 
             if b:
 
@@ -7627,15 +7834,16 @@ async def handle(
                         tmp_path = tf.name
                     try:
                         mandatory_ground_truth = extract_absolute_file_truth([(tmp_path, fname)])
+                        _fhash_store = hashlib.sha256(data_bytes).hexdigest()
                         if sid:
                             with SESSION_DATA_CACHE_LOCK:
-                                SESSION_DATA_CACHE[sid] = {
+                                SESSION_DATA_CACHE[_fhash_store] = {
                                     "ground_truth": mandatory_ground_truth,
                                     "timestamp": time.time()
                                 }
-                            populate_cache_from_ground_truth(sid, mandatory_ground_truth)
+                            populate_cache_from_ground_truth(_fhash_store, mandatory_ground_truth)
                             if is_spreadsheet:
-                                cache_excel_data_vectors(sid, tmp_path)
+                                cache_excel_data_vectors(_fhash_store, tmp_path)
                         
                         fr_data = read_file(tmp_path, target_identifier=None)
                         fr_text, _ = to_prompt_string(fr_data)
@@ -7705,9 +7913,12 @@ async def handle(
         # file, not just the first one in a multi-file upload.
         fname = ";".join(f.filename for f in valid_files) if valid_files else None
 
-        await async_db("INSERT INTO m (sid,role,text,ts,user_email,fname) VALUES (?,?,?,?,?,?)",
+        primary_fhash = None
+        if valid_files and f_parts:
+            primary_fhash = hashlib.sha256(f_parts[0][0]).hexdigest()
 
-           (sid, "user", message, time.time(), email, fname))
+        await async_db("INSERT INTO m (sid,role,text,ts,user_email,fname,file_hash) VALUES (?,?,?,?,?,?,?)",
+           (sid, "user", message, time.time(), email, fname, primary_fhash))
 
 
 
@@ -7910,7 +8121,7 @@ async def handle(
                         ans_text = process_provenance_tokens(ans_text, sid)
                         filenames = get_filenames_from_cache(sid)
                         ans_text = clean_citation_clutter(ans_text, filenames)
-                        ans_text = compress_traceability_ledger(ans_text)
+                        ans_text = compress_traceability_ledger(ans_text, filenames)
                         ans_text = _extract_and_log_corrections(sid, email, ans_text)
                         
                         ans_text += f"\n<!-- CHECKPOINT {q_num} -->"
@@ -7971,7 +8182,7 @@ async def handle(
             resp_text = process_provenance_tokens(resp_text, sid)
             filenames = get_filenames_from_cache(sid)
             resp_text = clean_citation_clutter(resp_text, filenames)
-            resp_text = compress_traceability_ledger(resp_text)
+            resp_text = compress_traceability_ledger(resp_text, filenames)
             resp_text = _extract_and_log_corrections(sid, email, resp_text)
             if not resp_text.strip():
                 # Empty after post-processing almost always means the model's mandated
@@ -8046,7 +8257,17 @@ async def library_ingest(
     if not KB_INGEST_SECRET or not hmac.compare_digest(x_ingest_secret.strip(), KB_INGEST_SECRET):
         raise HTTPException(status_code=403, detail="Invalid ingest secret")
     file.filename = sanitize_filename(file.filename)
-    file_bytes = await file.read()
+    max_bytes = settings.SCAL_MAX_UPLOAD_MB * 1024 * 1024
+    chunk_size = 64 * 1024
+    content = bytearray()
+    while True:
+        chunk = await file.read(chunk_size)
+        if not chunk:
+            break
+        content.extend(chunk)
+        if len(content) > max_bytes:
+            raise HTTPException(status_code=413, detail=f"File '{file.filename}' exceeds the {settings.SCAL_MAX_UPLOAD_MB} MB limit.")
+    file_bytes = bytes(content)
     if not file_bytes:
         raise HTTPException(status_code=400, detail="Empty file")
     if not verify_file_signature(file_bytes, file.filename):
@@ -8165,7 +8386,17 @@ async def kb_ingest(
     if not is_valid:
         raise HTTPException(status_code=403, detail="Invalid admin pin")
     file.filename = sanitize_filename(file.filename)
-    file_bytes = await file.read()
+    max_bytes = settings.SCAL_MAX_UPLOAD_MB * 1024 * 1024
+    chunk_size = 64 * 1024
+    content = bytearray()
+    while True:
+        chunk = await file.read(chunk_size)
+        if not chunk:
+            break
+        content.extend(chunk)
+        if len(content) > max_bytes:
+            raise HTTPException(status_code=413, detail=f"File '{file.filename}' exceeds the {settings.SCAL_MAX_UPLOAD_MB} MB limit.")
+    file_bytes = bytes(content)
     if not file_bytes:
         raise HTTPException(status_code=400, detail="Empty file")
     if not verify_file_signature(file_bytes, file.filename):
@@ -8305,6 +8536,27 @@ SESSION_DATA_CACHE_LOCK: threading.Lock = threading.Lock()
 SESSION_DATA_CACHE: dict[str, dict] = {}
 
 
+def get_session_active_hash(session_id: str) -> Optional[str]:
+    if not session_id:
+        return None
+    try:
+        rows = db("SELECT file_hash FROM m WHERE sid=? AND file_hash IS NOT NULL ORDER BY id DESC LIMIT 1", (session_id,))
+        if rows and rows[0][0]:
+            return rows[0][0]
+    except Exception as e:
+        _logger.warning(f"Failed to query active file hash for session {session_id}: {e}")
+    return None
+
+
+def resolve_cache_key(key: str) -> str:
+    if not key:
+        return ""
+    if len(key) == 64 and all(c in "0123456789abcdefABCDEF" for c in key):
+        return key
+    active_hash = get_session_active_hash(key)
+    return active_hash or key
+
+
 def evict_session(session_id: str) -> None:
     """Single source of truth for destructive session eviction.
 
@@ -8335,6 +8587,7 @@ def save_session_cache_to_db(sid: str) -> None:
     """
     if not sid:
         return
+    sid = resolve_cache_key(sid)
     try:
         with SESSION_DATA_CACHE_LOCK:
             cache_data = SESSION_DATA_CACHE.get(sid)
@@ -8366,6 +8619,7 @@ def load_session_cache_from_db(sid: str) -> None:
     """
     if not sid:
         return
+    sid = resolve_cache_key(sid)
     try:
         with SESSION_DATA_CACHE_LOCK:
             if sid in SESSION_DATA_CACHE and SESSION_DATA_CACHE[sid] and SESSION_DATA_CACHE[sid].get("ground_truth"):
@@ -8592,8 +8846,9 @@ def get_filenames_from_cache(sid: Optional[str]) -> list[str]:
     """Helper to extract original filenames from the ground truth in the session cache."""
     if not sid:
         return []
+    fhash = resolve_cache_key(sid)
     with SESSION_DATA_CACHE_LOCK:
-        cached = SESSION_DATA_CACHE.get(sid)
+        cached = SESSION_DATA_CACHE.get(fhash)
         if not cached:
             return []
         gt = cached.get("ground_truth", "")
@@ -8657,6 +8912,10 @@ def sync_document_generation_task(
         phase0b_inventory = None
         phase0b_inventory_text = ""
         mandatory_ground_truth = ""
+        # Calculate file content hash
+        with open(temp_file_path, "rb") as f:
+            fhash = hashlib.sha256(f.read()).hexdigest()
+
         if is_spreadsheet or is_docx:
             try:
                 # Deterministic pre-parser: raw pd.ExcelFile, zero SCALFileHandler dependency
@@ -8665,14 +8924,14 @@ def sync_document_generation_task(
                 )
                 if session_id:
                     with SESSION_DATA_CACHE_LOCK:
-                        SESSION_DATA_CACHE[session_id] = {
+                        SESSION_DATA_CACHE[fhash] = {
                             "ground_truth": mandatory_ground_truth,
                             "timestamp": time.time()
                         }
-                    populate_cache_from_ground_truth(session_id, mandatory_ground_truth)
+                    populate_cache_from_ground_truth(fhash, mandatory_ground_truth)
                     if is_spreadsheet:
-                        cache_excel_data_vectors(session_id, temp_file_path)
-                _logger.info(f"[Phase 0b BG] Deterministic MANDATORY_GROUND_TRUTH_INVENTORY generated for {filename}")
+                        cache_excel_data_vectors(fhash, temp_file_path)
+                _logger.info(f"[Phase 0b BG] Deterministic MANDATORY_GROUND_TRUTH_INVENTORY generated for {filename} with hash {fhash}")
             except Exception as mgt_err:
                 _logger.warning(f"[Phase 0b BG] extract_absolute_file_truth failed for {filename}: {mgt_err}")
         
@@ -8946,8 +9205,8 @@ def sync_document_generation_task(
         TASKS_DB[session_id].update({"progress": 45})
         
         # Insert consecutively in DB
-        db("INSERT INTO m (sid,role,text,ts,user_email,fname) VALUES (?,?,?,?,?,?)",
-           (session_id, "user", msg, time.time() - 2.0, email, filename))
+        db("INSERT INTO m (sid,role,text,ts,user_email,fname,file_hash) VALUES (?,?,?,?,?,?,?)",
+           (session_id, "user", msg, time.time() - 2.0, email, filename, fhash))
            
         violations_str = "\n".join(f"- {v}" for v in violations) if violations else "No physical violations found."
         audit_text = f"PHYSICS HEALTH AUDIT: {physics_score}% | STATUS: {physics_status}\n{violations_str}"
@@ -9080,8 +9339,17 @@ def async_report_compile_task(session_id: str, well_name: str):
         })
 
 
-@app.post("/api/report/generate")
+@app.post(
+    "/api/report/generate",
+    description="Generate petrophysical conclusion and interpret SCAL report insights.",
+    responses={
+        429: {"description": "Rate limit exceeded"},
+        500: {"description": "Internal server error"}
+    }
+)
+@_limiter.limit("10/minute")
 async def generate_report(
+    request: Request,
     background_tasks: BackgroundTasks,
     session_id: str = Form(...),
     well_name:  str = Form("UNKNOWN WELL"),
@@ -9111,8 +9379,17 @@ async def generate_report(
     )
 
 
-@app.post("/api/v1/analyze-scal")
+@app.post(
+    "/api/v1/analyze-scal",
+    description="Analyze uploaded SCAL spreadsheet or file, returning parameters and starting session.",
+    responses={
+        429: {"description": "Rate limit exceeded"},
+        500: {"description": "Internal server error"}
+    }
+)
+@_limiter.limit("10/minute")
 async def analyze_scal(
+    request: Request,
     background_tasks: BackgroundTasks,
     file: UploadFile = File(...),
     session_id: Optional[str] = Form(None),
@@ -9121,6 +9398,7 @@ async def analyze_scal(
     authorization: Optional[str] = Header(None),
     token: Optional[str] = Query(None),
 ):
+    temp_file_path = None
     try:
         verify_user_or_admin(authorization=authorization, token=token, user_email=user_email)
         sid = session_id or str(uuid.uuid4())
@@ -9128,51 +9406,13 @@ async def analyze_scal(
         # Destructive memory eviction protocol on new file ingestion
         evict_session(sid)
 
-        # Save the incoming UploadFile to a temporary location safely
-        import tempfile
-        from pathlib import Path
-        
-        with tempfile.NamedTemporaryFile(delete=False, suffix=Path(file.filename).suffix) as tmp:
-            tmp.write(await file.read())
-            tmp_path = tmp.name
-            
-        # Run the absolute truth extractor to convert spreadsheet rows into string context
-        from scal_file_handler import extract_absolute_file_truth
-        loop = asyncio.get_running_loop()
-        ground_truth_string = await loop.run_in_executor(None, extract_absolute_file_truth, [(tmp_path, file.filename)])
-        
-        # HYDRATE THE ACTIVE CHAT CACHE NATIVELY BEFORE ANY UTILITY RUNS
-        with SESSION_DATA_CACHE_LOCK:
-            if sid not in SESSION_DATA_CACHE:
-                SESSION_DATA_CACHE[sid] = {}
-            SESSION_DATA_CACHE[sid]["ground_truth"] = ground_truth_string
-            # Initialize labeled values if missing to ensure completeness gate passes
-            if "labeled_values" not in SESSION_DATA_CACHE[sid]:
-                SESSION_DATA_CACHE[sid]["labeled_values"] = {}
-                
-        # Also populate labeled values and flat vectors synchronously to prevent fitters from aborting
-        populate_cache_from_ground_truth(sid, ground_truth_string)
-        ext_lower = Path(file.filename).suffix.lower()
-        if ext_lower in ('.xlsx', '.xlsm', '.xls', '.ods', '.csv'):
-            await loop.run_in_executor(None, cache_excel_data_vectors, sid, tmp_path)
-                
-        # Clean up the temporary file from the disk
-        try:
-            import os
-            os.unlink(tmp_path)
-        except Exception:
-            pass
-
-        # Reset file stream pointer so subsequent reads work perfectly
-        await file.seek(0)
-
+        filename = sanitize_filename(file.filename)
         email = normalize_email(user_email)
         if not email and sid:
             row = db("SELECT user_email FROM sessions WHERE sid=?", (sid,))
             if row and row[0][0]:
                 email = row[0][0].lower().strip()
         msg = (message or "Analyze petrophysical data from uploaded file.").strip()
-        filename = sanitize_filename(file.filename)
 
         # Synchronously insert session row before report generation
         if _PG_AVAILABLE:
@@ -9193,29 +9433,48 @@ async def analyze_scal(
         # Path traversal prevention using regex
         if not re.match(r"^(report-)?[a-zA-Z0-9\-]+$", sid):
             raise HTTPException(status_code=400, detail="Invalid session_id format.")
-            
-        # Signature verification (prevent invalid files)
-        sig_bytes = await file.read(1024)
-        await file.seek(0)
-        if not verify_file_signature(sig_bytes, filename):
-            raise HTTPException(status_code=400, detail=f"File signature mismatch or invalid format for extension: {filename}")
-            
+
         # Setup isolated temp file paths
+        import tempfile
+        from pathlib import Path
         ext = Path(filename.lower()).suffix
         temp_file = tempfile.NamedTemporaryFile(delete=False, suffix=ext)
         temp_file_path = temp_file.name
         temp_file.close()
-        
+
         # Safe streaming of file chunked to temp path
-        try:
-            await process_large_file_stream(file, temp_file_path, _MAX_UPLOAD_BYTES)
-        except Exception as se:
-            try:
-                Path(temp_file_path).unlink(missing_ok=True)
-            except Exception:
-                pass
-            raise se
-            
+        await process_large_file_stream(file, temp_file_path, _MAX_UPLOAD_BYTES)
+
+        # Signature verification (prevent invalid files) from temp file
+        with open(temp_file_path, "rb") as f:
+            sig_bytes = f.read(1024)
+        if not verify_file_signature(sig_bytes, filename):
+            raise HTTPException(status_code=400, detail=f"File signature mismatch or invalid format for extension: {filename}")
+
+        # Run the absolute truth extractor to convert spreadsheet rows into string context
+        from scal_file_handler import extract_absolute_file_truth
+        loop = asyncio.get_running_loop()
+        ground_truth_string = await loop.run_in_executor(None, extract_absolute_file_truth, [(temp_file_path, file.filename)])
+        
+        # Calculate file content hash
+        with open(temp_file_path, "rb") as f:
+            fhash = hashlib.sha256(f.read()).hexdigest()
+
+        # HYDRATE THE ACTIVE CHAT CACHE NATIVELY BEFORE ANY UTILITY RUNS
+        with SESSION_DATA_CACHE_LOCK:
+            if fhash not in SESSION_DATA_CACHE:
+                SESSION_DATA_CACHE[fhash] = {}
+            SESSION_DATA_CACHE[fhash]["ground_truth"] = ground_truth_string
+            # Initialize labeled values if missing to ensure completeness gate passes
+            if "labeled_values" not in SESSION_DATA_CACHE[fhash]:
+                SESSION_DATA_CACHE[fhash]["labeled_values"] = {}
+                
+        # Also populate labeled values and flat vectors synchronously to prevent fitters from aborting
+        populate_cache_from_ground_truth(fhash, ground_truth_string)
+        ext_lower = Path(file.filename).suffix.lower()
+        if ext_lower in ('.xlsx', '.xlsm', '.xls', '.ods', '.csv'):
+            await loop.run_in_executor(None, cache_excel_data_vectors, fhash, temp_file_path)
+
         # Initialize task record in TASKS_DB
         TASKS_DB[sid] = {
             "status": "queued",
@@ -9244,8 +9503,14 @@ async def analyze_scal(
             }
         )
     except HTTPException as he:
+        if temp_file_path:
+            try: Path(temp_file_path).unlink(missing_ok=True)
+            except Exception: pass
         raise he
     except Exception as e:
+        if temp_file_path:
+            try: Path(temp_file_path).unlink(missing_ok=True)
+            except Exception: pass
         _logger.error(f"[AnalyzeSCAL] Failed: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -9306,8 +9571,17 @@ async def download_report(
 
 # -- GRADER ------------------------------------------------------------------
 
-@app.post("/api/grade")
+@app.post(
+    "/api/grade",
+    description="Grade AI responses against authoritative documents uploaded.",
+    responses={
+        429: {"description": "Rate limit exceeded"},
+        500: {"description": "Internal server error"}
+    }
+)
+@_limiter.limit("10/minute")
 async def api_grade_response(
+    request: Request,
     file:        UploadFile = File(...),
     ai_response: str        = Form(...),
     user_email:  Optional[str] = Form(None),
@@ -9317,7 +9591,17 @@ async def api_grade_response(
     verify_user_or_admin(authorization=authorization, token=token, user_email=user_email)
     import tempfile
     file.filename = sanitize_filename(file.filename)
-    file_bytes = await file.read()
+    max_bytes = _MAX_UPLOAD_BYTES
+    chunk_size = 64 * 1024
+    content = bytearray()
+    while True:
+        chunk = await file.read(chunk_size)
+        if not chunk:
+            break
+        content.extend(chunk)
+        if len(content) > max_bytes:
+            raise HTTPException(status_code=413, detail="File size exceeds maximum allowed limit.")
+    file_bytes = bytes(content)
     if not verify_file_signature(file_bytes, file.filename):
         raise HTTPException(status_code=400, detail=f"File signature mismatch or invalid format for extension: {file.filename}")
     ext = Path(file.filename).suffix.lower() or ".xlsx"
