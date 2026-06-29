@@ -39,6 +39,97 @@ coordinate through this file, git, and the human.
 
 ## Handoff Log (newest first — APPEND, never delete)
 
+### [2026-06-29] Claude Code → Antigravity & User (Handover packaging: HANDOVER.md + docs/ tidy)
+
+**Context:** Same day, follow-up to the Graph-RAG/Sandbox/visuals entry below. User is
+handing the runnable repo to a new **Data Science team**. Goal was readability, not
+behavior. No `.py` logic touched; physics gate unaffected.
+
+**DID — staged (git mv renames + new file), NOT committed:**
+1. **`HANDOVER.md` (NEW, root) — the single DS front door.** Run steps (`pip install`,
+   `py -3.13 -m pytest tests/`, `run_local.cmd`, PIN 1509, `/health`), the physics-gate
+   rule, a full **module map grouped by role** (entry/physics/knowledge/io/output/ops —
+   compensates for the flat layout *without* moving the modules), upload→answer data
+   flow, the Do-Not-Break invariants inlined, ranked tech-debt backlog (app.py monolith
+   #1), and a day-one path. Also documents the new modules + the "health grade ≠ fit
+   quality / read r²" gotcha.
+2. **Docs de-cluttered.** `git mv` 13 deep-reference docs into `docs/` (ARCHITECTURE,
+   DEVELOPER_DOCS, EXECUTIVE_DEMO_SCRIPT, HOST_PROFILE, KNOWLEDGE_BASE,
+   PRC_MAINTENANCE_GUIDE, README_DEPLOYMENT, README_PROD, SOVEREIGN_SCAL_OPERATORS_MANUAL,
+   SOVEREIGN_VAULT, future_tech_radar, walkthrough, task). Root now holds only the 5
+   front-door docs: README, HANDOVER, CLAUDE, TEAM, AGENTS. History preserved (renames,
+   `R` in git status).
+3. **`README.md`:** fixed the broken `file:///` deployment link → `docs/README_DEPLOYMENT.md`;
+   added a Documentation index.
+4. **Kept TEAM.md/AGENTS.md framed as internal agent logs** — HANDOVER §6/§9 and the
+   README index now explicitly tell the DS team these are *our* dev logs, not their
+   operating docs (per user: "TEAM.md is ours"). DS team is NOT directed to read or
+   append to TEAM.md.
+
+**Did NOT do (decided against, with user):** the full Python package reorg
+(engines/knowledge/io/core). 29 cross-importing modules + 9k-line app.py + your
+uncommitted edits (`llm_insight_generator.py`, `requirements.txt`, frontend) → too much
+churn/risk right before handoff. The HANDOVER module map gives the DS team the logical
+organization at zero import risk. Left as debt item §8.1 for them to do on their terms.
+
+**Verified:** root listing = 5 docs; `docs/` = 13; README link target exists; no `.py`
+moved → gate untouched. (The 3 new modules were runtime-verified at their surfaces
+earlier — 44 + 97 tests green, rendered PNG inspected.)
+
+**For Antigravity:** doc paths changed — if any of your tooling references a moved doc,
+repoint it to `docs/<name>`. Modules + HANDOVER are staged but uncommitted; user is on
+`master`, 12 ahead of origin — branch before committing.
+
+---
+
+### [2026-06-29] Claude Code → Antigravity & User (Data-Science handover upgrades: Graph RAG + Physics Sandbox + decoupled visuals)
+
+**Context:** Pre-handover hardening for the Data Science team. Three new production-grade,
+strictly-typed, logger-only modules + tests. No existing physics/prompt/model logic touched;
+new modules *import* the existing engines rather than duplicating them.
+
+**DID — NOT committed (no git repo in this checkout; leaving staging to you):**
+1. **Geological Graph RAG (`geological_graph.py`, NEW).** `GeologicalGraph` — SQLite property
+   graph kept fully separate from the ChromaDB vector store. Nodes: Basin/Formation/Lithology/
+   Well/FluidType (enum-validated). Edges: LOCATED_IN, HAS_LITHOLOGY, PENETRATES, CONTAINS_FLUID.
+   API: `add_relation()` (idempotent upsert), `query_connections(node, depth_limit)` (bounded BFS
+   → JSON subgraph), `neighbours_by_relation()`, `import_relations()` (bulk doc ingest, bad rows
+   skipped), `hybrid_search(query, porous_range, perm_range, retriever)` (fuses graph BFS + vector
+   analog-well lookup; retriever **injected** so it stays offline/CI-safe, mirroring the
+   rag_database CI decision in the 2026-06-14 entry). All SQL parameterised (CLAUDE.md §4).
+2. **Autonomous Physics Sandbox (`physics_sandbox.py`, NEW).** `PhysicsSandbox` runs
+   fit → validate → auto-correct → re-validate. `fit_brooks_corey` / `fit_archie` (FF+RI) /
+   `fit_waxman_smits`. Validation reuses `PhysicsGuard` (no duplicated rules). Auto-correct:
+   out-of-bounds Archie exponents → bounded `curve_fit` clamp into the same [0.5,1.5]/[1.3,2.5]
+   windows PhysicsGuard enforces; Kr anomalies → exponent ladder then escalate to the existing
+   `PRCSimulatedAnnealing`. Hard guard: Sw ∉ [0,1] → `PhysicalValidationError` (uncorrectable).
+   `run_sandboxed()` — restricted exec (AST audit blocks imports/dunder/open/eval; whitelisted
+   builtins + math/numpy/scipy only). **Note:** this is best-effort, not a hardened jail —
+   documented as such; don't feed it untrusted third-party code. Directly addresses the
+   2026-06-16 Archie-FF "impossible a≈2.85, m≈1.44" risk by clamping into physical bounds.
+3. **Decoupled visuals (`visualizer.py`, refactored).** Split coordinate generation from
+   rendering: `extract_curve_coordinates()` is now pure → serialisable `{x, y, labels, title,...}`
+   (zero matplotlib); `render_coordinate_payloads()` is the thin PNG wrapper; `generate_plots()`
+   kept (app.py + test compat) and now just composes the two. All `print()` → `logging`.
+4. **Config (`config.py`):** added `GRAPH_DB_PATH`, `SANDBOX_MAX_ITERATIONS`, `SANDBOX_SW_TOLERANCE`
+   + `graph_db_path` property (defaults under `DB_DIR` so the graph survives Render redeploys,
+   same pattern as the chroma store).
+5. **Tests (NEW):** `tests/test_geological_graph.py` (14), `tests/test_physics_sandbox.py` (17),
+   `tests/test_visualizer_coordinates.py` (7). Mocks kept out of production code.
+
+**Verified:**
+- `py -3.13 -m pytest tests/test_geological_graph.py tests/test_physics_sandbox.py tests/test_visualizer_coordinates.py tests/test_physics_validator.py tests/test_rag_database.py` → **44 passed**.
+- Physics gate: `py -3.13 -m pytest tests/test_physics_and_skills_exhaustive.py` → **97 passed**, zero regressions.
+- Local `.venv` is MinGW without pytest (CLAUDE.md §1 dev note) — ran via `py -3.13`.
+
+**For Antigravity:** new modules are standalone — not yet wired into `app.py`'s chat/tool path.
+If you want the agent to call them, register `PhysicsSandbox.fit_*` as tools and seed the
+`GeologicalGraph` from the books/ corpus. `hybrid_search` expects a retriever exposing
+`query_analog_wells(...)` — pass a live `RAGDatabase` to bridge graph + vectors. genkit stays
+pinned 0.4.0. Run `python -m pytest tests/` before any push.
+
+---
+
 ### [2026-06-28] Claude Code → Antigravity & User (Multi-worker hardening on top of the file-isolation fix)
 
 **Context:** Reviewed Antigravity's file-ingestion cache-binding / session-isolation fix. Core fix is sound and tested. Found a gap it did not close: the tool-parameter cache reads bypassed the new content-hash keying, so they broke under `--workers 2`.

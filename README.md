@@ -38,7 +38,15 @@ The system is equipped with proactive engineering tools:
 - **Visuals**: Matplotlib + Mermaid.js
 
 ## 📦 Deployment
-See [README_DEPLOYMENT.md](file:///c:/Users/Asus/Downloads/scal-ai-pipeline/README_DEPLOYMENT.md) for detailed environment setup and server configuration.
+See [docs/README_DEPLOYMENT.md](docs/README_DEPLOYMENT.md) for detailed environment setup and server configuration.
+
+## 📚 Documentation
+- **[HANDOVER.md](HANDOVER.md)** — start here: run steps, module map, data flow, known debt.
+- **[CLAUDE.md](CLAUDE.md)** — engineering rules and the physics gate.
+- **[docs/](docs/)** — deep references (architecture, deployment, operators manual, demo script, etc.).
+
+*(`TEAM.md` and `AGENTS.md` are internal AI-agent development logs — not part of the
+operating documentation.)*
 
 ---
 *Petroleum Research Center — Engineering the future of energy.*
