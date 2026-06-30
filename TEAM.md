@@ -103,9 +103,37 @@ truncate the injected ground-truth for >N-sheet workbooks.** Note the NVIDIA cal
 logs `[NVIDIA] generate -> model=… tools=…` — none appeared for this request, so it may
 die before the LLM call.
 
-**Left uncommitted:** all of the above (app.py, scal_file_handler.py, .env). Backup:
-`app.py.bak_nvidia`. A temporary `_logger.info("[NVIDIA] generate -> …")` line is in
-`_nvidia_generate` — keep or drop, low noise.
+**Left uncommitted:** `.env` only (key). Code is committed: `f85fcce` (swap + 3 fixes),
+`942dc79` (.xls engine + context guard), `a61c71a` (cap tweak). Backup: `app.py.bak_nvidia`.
+A temporary `_logger.info("[NVIDIA] generate -> …")` line is in `_nvidia_generate` — low noise.
+
+**UPDATE 2 (same day) — two more fixes + the big-file root cause:**
+4. **Legacy `.xls` read failure (was the user-visible "unable to extract usable data").**
+   `file_reader._excel_engine()` chose the pandas engine via `zipfile.is_zipfile()`, which
+   scans the WHOLE file for a ZIP end-of-central-directory sig and **false-positives on
+   genuine OLE2 `.xls`** (they often contain that byte run) → routed real `.xls` to
+   openpyxl → `File contains no valid workbook part` → empty ground-truth → model says
+   "can't extract." Fixed: detect by HEADER magic bytes (`PK\x03\x04`→openpyxl,
+   `D0CF11E0…`→xlrd). **This affects the entire T1-31 `.xls` set.** Verified: RI `.xls`
+   now reads + analyzes (86 RI points, cited), ~45s.
+5. **NVIDIA 400 `max_tokens must be at least 1, got -N`.** A large multi-sheet workbook's
+   un-truncated ground-truth injects to **~800K chars** (the chat handler injects the full
+   per-row dump, possibly at multiple points) → ~340K tokens → overflows gpt-oss-120b's
+   131K context → NVIDIA returns a negative output budget. Added a backstop in
+   `_nvidia_generate`: truncate the largest message so total input ≤ `_MAX_INPUT_CHARS`
+   (currently 170000).
+
+**STILL OPEN for you (Antigravity) — the 10-sheet `Mercury Injection Well T1-31.xls`:**
+even with the cap, this one workbook is borderline (dense numeric tables tokenize heavily;
+~4 min round-trips, sometimes still over context). The **right fix is at the injection
+site, not my NVIDIA backstop**: the chat handler in `app.py` (`PRCChatAssistant.chat`,
+the `extracted_context += "[MANDATORY GROUND TRUTH INVENTORY]…"` block ~line 5000, and the
+`dynamic_system_prompt` ground-truth injection) dumps the FULL un-truncated per-row
+inventory for ALL sheets. For big workbooks please (a) cap/sample the injected ground-truth
+per sheet (e.g. head+tail rows like the PVT/`format_and_truncate_json_table` pattern already
+used elsewhere), and (b) find the `process_single_item_agent` 90s timeout owner and raise
+it or make big-file handling async. The deterministic extraction itself is correct now
+(229K chars, 10 sheets) — it's purely a context-budget/latency problem downstream.
 
 ### [2026-06-29] Claude Code → Antigravity & User (Handover packaging: HANDOVER.md + docs/ tidy)
 

@@ -2524,18 +2524,25 @@ def _nvidia_generate(messages_data, system_instruction, temperature, want_tools,
     _MAX_INPUT_CHARS = 170000  # dense numeric tables tokenize heavily; keep well under gpt-oss 131K ctx
     _total = sum(len(m.get("content") or "") for m in oa_messages)
     if _total > _MAX_INPUT_CHARS:
-        _biggest = max(oa_messages, key=lambda m: len(m.get("content") or ""))
-        _keep = len(_biggest["content"]) - (_total - _MAX_INPUT_CHARS)
-        if _keep > 2000:
-            _biggest["content"] = (
-                _biggest["content"][:_keep]
-                + "\n\n[... ground-truth truncated to fit the model context window; "
-                  "ask about a specific sheet/sample for its full detail ...]"
-            )
-            try:
-                _logger.warning("[NVIDIA] input %d chars > %d; truncated largest block." % (_total, _MAX_INPUT_CHARS))
-            except Exception:
-                pass
+        # The ground-truth is injected into BOTH the system and user messages, so the
+        # bloat is split across multiple large blocks. Shrink EVERY oversized message
+        # proportionally so the combined input lands under the cap (truncating only the
+        # single largest would leave the other(s) and still overflow).
+        _ratio = _MAX_INPUT_CHARS / float(_total)
+        for _m in oa_messages:
+            _c = _m.get("content")
+            if isinstance(_c, str) and len(_c) > 2000:
+                _keep = max(2000, int(len(_c) * _ratio))
+                if _keep < len(_c):
+                    _m["content"] = _c[:_keep] + (
+                        "\n\n[... ground-truth truncated to fit the model context window; "
+                        "ask about a specific sheet/sample for its full detail ...]"
+                    )
+        try:
+            _new = sum(len(m.get("content") or "") for m in oa_messages)
+            _logger.warning("[NVIDIA] input %d chars > %d; truncated to ~%d." % (_total, _MAX_INPUT_CHARS, _new))
+        except Exception:
+            pass
     payload = {
         "model": NVIDIA_MODEL,
         "temperature": 0.2 if temperature is None else float(temperature),
