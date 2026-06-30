@@ -2516,6 +2516,26 @@ def _nvidia_generate(messages_data, system_instruction, temperature, want_tools,
     global _nvidia_key_idx
     if not NVIDIA_KEY_POOL:
         raise RuntimeError("No NVIDIA API keys configured (set NVIDIA_API_KEY).")
+    oa_messages = _nv_messages_from_neutral(messages_data, system_instruction)
+    # Context-overflow guard: a large multi-sheet workbook's un-truncated ground-truth
+    # can exceed the model context window (gpt-oss-120b ~131K tokens), making NVIDIA
+    # compute a negative output budget -> 400 "max_tokens must be at least 1". Cap the
+    # combined input by truncating the single largest message so the prompt fits.
+    _MAX_INPUT_CHARS = 240000  # dense numeric data ~2.4 chars/token => ~100K tokens, safely under gpt-oss 131K ctx
+    _total = sum(len(m.get("content") or "") for m in oa_messages)
+    if _total > _MAX_INPUT_CHARS:
+        _biggest = max(oa_messages, key=lambda m: len(m.get("content") or ""))
+        _keep = len(_biggest["content"]) - (_total - _MAX_INPUT_CHARS)
+        if _keep > 2000:
+            _biggest["content"] = (
+                _biggest["content"][:_keep]
+                + "\n\n[... ground-truth truncated to fit the model context window; "
+                  "ask about a specific sheet/sample for its full detail ...]"
+            )
+            try:
+                _logger.warning("[NVIDIA] input %d chars > %d; truncated largest block." % (_total, _MAX_INPUT_CHARS))
+            except Exception:
+                pass
     payload = {
         "model": NVIDIA_MODEL,
         "temperature": 0.2 if temperature is None else float(temperature),
@@ -2525,7 +2545,7 @@ def _nvidia_generate(messages_data, system_instruction, temperature, want_tools,
         # gpt-oss is a reasoning model; "low" effort keeps latency down so large
         # multi-sheet uploads finish inside the chat timeout.
         "reasoning_effort": "low",
-        "messages": _nv_messages_from_neutral(messages_data, system_instruction),
+        "messages": oa_messages,
     }
     if want_tools:
         payload["tools"] = _nvidia_tools()

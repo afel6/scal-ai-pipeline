@@ -20,9 +20,20 @@ def _excel_engine(filepath):
     if ext == ".ods":
         return "odf"
     if ext == ".xls":
+        # Detect by HEADER magic bytes, not zipfile.is_zipfile(): the latter scans
+        # the whole file for a ZIP end-of-central-directory signature and gives a
+        # FALSE POSITIVE on genuine OLE2 .xls workbooks (which often contain that
+        # byte sequence), wrongly routing them to openpyxl ("File contains no valid
+        # workbook part"). A real mislabeled .xlsx starts with the ZIP local-file
+        # header "PK\x03\x04"; a real legacy .xls starts with the OLE2 magic
+        # D0 CF 11 E0 A1 B1 1A E1.
         try:
-            if zipfile.is_zipfile(filepath):   # ZIP container => actually xlsx
+            with open(filepath, "rb") as _f:
+                head = _f.read(8)
+            if head[:4] == b"PK\x03\x04":        # ZIP container => actually xlsx
                 return "openpyxl"
+            if head == b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1":  # OLE2 => genuine .xls
+                return "xlrd"
         except Exception:
             pass
         return "xlrd"
