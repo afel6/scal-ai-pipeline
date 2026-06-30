@@ -155,6 +155,27 @@ except ImportError:
 
 GEMINI_KEY_POOL: list[str] = settings.gemini_keys
 
+# --- NVIDIA NIM (OpenAI-compatible) chat backend --------------------------- #
+# The Hviel chat assistant + petrophysical tool-calling now run on NVIDIA NIM
+# (model nvidia/nemotron-3-super-120b-a12b) instead of Gemini. Keys are read
+# from the environment (NVIDIA_API_KEY, plus optional NVIDIA_API_KEY1..N for
+# failover). Deterministic file extraction (scal_file_handler) is unchanged.
+def _load_nvidia_keys() -> list[str]:
+    keys: list[str] = []
+    base = os.getenv("NVIDIA_API_KEY")
+    if base:
+        keys.extend([k.strip(" \n\r\t\"'") for k in base.split(",") if k.strip(" \n\r\t\"'")])
+    for k, v in os.environ.items():
+        if k.startswith("NVIDIA_API_KEY") and k != "NVIDIA_API_KEY" and v:
+            keys.extend([x.strip(" \n\r\t\"'") for x in v.split(",") if x.strip(" \n\r\t\"'")])
+    return list(dict.fromkeys(keys))
+
+NVIDIA_KEY_POOL: list[str] = _load_nvidia_keys()
+NVIDIA_BASE_URL = "https://integrate.api.nvidia.com/v1/chat/completions"
+NVIDIA_MODEL = "openai/gpt-oss-120b"
+_nvidia_key_idx = 0
+_nvidia_key_lock = threading.Lock()
+
 KB_INGEST_SECRET = settings.KB_INGEST_SECRET
 
 ADMIN_PIN        = settings.ADMIN_PIN
@@ -2303,437 +2324,325 @@ def _extract_and_log_corrections(session_id: str, email: str, text: str) -> str:
 
 
 
-def _call_gemini_with_retry(client, model, contents, config, max_retries=5, base_delay=2):
-    """Call Genkit generate with compat mapping and fallback/retry logic."""
-    if "/" not in model and not model.startswith("googleai/"):
-        model = f"googleai/{model}"
+# ===================== NVIDIA NIM tool-calling backend ====================== #
+# Genkit/Gemini chat path replaced by direct NVIDIA NIM calls. The big chat
+# tool-loop downstream is untouched: these helpers return genai-shaped shims
+# (resp.candidates[0].content.parts with .text / .function_call(.name,.args)).
+import urllib.request as _nv_urllib
+import urllib.error as _nv_urlerr
 
+
+class _NvFuncCall:
+    def __init__(self, name, args):
+        self.name = name
+        self.args = args or {}
+
+
+class _NvPart:
+    def __init__(self, text=None, func=None):
+        self._text = text
+        self._func = func
+
+    @property
+    def text(self):
+        return self._text
+
+    @property
+    def function_call(self):
+        return self._func
+
+
+class _NvContent:
+    def __init__(self, parts):
+        self.parts = parts
+
+
+class _NvCandidate:
+    def __init__(self, parts):
+        self.content = _NvContent(parts)
+
+
+class _NvUsage:
+    def __init__(self, pt, ct):
+        self.prompt_token_count = pt
+        self.candidates_token_count = ct
+
+
+class _NvResponse:
+    def __init__(self, parts, usage):
+        self.candidates = [_NvCandidate(parts)]
+        self.usage_metadata = usage
+
+    @property
+    def text(self):
+        return "".join(p.text for p in self.candidates[0].content.parts if p.text)
+
+
+def _nv_lower_schema(s):
+    """Recursively lowercase Gemini uppercase JSON-schema type strings for OpenAI."""
+    if isinstance(s, dict):
+        out = {}
+        for k, v in s.items():
+            if k == "type" and isinstance(v, str):
+                out[k] = v.lower()
+            elif k == "properties" and isinstance(v, dict):
+                out[k] = {pk: _nv_lower_schema(pv) for pk, pv in v.items()}
+            elif k == "items":
+                out[k] = _nv_lower_schema(v)
+            else:
+                out[k] = _nv_lower_schema(v) if isinstance(v, (dict, list)) else v
+        return out
+    if isinstance(s, list):
+        return [_nv_lower_schema(x) for x in s]
+    return s
+
+
+_NVIDIA_TOOLS_CACHE = None
+
+
+def _nvidia_tools():
+    global _NVIDIA_TOOLS_CACHE
+    if _NVIDIA_TOOLS_CACHE is None:
+        tools = []
+        for group in _HVIEL_TOOLS:
+            for fd in group.get("function_declarations", []):
+                tools.append({
+                    "type": "function",
+                    "function": {
+                        "name": fd["name"],
+                        "description": fd.get("description", ""),
+                        "parameters": _nv_lower_schema(fd.get("parameters") or {"type": "object", "properties": {}}),
+                    },
+                })
+        _NVIDIA_TOOLS_CACHE = tools
+    return _NVIDIA_TOOLS_CACHE
+
+
+def _nv_config_unpack(config):
     system_instruction = None
     temperature = 0.2
-    tools_list = []
-
+    want_tools = False
     if config:
-        if hasattr(config, 'system_instruction') and config.system_instruction:
-            if isinstance(config.system_instruction, str):
-                system_instruction = config.system_instruction
-            elif hasattr(config.system_instruction, 'parts') and config.system_instruction.parts:
-                parts_text = []
-                for p in config.system_instruction.parts:
-                    if hasattr(p, 'text') and p.text:
-                        parts_text.append(p.text)
-                system_instruction = "".join(parts_text)
+        si = getattr(config, "system_instruction", None)
+        if si:
+            if isinstance(si, str):
+                system_instruction = si
+            elif hasattr(si, "parts") and si.parts:
+                system_instruction = "".join(p.text for p in si.parts if getattr(p, "text", None))
             else:
-                system_instruction = str(config.system_instruction)
-        if hasattr(config, 'temperature') and config.temperature is not None:
+                system_instruction = str(si)
+        if getattr(config, "temperature", None) is not None:
             temperature = config.temperature
-        if hasattr(config, 'tools') and config.tools:
-            tools_list = [
-                'calculate_petrophysics_properties',
-                'execute_python_simulation',
-                'generate_mermaid_diagram',
-                'fit_petrophysical_curve',
-                'agentic_history_matching',
-                'generate_executive_report',
-                'get_audit_history'
-            ]
+        if getattr(config, "tools", None):
+            want_tools = True
+    return system_instruction, temperature, want_tools
 
-    # Convert contents to serializable Genkit messages dictionary list
+
+def _nv_contents_to_neutral(contents):
+    """genai Content list -> neutral [{role, parts:[{text}|{tool_request}|{tool_response}]}].
+    file_data parts are intentionally dropped (NVIDIA has no Files API; the
+    deterministic ground-truth extraction is already injected as prompt text)."""
     messages_data = []
     for c in contents:
-        role_str = getattr(c, 'role', 'user')
-        role = 'model' if role_str == 'model' else 'user'
+        role_str = getattr(c, "role", "user")
+        role = "model" if role_str == "model" else "user"
         parts_data = []
-        c_parts = getattr(c, 'parts', []) or []
-        for p in c_parts:
-            if hasattr(p, 'text') and p.text:
-                parts_data.append({'text': p.text})
-            elif hasattr(p, 'function_call') and p.function_call:
-                parts_data.append({'tool_request': {
-                    'name': p.function_call.name,
-                    'input': dict(p.function_call.args or {})
-                }})
-            elif hasattr(p, 'function_response') and p.function_response:
-                parts_data.append({'tool_response': {
-                    'name': p.function_response.name,
-                    'output': p.function_response.response
-                }})
+        for p in getattr(c, "parts", []) or []:
+            if hasattr(p, "text") and p.text:
+                parts_data.append({"text": p.text})
+            elif hasattr(p, "function_call") and p.function_call:
+                parts_data.append({"tool_request": {"name": p.function_call.name, "input": dict(p.function_call.args or {})}})
+            elif hasattr(p, "function_response") and p.function_response:
+                parts_data.append({"tool_response": {"name": p.function_response.name, "output": p.function_response.response}})
         if parts_data:
-            messages_data.append({'role': role, 'parts': parts_data})
+            messages_data.append({"role": role, "parts": parts_data})
+    return messages_data
 
-    # Flow wrapper
-    @ai.flow(name="hviel_chat_flow")
-    async def hviel_chat_flow_internal(flow_args: dict) -> dict:
-        try:
-            from genkit.types import Message, Role, Part, ToolRequest, ToolResponse
-            genkit_messages = []
-            for m in flow_args['messages']:
-                role = Role.MODEL if m['role'] == 'model' else Role.USER
-                parts = []
-                for p in m['parts']:
-                    if 'text' in p:
-                        parts.append(Part(text=p['text']))
-                    elif 'tool_request' in p:
-                        parts.append(Part(tool_request=ToolRequest(
-                            name=p['tool_request']['name'],
-                            input=p['tool_request'].get('input')
-                        )))
-                    elif 'tool_response' in p:
-                        parts.append(Part(tool_response=ToolResponse(
-                            name=p['tool_response']['name'],
-                            output=p['tool_response'].get('output')
-                        )))
-                genkit_messages.append(Message(role=role, content=parts))
 
-            resp = await ai.generate(
-                model=flow_args['model'],
-                messages=genkit_messages,
-                system=flow_args['system_instruction'],
-                tools=flow_args['tools_list'] if flow_args['tools_list'] else None,
-                return_tool_requests=True,
-                config={'temperature': flow_args['temperature']}
-            )
-            return {"response": resp.model_dump()}
-        except Exception as flow_err:
-            import traceback
-            _logger.error(f"[FLOW EXCEPTION] Error in hviel_chat_flow_internal: {flow_err}\\nTraceback:\\n{traceback.format_exc()}")
-            raise flow_err
+def _nv_messages_from_neutral(messages_data, system_instruction):
+    """Neutral messages -> OpenAI chat messages, synthesizing tool_call ids."""
+    oa = []
+    if system_instruction:
+        oa.append({"role": "system", "content": system_instruction})
+    pending_ids = []
+    counter = 0
+    for m in messages_data:
+        role = m.get("role", "user")
+        parts = m.get("parts", []) or []
+        texts = [p["text"] for p in parts if "text" in p]
+        treqs = [p["tool_request"] for p in parts if "tool_request" in p]
+        tresps = [p["tool_response"] for p in parts if "tool_response" in p]
+        if role == "model":
+            content = "".join(texts)
+            tool_calls = []
+            for tr in treqs:
+                cid = "call_%d" % counter
+                counter += 1
+                pending_ids.append(cid)
+                tool_calls.append({
+                    "id": cid,
+                    "type": "function",
+                    "function": {"name": tr.get("name", ""), "arguments": _json.dumps(tr.get("input") or {})},
+                })
+            msg = {"role": "assistant"}
+            if tool_calls:
+                msg["content"] = content or None
+                msg["tool_calls"] = tool_calls
+            else:
+                msg["content"] = content
+            oa.append(msg)
+        else:
+            if tresps:
+                for tr in tresps:
+                    if pending_ids:
+                        cid = pending_ids.pop(0)
+                    else:
+                        cid = "call_%d" % counter
+                        counter += 1
+                    out = tr.get("output")
+                    oa.append({
+                        "role": "tool",
+                        "tool_call_id": cid,
+                        "content": out if isinstance(out, str) else _json.dumps(out),
+                    })
+                if texts:
+                    oa.append({"role": "user", "content": "".join(texts)})
+            else:
+                oa.append({"role": "user", "content": "".join(texts)})
+    return oa
 
-    # Execute flow inside running loop or via anyio thread runner
-    flow_payload = {
-        'model': model,
-        'messages': messages_data,
-        'system_instruction': system_instruction,
-        'tools_list': tools_list,
-        'temperature': temperature
+
+def _nvidia_generate(messages_data, system_instruction, temperature, want_tools, max_tokens=4096):
+    global _nvidia_key_idx
+    if not NVIDIA_KEY_POOL:
+        raise RuntimeError("No NVIDIA API keys configured (set NVIDIA_API_KEY).")
+    payload = {
+        "model": NVIDIA_MODEL,
+        "temperature": 0.2 if temperature is None else float(temperature),
+        "top_p": 0.95,
+        "max_tokens": max_tokens,
+        "stream": False,
+        # gpt-oss is a reasoning model; "low" effort keeps latency down so large
+        # multi-sheet uploads finish inside the chat timeout.
+        "reasoning_effort": "low",
+        "messages": _nv_messages_from_neutral(messages_data, system_instruction),
     }
+    if want_tools:
+        payload["tools"] = _nvidia_tools()
+        payload["tool_choice"] = "auto"
+    try:
+        _logger.info("[NVIDIA] generate -> model=%s tools=%s msgs=%d" % (NVIDIA_MODEL, want_tools, len(payload["messages"])))
+    except Exception:
+        pass
+    body = _json.dumps(payload).encode("utf-8")
+    errors = []
+    last_exc = None
+    for _ in range(len(NVIDIA_KEY_POOL)):
+        with _nvidia_key_lock:
+            key = NVIDIA_KEY_POOL[_nvidia_key_idx % len(NVIDIA_KEY_POOL)]
+        try:
+            req = _nv_urllib.Request(NVIDIA_BASE_URL, data=body, method="POST", headers={
+                "accept": "application/json",
+                "content-type": "application/json",
+                "authorization": "Bearer %s" % key,
+            })
+            with _nv_urllib.urlopen(req, timeout=120) as r:
+                data = _json.loads(r.read().decode("utf-8"))
+            msg = data["choices"][0]["message"]
+            parts = []
+            content = msg.get("content")
+            if content:
+                parts.append(_NvPart(text=content))
+            for tc in msg.get("tool_calls") or []:
+                fn = tc.get("function", {})
+                try:
+                    args = _json.loads(fn.get("arguments") or "{}")
+                except Exception:
+                    args = {}
+                parts.append(_NvPart(func=_NvFuncCall(fn.get("name", ""), args)))
+            if not parts:
+                parts.append(_NvPart(text=msg.get("reasoning_content") or ""))
+            usage = data.get("usage") or {}
+            return _NvResponse(parts, _NvUsage(usage.get("prompt_tokens", 0), usage.get("completion_tokens", 0)))
+        except Exception as exc:
+            last_exc = exc
+            detail = exc
+            if isinstance(exc, _nv_urlerr.HTTPError):
+                try:
+                    detail = exc.read().decode("utf-8")[:300]
+                except Exception:
+                    pass
+            errors.append(str(detail))
+            try:
+                _logger.warning("[NVIDIA] call failed (key %s...): %s" % (key[:8], detail))
+            except Exception:
+                pass
+            with _nvidia_key_lock:
+                _nvidia_key_idx = (_nvidia_key_idx + 1) % len(NVIDIA_KEY_POOL)
+    raise RuntimeError("All NVIDIA NIM keys failed: %s" % errors)
 
+
+def _call_gemini_with_retry(client, model, contents, config, max_retries=5, base_delay=2):
+    """NVIDIA NIM-backed non-streaming generate; returns a genai-shaped shim."""
+    system_instruction, temperature, want_tools = _nv_config_unpack(config)
+    messages_data = _nv_contents_to_neutral(contents)
+    last_exc = None
     for attempt in range(max_retries):
         try:
-            async def run_flow_coro():
-                return await hviel_chat_flow_internal(flow_payload)
-
+            resp = _nvidia_generate(messages_data, system_instruction, temperature, want_tools)
             try:
-                res = anyio.from_thread.run(run_flow_coro)
-            except RuntimeError:
-                res = asyncio.run(run_flow_coro())
-
-            from genkit.types import GenerateResponse
-            resp_val = GenerateResponse.model_validate(res["response"])
-            compat_resp = GeminiResponseCompat(resp_val)
-            
-            try:
-                if compat_resp.usage_metadata:
-                    _log_api_usage(
-                        getattr(_tls, 'current_session_id', 'SYSTEM'),
-                        model,
-                        compat_resp.usage_metadata.prompt_token_count,
-                        compat_resp.usage_metadata.candidates_token_count
-                    )
-            except Exception as usage_err:
-                _logger.warning(f"[CostTracker] Failed to log usage from generate_content: {usage_err}")
-                
+                if resp.usage_metadata:
+                    _log_api_usage(getattr(_tls, "current_session_id", "SYSTEM"), NVIDIA_MODEL,
+                                   resp.usage_metadata.prompt_token_count, resp.usage_metadata.candidates_token_count)
+            except Exception as ue:
+                _logger.warning("[CostTracker] usage log failed: %s" % ue)
             import alerting
             alerting.record_llm_success()
-            return compat_resp
+            return resp
         except Exception as e:
+            last_exc = e
             import alerting
             alerting.record_llm_failure(str(e))
-            err = (str(e) + " " + str(getattr(e, "__cause__", "")) + " " + str(getattr(e, "__context__", ""))).lower()
-            is_503 = any(x in err for x in ["503", "service_unavailable", "unavailable"])
-            is_429 = any(x in err for x in ["429", "resource_exhausted"])
-            
-            if (is_503 or is_429) and "flash" in model:
-                pro_model = "googleai/gemini-2.5-pro"
-                _logger.warning(f"[Fallback] {model} returned 503/429. Falling back to {pro_model} immediately...")
-                flow_payload['model'] = pro_model
-                try:
-                    async def run_fallback_coro():
-                        return await hviel_chat_flow_internal(flow_payload)
-                    try:
-                        res = anyio.from_thread.run(run_fallback_coro)
-                    except RuntimeError:
-                        res = asyncio.run(run_fallback_coro())
-                    from genkit.types import GenerateResponse
-                    resp_val = GenerateResponse.model_validate(res["response"])
-                    compat_resp = GeminiResponseCompat(resp_val)
-                    try:
-                        if compat_resp.usage_metadata:
-                            _log_api_usage(
-                                getattr(_tls, 'current_session_id', 'SYSTEM'),
-                                pro_model,
-                                compat_resp.usage_metadata.prompt_token_count,
-                                compat_resp.usage_metadata.candidates_token_count
-                            )
-                    except Exception as usage_err:
-                        _logger.warning(f"[CostTracker] Failed to log usage from fallback: {usage_err}")
-                    alerting.record_llm_success()
-                    return compat_resp
-                except Exception as fallback_err:
-                    alerting.record_llm_failure(str(fallback_err))
-                    raise ValueError(f"CRITICAL: Both primary and fallback models are UNAVAILABLE. {fallback_err}")
-                    
-            if (is_503 or is_429) and attempt < max_retries - 1:
-                delay = base_delay * (2 ** attempt)
-                if is_429:
-                    delay *= 2
-                _logger.info(f"[DocGen] Gemini retry attempt {attempt + 1}/{max_retries} in {delay}s")
-                time.sleep(delay)
+            if attempt < max_retries - 1:
+                time.sleep(base_delay * (2 ** attempt))
                 continue
             raise
-    raise ValueError(f"Gemini call failed after {max_retries} retries")
+    raise ValueError("NVIDIA call failed after %d retries: %s" % (max_retries, last_exc))
 
 GLOBAL_STREAM_QUEUES = {}
 
 def _call_gemini_stream_with_retry(client, model, contents, config, max_retries=3, base_delay=2):
-    """Call Genkit generate_stream with compat mapping and fallback/retry logic."""
-    import queue
-    if "/" not in model and not model.startswith("googleai/"):
-        model = f"googleai/{model}"
-
-    system_instruction = None
-    temperature = 0.2
-    tools_list = []
-
-    if config:
-        if hasattr(config, 'system_instruction') and config.system_instruction:
-            if isinstance(config.system_instruction, str):
-                system_instruction = config.system_instruction
-            elif hasattr(config.system_instruction, 'parts') and config.system_instruction.parts:
-                parts_text = []
-                for p in config.system_instruction.parts:
-                    if hasattr(p, 'text') and p.text:
-                        parts_text.append(p.text)
-                system_instruction = "".join(parts_text)
-            else:
-                system_instruction = str(config.system_instruction)
-        if hasattr(config, 'temperature') and config.temperature is not None:
-            temperature = config.temperature
-        if hasattr(config, 'tools') and config.tools:
-            tools_list = [
-                'calculate_petrophysics_properties',
-                'execute_python_simulation',
-                'generate_mermaid_diagram',
-                'fit_petrophysical_curve',
-                'agentic_history_matching',
-                'generate_executive_report',
-                'get_audit_history'
-            ]
-
-    # Convert contents to serializable Genkit messages dictionary list
-    messages_data = []
-    for c in contents:
-        role_str = getattr(c, 'role', 'user')
-        role = 'model' if role_str == 'model' else 'user'
-        parts_data = []
-        c_parts = getattr(c, 'parts', []) or []
-        for p in c_parts:
-            if hasattr(p, 'text') and p.text:
-                parts_data.append({'text': p.text})
-            elif hasattr(p, 'function_call') and p.function_call:
-                parts_data.append({'tool_request': {
-                    'name': p.function_call.name,
-                    'input': dict(p.function_call.args or {})
-                }})
-            elif hasattr(p, 'function_response') and p.function_response:
-                parts_data.append({'tool_response': {
-                    'name': p.function_response.name,
-                    'output': p.function_response.response
-                }})
-        if parts_data:
-            messages_data.append({'role': role, 'parts': parts_data})
-
-    # Flow wrapper for streaming generator
-    @ai.flow(name="hviel_chat_flow_stream")
-    async def hviel_chat_flow_stream_internal(flow_args: dict) -> dict:
-        try:
-            from genkit.types import Message, Role, Part, ToolRequest, ToolResponse
-            genkit_messages = []
-            for m in flow_args['messages']:
-                role = Role.MODEL if m['role'] == 'model' else Role.USER
-                parts = []
-                for p in m['parts']:
-                    if 'text' in p:
-                        parts.append(Part(text=p['text']))
-                    elif 'tool_request' in p:
-                        parts.append(Part(tool_request=ToolRequest(
-                            name=p['tool_request']['name'],
-                            input=p['tool_request'].get('input')
-                        )))
-                    elif 'tool_response' in p:
-                        parts.append(Part(tool_response=ToolResponse(
-                            name=p['tool_response']['name'],
-                            output=p['tool_response']['output']
-                        )))
-                genkit_messages.append(Message(role=role, content=parts))
-
-            stream, response_future = ai.generate_stream(
-                model=flow_args['model'],
-                messages=genkit_messages,
-                system=flow_args['system_instruction'],
-                tools=flow_args['tools_list'] if flow_args['tools_list'] else None,
-                return_tool_requests=True,
-                config={'temperature': flow_args['temperature']}
-            )
-            
-            stream_id = flow_args['stream_id']
-            q = GLOBAL_STREAM_QUEUES[stream_id]
-            
-            async for chunk in stream:
-                q.put({"type": "chunk", "chunk": chunk.model_dump()})
-                
-            resp = await response_future
-            q.put({"type": "done", "response": resp.model_dump()})
-            return {"response": resp.model_dump()}
-        except Exception as flow_err:
-            import traceback
-            _logger.error(f"[FLOW EXCEPTION] Error in hviel_chat_flow_stream_internal: {flow_err}\\nTraceback:\\n{traceback.format_exc()}")
-            stream_id = flow_args.get('stream_id')
-            if stream_id and stream_id in GLOBAL_STREAM_QUEUES:
-                GLOBAL_STREAM_QUEUES[stream_id].put({"type": "error", "error": str(flow_err)})
-            raise flow_err
-
-    flow_payload = {
-        'model': model,
-        'messages': messages_data,
-        'system_instruction': system_instruction,
-        'tools_list': tools_list,
-        'temperature': temperature
-    }
-
+    """NVIDIA NIM-backed 'streaming' generate. NVIDIA is called non-streaming so
+    tool-calls parse reliably; the full result is yielded as one genai-shaped
+    chunk and the caller token-streams part.text downstream."""
+    system_instruction, temperature, want_tools = _nv_config_unpack(config)
+    messages_data = _nv_contents_to_neutral(contents)
+    last_exc = None
     for attempt in range(max_retries):
-        stream_id = str(uuid.uuid4())
-        q = queue.Queue()
-        GLOBAL_STREAM_QUEUES[stream_id] = q
-        flow_payload['stream_id'] = stream_id
-
         try:
-            async def run_flow_stream():
-                return await hviel_chat_flow_stream_internal(flow_payload)
-
+            resp = _nvidia_generate(messages_data, system_instruction, temperature, want_tools)
             try:
-                loop = asyncio.get_running_loop()
-            except RuntimeError:
-                loop = GLOBAL_EVENT_LOOP
-            asyncio.run_coroutine_threadsafe(run_flow_stream(), loop)
-
-            prompt_tokens = 0
-            completion_tokens = 0
-            final_res = None
-
-            from genkit.types import GenerateResponse, GenerateResponseChunk
-
-            while True:
-                item = q.get()
-                if item["type"] == "chunk":
-                    chunk = GenerateResponseChunk.model_validate(item["chunk"])
-                    compat_chunk = GeminiChunkCompat(chunk)
-                    if compat_chunk.usage_metadata:
-                        prompt_tokens = compat_chunk.usage_metadata.prompt_token_count or prompt_tokens
-                        completion_tokens = compat_chunk.usage_metadata.candidates_token_count or completion_tokens
-                    yield compat_chunk
-                elif item["type"] == "done":
-                    final_res = GenerateResponse.model_validate(item["response"])
-                    import alerting
-                    alerting.record_llm_success()
-                    break
-                elif item["type"] == "error":
-                    raise ValueError(item["error"])
-
-            if final_res and final_res.usage:
-                prompt_tokens = final_res.usage.input_tokens or prompt_tokens
-                completion_tokens = final_res.usage.output_tokens or completion_tokens
-
-            try:
-                if prompt_tokens > 0 or completion_tokens > 0:
-                    _log_api_usage(
-                        getattr(_tls, 'current_session_id', 'SYSTEM'),
-                        model,
-                        prompt_tokens,
-                        completion_tokens
-                    )
-            except Exception as usage_err:
-                _logger.warning(f"[CostTracker] Failed to log usage from stream: {usage_err}")
+                if resp.usage_metadata:
+                    _log_api_usage(getattr(_tls, "current_session_id", "SYSTEM"), NVIDIA_MODEL,
+                                   resp.usage_metadata.prompt_token_count, resp.usage_metadata.candidates_token_count)
+            except Exception as ue:
+                _logger.warning("[CostTracker] stream usage log failed: %s" % ue)
+            import alerting
+            alerting.record_llm_success()
+            yield resp
             return
         except Exception as e:
+            last_exc = e
             import alerting
             alerting.record_llm_failure(str(e))
-            err = (str(e) + " " + str(getattr(e, "__cause__", "")) + " " + str(getattr(e, "__context__", ""))).lower()
-            is_503 = any(x in err for x in ["503", "service_unavailable", "unavailable"])
-            is_429 = any(x in err for x in ["429", "resource_exhausted"])
-
-            if (is_503 or is_429) and "flash" in model:
-                pro_model = "googleai/gemini-2.5-pro"
-                _logger.warning(f"[Fallback] {model} stream returned 503/429. Falling back to {pro_model} immediately...")
-                flow_payload['model'] = pro_model
-                
-                pro_stream_id = str(uuid.uuid4())
-                pro_q = queue.Queue()
-                GLOBAL_STREAM_QUEUES[pro_stream_id] = pro_q
-                flow_payload['stream_id'] = pro_stream_id
-
-                try:
-                    async def run_pro_stream():
-                        return await hviel_chat_flow_stream_internal(flow_payload)
-
-                    try:
-                        loop = asyncio.get_running_loop()
-                    except RuntimeError:
-                        loop = GLOBAL_EVENT_LOOP
-                    asyncio.run_coroutine_threadsafe(run_pro_stream(), loop)
-                    
-                    prompt_tokens = 0
-                    completion_tokens = 0
-                    final_res = None
-
-                    while True:
-                        item = pro_q.get()
-                        if item["type"] == "chunk":
-                            chunk = GenerateResponseChunk.model_validate(item["chunk"])
-                            compat_chunk = GeminiChunkCompat(chunk)
-                            if compat_chunk.usage_metadata:
-                                prompt_tokens = compat_chunk.usage_metadata.prompt_token_count or prompt_tokens
-                                completion_tokens = compat_chunk.usage_metadata.candidates_token_count or completion_tokens
-                            yield compat_chunk
-                        elif item["type"] == "done":
-                            final_res = GenerateResponse.model_validate(item["response"])
-                            alerting.record_llm_success()
-                            break
-                        elif item["type"] == "error":
-                            raise ValueError(item["error"])
-
-                    if final_res and final_res.usage:
-                        prompt_tokens = final_res.usage.input_tokens or prompt_tokens
-                        completion_tokens = final_res.usage.output_tokens or completion_tokens
-
-                    try:
-                        if prompt_tokens > 0 or completion_tokens > 0:
-                            _log_api_usage(
-                                getattr(_tls, 'current_session_id', 'SYSTEM'),
-                                pro_model,
-                                prompt_tokens,
-                                completion_tokens
-                            )
-                    except Exception as usage_err:
-                        _logger.warning(f"[CostTracker] Failed to log usage from pro stream fallback: {usage_err}")
-                    return
-                except Exception as fallback_err:
-                    alerting.record_llm_failure(str(fallback_err))
-                    raise ValueError(f"CRITICAL: Both primary and fallback models are UNAVAILABLE. {fallback_err}")
-                finally:
-                    GLOBAL_STREAM_QUEUES.pop(pro_stream_id, None)
-
-            if (is_503 or is_429) and attempt < max_retries - 1:
-                delay = base_delay * (2 ** attempt)
-                if is_429: delay *= 2
-                _logger.info(f"[Chat Stream] Gemini retry attempt {attempt + 1}/{max_retries} in {delay}s")
-                time.sleep(delay)
+            if attempt < max_retries - 1:
+                time.sleep(base_delay * (2 ** attempt))
                 continue
             raise
-        finally:
-            GLOBAL_STREAM_QUEUES.pop(stream_id, None)
+    raise ValueError("NVIDIA stream failed after %d retries: %s" % (max_retries, last_exc))
 
 
-# â"€â"€ GEMINI HA CLIENT â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€
+# -- GEMINI HA CLIENT -------------------------------------------------------- #
 
 class PRCChatAssistant:
 
@@ -9241,7 +9150,8 @@ def sync_document_generation_task(
            (session_id, "model", plot_text, time.time(), email))
            
         TASKS_DB[session_id].update({"progress": 55})
-        
+
+        import os as _os
         base_dir = _os.path.dirname(_os.path.abspath(__file__))
         outputs_dir = _os.path.join(base_dir, "outputs", session_id)
         _os.makedirs(outputs_dir, exist_ok=True)

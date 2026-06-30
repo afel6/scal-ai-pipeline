@@ -39,6 +39,74 @@ coordinate through this file, git, and the human.
 
 ## Handoff Log (newest first — APPEND, never delete)
 
+### [2026-06-30] Claude Code → Antigravity & User (Chat LLM swapped Gemini → NVIDIA NIM; 3 bug fixes; 1 open issue)
+
+**Big change — chat brain is no longer Gemini.** User asked to move the Hviel chat
+assistant + petrophysical tool-calling off Gemini onto **NVIDIA NIM** (OpenAI-compatible,
+`https://integrate.api.nvidia.com/v1`). Final model: **`openai/gpt-oss-120b`** with
+`reasoning_effort: "low"` (started on `nvidia/nemotron-3-super-120b-a12b` but it was too
+slow — see open issue). This is a **local change, NOT pushed** to master yet.
+
+**How it was done (contained, low blast-radius):**
+- New NVIDIA backend block in `app.py` (just above `_call_gemini_with_retry`): stdlib
+  `urllib` HTTP (NO `requests` dep), key-pool failover, and genai-shaped shim classes
+  (`_NvResponse/_NvPart/_NvFuncCall…`) so the 5,500-line chat tool-loop is **untouched**.
+- The two wrappers **`_call_gemini_with_retry` / `_call_gemini_stream_with_retry`** were
+  rewritten to call NVIDIA and return those shims. Genkit (`ai.flow`, `genkit.types`,
+  `GLOBAL_STREAM_QUEUES`) is **no longer used by the chat path**. (Genkit pins in
+  requirements can stay for now; report-gen still imports them.)
+- `_HVIEL_TOOLS` (Gemini uppercase schema) auto-converts to OpenAI tool format via
+  `_nvidia_tools()` / `_nv_lower_schema()`; tool_call ids synthesized in
+  `_nv_messages_from_neutral()`. Gemini `file_data` parts are **dropped** — the
+  deterministic `scal_file_handler` ground-truth is injected as prompt text, so reads
+  stay correct.
+- Keys: `.env` `NVIDIA_API_KEY` (+ `NVIDIA_API_KEY1..N`), loaded by `_load_nvidia_keys()`
+  near the `GEMINI_KEY_POOL` def. Health degraded-check repointed to the NVIDIA pool.
+- Model/effort knobs live at module level: `NVIDIA_MODEL`, and `reasoning_effort` in the
+  `_nvidia_generate` payload. Swap back to Gemini = git revert; backup at `app.py.bak_nvidia`.
+
+**NOT swapped:** the report/extraction pipeline (`sync_document_generation_task`,
+MasterEngineerNode) **still uses Gemini** (`client.models.generate_content`). Its
+LLM-JSON extraction is occasionally flaky. If we want full sovereignty/NVIDIA, this is
+the next chunk — but it's the heavy provenance path, do it carefully.
+
+**3 bugs fixed this round (all verified live with T1-31 data):**
+1. **Server SIGSEGV on any chat file-attach (CRITICAL).** `pd.read_excel` segfaulted in
+   pyarrow. Root cause: **pandas 3.0.1** defaults `future.infer_string=True` → pyarrow
+   strings, and **pyarrow 24 on Python 3.13 crashes** in `ArrowStringArray._from_sequence`.
+   Fix: `pd.set_option("future.infer_string", False)` at the top of `scal_file_handler.py`
+   (process-global). faulthandler trace confirmed the site (`scal_file_handler.py`
+   `extract_absolute_file_truth`). **Antigravity: keep this option set; do not remove it
+   while pandas≥3.0 / pyarrow≥24 are installed.**
+2. **False "Source Mismatch / Cannot Verify".** `compress_traceability_ledger`
+   (`scal_file_handler.py`) hard-refused when the model cited a paraphrased/spaced
+   filename (e.g. dropped `T1-31` from `Mercury Injection Well T1-31.xls`). Loosened to
+   token-overlap matching vs the union of expected-filename tokens (still refuses a
+   genuinely different file). Unit-verified 7/7.
+3. **`name '_os' is not defined`** in `sync_document_generation_task` (~line 9148) —
+   added a local `import os as _os`.
+
+**Verified:** SCAL `/health` ok; `.xlsx` chat-attach + summarize returns correct values +
+provenance, ~30-40s, no crash, no false mismatch. PVT (sister repo) swapped the same way.
+
+**OPEN ISSUE — need your help:** a single **10-sheet workbook**
+(`Mercury Injection Well T1-31.xls`) fails chat-attach with
+`[ERROR: Agent failed (Function process_single_item_agent timed out after 90.0 seconds),
+API failed (API request returned None after all retries)]`. The string
+`process_single_item_agent` is **NOT in any .py file** I could grep — it looks like a
+batch/agent wrapper with a hard **90s** timeout that I never located. Small/medium files
+(1-3 sheets) work fine. Hypotheses: (a) the 10-sheet ground-truth dump makes the prompt
+huge → upstream call slow/None; (b) there's a separate agent path (not the wrappers I
+swapped) still doing per-item processing with a 90s cap. **Antigravity: please (1) find
+`process_single_item_agent` / the 90s timeout owner, and (2) either raise the cap or
+truncate the injected ground-truth for >N-sheet workbooks.** Note the NVIDIA call itself
+logs `[NVIDIA] generate -> model=… tools=…` — none appeared for this request, so it may
+die before the LLM call.
+
+**Left uncommitted:** all of the above (app.py, scal_file_handler.py, .env). Backup:
+`app.py.bak_nvidia`. A temporary `_logger.info("[NVIDIA] generate -> …")` line is in
+`_nvidia_generate` — keep or drop, low noise.
+
 ### [2026-06-29] Claude Code → Antigravity & User (Handover packaging: HANDOVER.md + docs/ tidy)
 
 **Context:** Same day, follow-up to the Graph-RAG/Sandbox/visuals entry below. User is

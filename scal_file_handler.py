@@ -14,6 +14,14 @@ import re
 import io
 from pathlib import Path
 import pandas as pd
+# pandas 3.0 defaults future.infer_string=True, which makes read_excel build
+# pyarrow-backed string arrays. pyarrow 24 on Python 3.13 SEGFAULTS in
+# ArrowStringArray._from_sequence during read_excel under the server. Force the
+# stable numpy object-string backend to prevent the native crash on file upload.
+try:
+    pd.set_option("future.infer_string", False)
+except Exception:
+    pass
 import numpy as np
 import json
 
@@ -834,13 +842,32 @@ def compress_traceability_ledger(text: str, expected_filenames: list[str] = None
         for w in all_words:
             cited_files.add(norm(w))
             
+        def _name_tokens(f):
+            # Alphanumeric tokens (len >= 2) from a filename stem (extension dropped).
+            stem = re.sub(r'\.(?:xlsx|xls|docx|doc|csv|pdf)$', '', f, flags=re.IGNORECASE)
+            return {t for t in re.split(r'[^a-z0-9]+', stem.lower()) if len(t) >= 2}
+
+        # Union of all distinctive tokens across the uploaded (expected) filenames.
+        expected_token_union = set()
+        for e in norm_expected:
+            expected_token_union |= _name_tokens(e)
+
         for norm_cited in cited_files:
-            # Check if norm_cited is a suffix of (or matches) any expected filename
+            # Valid if the cited name suffix-/prefix-matches an expected filename, OR shares
+            # at least one token with the expected filenames. Models often paraphrase a
+            # spaced filename or surface it inside a sentence fragment (e.g. "Mercury
+            # Injection Well.xls", "see T1-31.xls") — those still share tokens with the
+            # upload. Only a citation to a genuinely different, never-uploaded file (zero
+            # token overlap, e.g. Specific_Oil_Permeability.xlsx) trips the gate.
             is_valid = False
             for exp in norm_expected:
                 if exp == norm_cited or exp.endswith(norm_cited) or norm_cited.endswith(exp):
                     is_valid = True
                     break
+            if not is_valid:
+                cited_tokens = _name_tokens(norm_cited)
+                if cited_tokens and (cited_tokens & expected_token_union):
+                    is_valid = True
             if not is_valid:
                 return (
                     "\n### ❌ Source Mismatch / Cannot Verify\n"
