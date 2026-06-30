@@ -2521,7 +2521,7 @@ def _nvidia_generate(messages_data, system_instruction, temperature, want_tools,
     # can exceed the model context window (gpt-oss-120b ~131K tokens), making NVIDIA
     # compute a negative output budget -> 400 "max_tokens must be at least 1". Cap the
     # combined input by truncating the single largest message so the prompt fits.
-    _MAX_INPUT_CHARS = 240000  # dense numeric data ~2.4 chars/token => ~100K tokens, safely under gpt-oss 131K ctx
+    _MAX_INPUT_CHARS = 170000  # dense numeric tables tokenize heavily; keep well under gpt-oss 131K ctx
     _total = sum(len(m.get("content") or "") for m in oa_messages)
     if _total > _MAX_INPUT_CHARS:
         _biggest = max(oa_messages, key=lambda m: len(m.get("content") or ""))
