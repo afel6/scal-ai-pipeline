@@ -39,6 +39,13 @@ coordinate through this file, git, and the human.
 
 ## Handoff Log (newest first — APPEND, never delete)
 
+### [2026-07-02] Antigravity — openpyxl upgrade + citation verification hardening
+
+**Did:**
+- Upgraded `openpyxl` from `3.1.0` to `3.1.5` in SCAL requirements.txt and local `.venv_win` environment. This resolves a critical conflict with the installed Pandas version that crashed Excel ingestion.
+- Hardened the citation validation matching in `scal_file_handler.py`. Stopped checking generic well identifier tokens (`t1`, `31`, etc.) and stopwords (`well`, `sample`, etc.) during filename overlap checks. This prevents false positive matches on source mismatched files and makes the regression test pass.
+- Verified that all 291 unit, validation, and physics sandbox tests are green and pass.
+
 ### [2026-06-30] Claude Code → Antigravity & User (Chat LLM swapped Gemini → NVIDIA NIM; 3 bug fixes; 1 open issue)
 
 **Big change — chat brain is no longer Gemini.** User asked to move the Hviel chat

@@ -37,8 +37,12 @@ class LLMInsightGenerator:
                 model='gemini-2.5-flash',
                 contents=prompt,
             )
+            import alerting
+            alerting.record_llm_success()
             return response.text
         except Exception as e:
+            import alerting
+            alerting.record_llm_failure(str(e))
             return f"AI Generation Failed: {str(e)}"
 
 
@@ -103,8 +107,12 @@ You MUST format your response into two distinct sections with clear markdown hea
                     temperature=0.2,
                 )
             )
+            import alerting
+            alerting.record_llm_success()
             return response.text
         except Exception as e:
+            import alerting
+            alerting.record_llm_failure(str(e))
             return f"Error running Master Engineer analysis: {str(e)}"
 
 
@@ -158,6 +166,8 @@ Generate the complete standalone Streamlit Python code."""
                     temperature=0.1,
                 )
             )
+            import alerting
+            alerting.record_llm_success()
             
             # Clean and extract code from the markdown code block if present
             code = response.text.strip()
@@ -167,6 +177,8 @@ Generate the complete standalone Streamlit Python code."""
                 code = code.split("```")[1].split("```")[0].strip()
             return code
         except Exception as e:
+            import alerting
+            alerting.record_llm_failure(str(e))
             return f"# Streamlit Generation Failed: {str(e)}\n" + self.get_offline_dashboard_code(validated_json)
 
     def get_offline_dashboard_code(self, validated_json: list) -> str:

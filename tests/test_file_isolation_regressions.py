@@ -7,8 +7,10 @@ import hashlib
 from unittest.mock import MagicMock
 
 # Mock google.genai client to prevent network calls during Genkit initialization
+original_client = None
 try:
     import google.genai
+    original_client = google.genai.Client
     class MockModels:
         def list(self):
             return []
@@ -45,7 +47,7 @@ def import_pvt_app():
     old_app = sys.modules.pop('app', None)
     old_config = sys.modules.pop('config', None)
     try:
-        import app as pvt_app
+        from src.api import app as pvt_app
         return pvt_app
     except (ImportError, ModuleNotFoundError) as e:
         print(f"Skipping PVT app import: {e}")
@@ -59,6 +61,10 @@ def import_pvt_app():
 
 scal_app = import_scal_app()
 pvt_app = import_pvt_app()
+
+# Restore original client to prevent mock leakage to other tests
+if original_client is not None:
+    google.genai.Client = original_client
 
 from scal_file_handler import compress_traceability_ledger
 

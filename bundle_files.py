@@ -2,7 +2,7 @@ import os
 
 files_to_bundle = [
     "app.py",
-    "document_engines.py",
+    "hviel_doc_engine.py",
     "frontend/src/App.jsx",
     "frontend/src/KrPlot.jsx"
 ]

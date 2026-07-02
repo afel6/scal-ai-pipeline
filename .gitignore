@@ -70,3 +70,10 @@ PRC_XLSX_*
 *.bak
 *.original.bak
 
+# Generated reports and local uploads
+uploads/
+vault_backups/
+test_generated/
+reports/
+
+

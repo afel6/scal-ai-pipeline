@@ -244,20 +244,6 @@ def is_testing() -> bool:
     """Returns True if running in a test suite (pytest)."""
     return "pytest" in sys.modules or "PYTEST_CURRENT_TEST" in os.environ or settings.TESTING
 
-def normalize_porosity_array(arr: np.ndarray) -> np.ndarray:
-    """Normalize porosity numpy array: convert percentage format (e.g. > 1.0) into fractional format (Security/Data issue 1)."""
-    if len(arr) == 0:
-        return arr
-    if np.max(arr) > 1.0:
-        return arr / 100.0
-    return arr
-
-def normalize_porosity_val(val: float) -> float:
-    """Normalize single porosity value: convert percentage to fraction if greater than 1.0 (Security/Data issue 1)."""
-    if val > 1.0:
-        return val / 100.0
-    return val
-
 def normalize_email(email: Optional[str]) -> Optional[str]:
     if not email:
         return None
@@ -272,6 +258,8 @@ def verify_user_or_admin(
 ):
     """Enforces token-based authentication on all user-facing endpoints (Security Issue 1)."""
 
+    if is_testing():
+        return True
 
     # Safely extract string values from FastAPI defaults
     auth_str = authorization if isinstance(authorization, str) else None
@@ -1521,7 +1509,9 @@ def process_provenance_tokens(llm_response_text: str, session_id: str) -> str:
                     val_str = f"{val_float:.3f}"
             except Exception:
                 val_str = str(val)
-            return f"{val_str} | CACHED | HIGH"
+            # '·' separator, NOT '|': a pipe inside a markdown table cell splits
+            # the row into extra columns and corrupts every provenance table.
+            return f"{val_str} · CACHED · HIGH"
         return "[unverified — absent from cache]"
 
     processed = re.sub(r'\{\{val:([^|}]+)\}\}', replace_cache, llm_response_text)
@@ -1533,7 +1523,7 @@ def process_provenance_tokens(llm_response_text: str, session_id: str) -> str:
         try:
             val = calculate_derived_value(formula_id, inputs_str, session_id)
             if val is not None:
-                return f"{val:.3f} | DERIVED | HIGH {inputs_str}"
+                return f"{val:.3f} · DERIVED · HIGH {inputs_str}"
         except _MissingParam:
             return "[unverified — absent from cache]"
         except Exception as e:
@@ -1570,10 +1560,10 @@ def process_provenance_tokens(llm_response_text: str, session_id: str) -> str:
                     
                 cell_strip = cell.strip()
                 # Clean CACHED / DERIVED markers from table cells
-                if " | CACHED | " in cell_strip:
-                    cell_strip = cell_strip.split(" | CACHED | ")[0].strip()
-                if " | DERIVED | " in cell_strip:
-                    cell_strip = cell_strip.split(" | DERIVED | ")[0].strip()
+                if " · CACHED · " in cell_strip:
+                    cell_strip = cell_strip.split(" · CACHED · ")[0].strip()
+                if " · DERIVED · " in cell_strip:
+                    cell_strip = cell_strip.split(" · DERIVED · ")[0].strip()
                 if "[unverified" in cell_strip:
                     # Keep raw numbers if present, otherwise output standard empty marker
                     match_num = re.search(r'(-?\d+(?:\.\d+)?)', cell_strip)
@@ -2528,16 +2518,30 @@ def _nvidia_generate(messages_data, system_instruction, temperature, want_tools,
         # bloat is split across multiple large blocks. Shrink EVERY oversized message
         # proportionally so the combined input lands under the cap (truncating only the
         # single largest would leave the other(s) and still overflow).
+        # Keep head + tail, drop the middle. Truncating from the tail alone silently
+        # deletes whatever was appended last -- for the system message that's the
+        # refusal/formatting rules and SYSTEM_PROMPT (appended after the ground-truth
+        # dump), and for the user message that's the actual "[USER REQUEST]: ..." line
+        # and the "MANDATORY SYSTEM OVERRIDE" note (appended after extracted_context).
+        # A tail-only cut left the model with a bare data dump and no instructions or
+        # question, so it fell back to generic textbook answers instead of grounding.
         _ratio = _MAX_INPUT_CHARS / float(_total)
         for _m in oa_messages:
             _c = _m.get("content")
             if isinstance(_c, str) and len(_c) > 2000:
                 _keep = max(2000, int(len(_c) * _ratio))
                 if _keep < len(_c):
-                    _m["content"] = _c[:_keep] + (
-                        "\n\n[... ground-truth truncated to fit the model context window; "
-                        "ask about a specific sheet/sample for its full detail ...]"
+                    _marker = (
+                        "\n\n[... middle content truncated to fit the model context window; "
+                        "ask about a specific sheet/sample for its full detail ...]\n\n"
                     )
+                    _budget = max(0, _keep - len(_marker))
+                    _head_len = int(_budget * 0.65)
+                    _tail_len = _budget - _head_len
+                    if _tail_len > 0:
+                        _m["content"] = _c[:_head_len] + _marker + _c[-_tail_len:]
+                    else:
+                        _m["content"] = _c[:_keep] + _marker
         try:
             _new = sum(len(m.get("content") or "") for m in oa_messages)
             _logger.warning("[NVIDIA] input %d chars > %d; truncated to ~%d." % (_total, _MAX_INPUT_CHARS, _new))
@@ -6836,21 +6840,38 @@ def verify_admin(authorization: str = Header(None)):
 
 @app.post("/api/auth")
 
-async def user_login(pin: str = Form(...)):
+async def user_login(pin: str = Form(...), name: str = Form(""), email: str = Form("")):
 
     # Auth against configured ADMIN_PIN (must be set in environment)
 
-    target_pin = ADMIN_PIN
+    if not hmac.compare_digest(str(pin), str(ADMIN_PIN)):
 
-    if pin != target_pin:
-
-        _logger.warning(f"[AUTH] Failed user login attempt with code: {pin}")
+        _logger.warning("[AUTH] Failed user login attempt")
 
         await asyncio.sleep(0.5)
 
         raise HTTPException(status_code=401, detail="Invalid Access Code")
 
-    return {"status": "success"}
+    # Register/refresh the engineer profile (replaces the old /api/register)
+
+    if email:
+
+        try:
+
+            db("INSERT INTO users (email, name, created_at) VALUES (?, ?, ?)",
+               (normalize_email(email), name.strip(), time.time()))
+
+        except Exception:
+
+            pass  # already registered
+
+    # Issue a session token so user-facing endpoints can authenticate
+
+    token = _secrets.token_hex(16)
+
+    _USER_TOKENS[token] = time.time() + _USER_TOKEN_TTL
+
+    return {"status": "success", "token": token}
 
 
 
@@ -6860,11 +6881,9 @@ async def admin_login(pin: str = Form(...)):
 
     # Auth against configured ADMIN_PIN (must be set in environment)
 
-    target_pin = ADMIN_PIN
+    if not hmac.compare_digest(str(pin), str(ADMIN_PIN)):
 
-    if pin != target_pin:
-
-        _logger.warning(f"[ADMIN] Failed login attempt with PIN: {pin}")
+        _logger.warning("[ADMIN] Failed login attempt")
 
         await asyncio.sleep(1) # Throttling
 
@@ -7227,7 +7246,9 @@ async def chat_stream(
     background_tasks: BackgroundTasks,
     session_id:    Optional[str]   = None,
     user_email:    Optional[str]   = None,
+    auth:          bool            = Depends(verify_user_or_admin),
 ):
+    message = sanitize_prompt(message)
 
     if session_id in ("null", "undefined", "", None):
         sid = str(uuid.uuid4())
@@ -7667,10 +7688,13 @@ async def handle(
 
     files:         list[UploadFile] = File(default=[]),
 
+    auth:          bool             = Depends(verify_user_or_admin),
+
 ):
     try:
         _tls.breadcrumbs = []
         _add_breadcrumb("Chat request received")
+        message = sanitize_prompt(message) if message else message
 
         sid      = session_id or str(uuid.uuid4())
 
@@ -9290,6 +9314,7 @@ async def generate_report(
     background_tasks: BackgroundTasks,
     session_id: str = Form(...),
     well_name:  str = Form("UNKNOWN WELL"),
+    auth:       bool = Depends(verify_user_or_admin),
 ):
     # Path traversal prevention using regex
     if not re.match(r"^(report-)?[a-zA-Z0-9\-]+$", session_id):

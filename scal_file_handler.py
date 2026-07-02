@@ -852,13 +852,20 @@ def compress_traceability_ledger(text: str, expected_filenames: list[str] = None
         for e in norm_expected:
             expected_token_union |= _name_tokens(e)
 
+        def _is_distinctive(t):
+            if t in ('well', 'file', 'data', 'sheet', 'sample', 'xlsx', 'xls', 'csv', 'pdf', 'docx'):
+                return False
+            if t.isdigit():
+                return False
+            if re.match(r'^t\d+$', t):
+                return False
+            return True
+
+        expected_distinctive = {t for t in expected_token_union if _is_distinctive(t)}
+
         for norm_cited in cited_files:
             # Valid if the cited name suffix-/prefix-matches an expected filename, OR shares
-            # at least one token with the expected filenames. Models often paraphrase a
-            # spaced filename or surface it inside a sentence fragment (e.g. "Mercury
-            # Injection Well.xls", "see T1-31.xls") — those still share tokens with the
-            # upload. Only a citation to a genuinely different, never-uploaded file (zero
-            # token overlap, e.g. Specific_Oil_Permeability.xlsx) trips the gate.
+            # at least one distinctive token with the expected filenames.
             is_valid = False
             for exp in norm_expected:
                 if exp == norm_cited or exp.endswith(norm_cited) or norm_cited.endswith(exp):
@@ -866,8 +873,13 @@ def compress_traceability_ledger(text: str, expected_filenames: list[str] = None
                     break
             if not is_valid:
                 cited_tokens = _name_tokens(norm_cited)
-                if cited_tokens and (cited_tokens & expected_token_union):
-                    is_valid = True
+                cited_distinctive = {t for t in cited_tokens if _is_distinctive(t)}
+                if cited_distinctive:
+                    if cited_distinctive & expected_distinctive:
+                        is_valid = True
+                else:
+                    if cited_tokens and cited_tokens.issubset(expected_token_union):
+                        is_valid = True
             if not is_valid:
                 return (
                     "\n### ❌ Source Mismatch / Cannot Verify\n"
