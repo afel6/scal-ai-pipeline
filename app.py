@@ -6682,9 +6682,9 @@ async def user_login(pin: str = Form(...)):
 
     target_pin = ADMIN_PIN
 
-    if pin != target_pin:
+    if not target_pin or not hmac.compare_digest(pin, target_pin):
 
-        _logger.warning(f"[AUTH] Failed user login attempt with code: {pin}")
+        _logger.warning("[AUTH] Failed user login attempt")
 
         await asyncio.sleep(0.5)
 
@@ -6702,9 +6702,9 @@ async def admin_login(pin: str = Form(...)):
 
     target_pin = ADMIN_PIN
 
-    if pin != target_pin:
+    if not target_pin or not hmac.compare_digest(pin, target_pin):
 
-        _logger.warning(f"[ADMIN] Failed login attempt with PIN: {pin}")
+        _logger.warning("[ADMIN] Failed login attempt")
 
         await asyncio.sleep(1) # Throttling
 
