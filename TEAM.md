@@ -39,6 +39,31 @@ coordinate through this file, git, and the human.
 
 ## Handoff Log (newest first — APPEND, never delete)
 
+### [2026-07-05] Claude Code — Chat ground-truth injection capping (large-Excel context overflow fix)
+
+**Did:**
+- **Completed the injection-site fix** for the "large multi-sheet Excel overflows the chat context" bug (e.g. `Mercury Injection Well T1-31.xls`, 10 sheets → ~800K-char un-truncated `MANDATORY_GROUND_TRUTH_INVENTORY` injected into the prompt → negative `max_tokens` HTTP 400 from NVIDIA).
+- Rewrote `_truncate_ground_truth()` (app.py ~line 858) with **two lines of defense, both env-configurable**:
+  1. Per-sheet row capping — each sheet's `    ROW n: [...]` dump reduced to head/tail preview with an explicit `[TRUNCATED n ROWS ...]` marker. **`SCAL_GT_MAX_ROWS`** (default 6). Sheet names, `COLUMNS (...)` headers, and `FULL SHAPE` dimensions are always preserved so the model knows what exists and can ask for ranges.
+  2. Overall char cap — **`SCAL_GT_MAX_CHARS`** (default 120000). If row-capping isn't enough, rows re-cap to a 2-row preview; pathological cases (huge cells) get a head+tail char cut plus an appended structural sheet index so no sheet name is ever lost.
+- New helper `_cap_prompt_block()` (app.py ~line 838) — generic head+tail char cap with truncation marker.
+- **All chat injection sites hooked** (both were inside `PRCChatAssistant.chat`):
+  - app.py ~5158: `[MANDATORY GROUND TRUTH INVENTORY]` block in `extracted_context` → `_truncate_ground_truth(cached_gt)`; `[FULLY-VERIFIED EXTRACTION PARAMETERS]` (labeled_values) capped via `_cap_prompt_block`.
+  - app.py ~5383: `MANDATORY_GROUND_TRUTH_INVENTORY (SESSION DATA CACHE)` block prepended to the dynamic system prompt inside `_generate()` → gt row/char-capped; **`CACHED LABELED VALUES` and `CACHED FLAT VECTORS` JSON dumps now capped too** via **`SCAL_GT_JSON_MAX_CHARS`** (default 30000) — flat_vectors holds full numeric column vectors per sheet (stored under two keys each) and was a second, previously-unguarded overflow vector.
+  - Other `ground_truth` readers checked and confirmed non-injecting (provenance token lookup ~1670, `get_filenames_from_cache`, cache persistence) — no other chat-prompt injection points exist. The report pipeline (`sync_document_generation_task` system-instruction injection) was deliberately **not touched** per handoff scope.
+- **Internal timeout audit:** NO ~90s timeout exists anywhere in this repo on the chat/LLM path. The only related timeouts: NVIDIA `urlopen` HTTP timeout (was hardcoded 120s) and a 15s SSE heartbeat poll (`asyncio.wait_for(q.get(), 15.0)` — a keepalive loop, not a cutoff). The 120s HTTP timeout is now env-configurable: **`SCAL_LLM_HTTP_TIMEOUT`** (default 300s), app.py ~176 + ~2753. The model-level 170K-char proportional-truncation backstop in `_nvidia_generate` remains as the final safety net.
+
+**Verified:**
+- `python -m py_compile app.py` — clean.
+- `py -3.13 -m pytest tests/` — **293 passed, 0 failed** (10m26s, full suite green).
+- Scratchpad stress test (not committed): built a fake 10-sheet × 2000-row inventory (~1.3M chars) in the exact `═══ FILE:` / `  SHEET:` / `    ROW n:` format — truncated output was 6.7K chars (defaults), all 10 sheet headers + COLUMNS + FULL SHAPE lines retained; pathological 600K-single-cell case capped at exactly 120000 chars with the sheet index preserved; env overrides and bogus env values verified.
+
+**For Antigravity:**
+- **Injection-site capping is DONE** — the chat path can no longer overflow on large workbooks regardless of file size.
+- **The ~90s timeout on `process_single_item_agent` is in the EXTERNAL runner/harness, NOT this repo** — it still needs raising there (suggest honoring `SCAL_LLM_HTTP_TIMEOUT` or an equivalent 300s default). Nothing more can be done in-repo for it.
+- **Report pipeline (`sync_document_generation_task` / MasterEngineerNode) is still on Gemini/genkit** — being migrated next (separate task, do not entangle with this change). genkit stays pinned at 0.4.0.
+- New env knobs (all optional, sane defaults): `SCAL_GT_MAX_ROWS=6`, `SCAL_GT_MAX_CHARS=120000`, `SCAL_GT_JSON_MAX_CHARS=30000`, `SCAL_LLM_HTTP_TIMEOUT=300`.
+
 ### [2026-07-02] Antigravity — openpyxl upgrade + citation verification hardening
 
 **Did:**

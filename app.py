@@ -173,6 +173,14 @@ def _load_nvidia_keys() -> list[str]:
 NVIDIA_KEY_POOL: list[str] = _load_nvidia_keys()
 NVIDIA_BASE_URL = "https://integrate.api.nvidia.com/v1/chat/completions"
 NVIDIA_MODEL = "openai/gpt-oss-120b"
+# HTTP timeout (seconds) for a single NVIDIA NIM completion call. Large multi-sheet
+# prompts on a reasoning model can exceed the old hardcoded 120s; env-configurable.
+try:
+    NVIDIA_HTTP_TIMEOUT = float(os.getenv("SCAL_LLM_HTTP_TIMEOUT", "300") or 300)
+    if NVIDIA_HTTP_TIMEOUT <= 0:
+        NVIDIA_HTTP_TIMEOUT = 300.0
+except (TypeError, ValueError):
+    NVIDIA_HTTP_TIMEOUT = 300.0
 _nvidia_key_idx = 0
 _nvidia_key_lock = threading.Lock()
 
@@ -819,6 +827,123 @@ def get_user_file_history_context(email: str, sid: str = None) -> str:
         return ""
 
 
+
+def _env_int(name: str, default: int) -> int:
+    """Read a positive integer from the environment; fall back to default on
+    missing, empty, non-numeric, or non-positive values."""
+    try:
+        v = int(os.getenv(name, "") or default)
+        return v if v > 0 else default
+    except (TypeError, ValueError):
+        return default
+
+
+def _cap_prompt_block(text: str, max_chars: int, label: str = "BLOCK") -> str:
+    """Hard character cap for any text block injected into an LLM prompt.
+
+    Keeps head + tail and drops the middle with an explicit marker so the model
+    knows data was elided and can ask for a specific sheet/column/row range
+    instead of guessing. Second line of defense behind the structured per-sheet
+    row capping in `_truncate_ground_truth`.
+    """
+    if not text or len(text) <= max_chars:
+        return text
+    marker = (
+        f"\n... [TRUNCATED {label}: {len(text) - max_chars} CHARS ELIDED TO FIT THE MODEL "
+        f"CONTEXT WINDOW — ask for a specific sheet/column/row range for full detail] ...\n"
+    )
+    budget = max(1000, max_chars - len(marker))
+    head_len = int(budget * 0.7)
+    tail_len = budget - head_len
+    return text[:head_len] + marker + text[-tail_len:]
+
+
+def _truncate_ground_truth(gt_text: str, max_rows: int = None, max_chars: int = None) -> str:
+    """Truncate large tabular ground-truth inventory data before LLM prompt injection.
+
+    Two lines of defense (both env-configurable):
+      1. Per-sheet row capping (SCAL_GT_MAX_ROWS, default 6): each sheet's
+         "    ROW n: [...]" dump is reduced to a head/tail preview with an
+         explicit truncation marker. Sheet names, column headers, and
+         FULL SHAPE dimensions are always preserved so the model still knows
+         what exists and can request specific ranges.
+      2. Overall character cap (SCAL_GT_MAX_CHARS, default 120000): if the
+         row-capped text is still oversized (pathological files with huge
+         cells/headers), rows are re-capped to a minimum preview and finally
+         hard char-capped while preserving a structural sheet index.
+
+    Without this, a 10-sheet workbook produces an ~800K-char inventory that
+    overflows the gpt-oss-120b context (negative max_tokens -> HTTP 400).
+    """
+    if not gt_text:
+        return ""
+    if max_rows is None:
+        max_rows = _env_int("SCAL_GT_MAX_ROWS", 6)
+    if max_chars is None:
+        max_chars = _env_int("SCAL_GT_MAX_CHARS", 120000)
+
+    def _row_capped(limit: int) -> str:
+        lines = gt_text.splitlines()
+        truncated_lines = []
+        sheet_rows = []
+        in_sheet = False
+
+        def truncate_rows_list(rows: list, lim: int) -> list:
+            if len(rows) <= lim:
+                return rows
+            keep_head = 3
+            keep_tail = 3
+            if lim < 6:
+                keep_head = max(1, lim // 2)
+                keep_tail = max(1, lim - keep_head)
+            head = rows[:keep_head]
+            tail = rows[-keep_tail:]
+            middle = (f"    ... [TRUNCATED {len(rows) - keep_head - keep_tail} ROWS FOR CONTEXT "
+                      f"BREVITY — ask for a specific row range to see them] ...")
+            return head + [middle] + tail
+
+        for line in lines:
+            if line.startswith("  SHEET: ") or "═══ FILE: " in line:
+                if sheet_rows:
+                    truncated_lines.extend(truncate_rows_list(sheet_rows, limit))
+                    sheet_rows = []
+                truncated_lines.append(line)
+                in_sheet = line.startswith("  SHEET: ")
+            elif in_sheet and line.startswith("    ROW "):
+                sheet_rows.append(line)
+            else:
+                if sheet_rows:
+                    truncated_lines.extend(truncate_rows_list(sheet_rows, limit))
+                    sheet_rows = []
+                truncated_lines.append(line)
+
+        if sheet_rows:
+            truncated_lines.extend(truncate_rows_list(sheet_rows, limit))
+
+        return "\n".join(truncated_lines)
+
+    out = _row_capped(max_rows)
+
+    # Second line of defense: overall character cap.
+    if len(out) > max_chars and max_rows > 2:
+        # Emergency minimum row preview first (keeps structure fully intact).
+        out = _row_capped(2)
+    if len(out) > max_chars:
+        # Pathological case (huge cells/headers even with 2-row previews):
+        # preserve the full structural skeleton (file/sheet names, column
+        # headers, shapes) in an appended index, then head+tail the body.
+        structural_prefixes = ("═══ FILE:", "TOTAL SHEETS:", "SHEET NAMES:",
+                               "  SHEET: ", "    COLUMNS (", "    FULL SHAPE:")
+        skeleton = [ln for ln in out.splitlines()
+                    if ln.startswith(structural_prefixes) or "═══ FILE: " in ln]
+        skeleton_text = ""
+        if skeleton:
+            skeleton_text = ("\n[STRUCTURAL SHEET INDEX — all sheets/columns/shapes preserved "
+                             "despite truncation above]:\n" + "\n".join(skeleton) + "\n")
+            skeleton_text = _cap_prompt_block(skeleton_text, max(2000, max_chars // 4), "SHEET INDEX")
+        body_budget = max(1000, max_chars - len(skeleton_text))
+        out = _cap_prompt_block(out, body_budget, "GROUND TRUTH INVENTORY") + skeleton_text
+    return out
 
 
 def populate_cache_from_ground_truth(sid: str, gt_text: str):
@@ -2577,7 +2702,7 @@ def _nvidia_generate(messages_data, system_instruction, temperature, want_tools,
                 "content-type": "application/json",
                 "authorization": "Bearer %s" % key,
             })
-            with _nv_urllib.urlopen(req, timeout=120) as r:
+            with _nv_urllib.urlopen(req, timeout=NVIDIA_HTTP_TIMEOUT) as r:
                 data = _json.loads(r.read().decode("utf-8"))
             msg = data["choices"][0]["message"]
             parts = []
@@ -5031,9 +5156,11 @@ class PRCChatAssistant:
         if has_cached_data:
             gt_has_tables = bool(cached_gt) and ("COLUMNS (" in cached_gt or bool(labeled_values))
             if gt_has_tables:
-                extracted_context += f"\n\n[MANDATORY GROUND TRUTH INVENTORY]:\n{cached_gt}\n\n"
+                truncated_gt = _truncate_ground_truth(cached_gt)
+                extracted_context += f"\n\n[MANDATORY GROUND TRUTH INVENTORY]:\n{truncated_gt}\n\n"
             if labeled_values:
-                extracted_context += f"[FULLY-VERIFIED EXTRACTION PARAMETERS]:\n{str(labeled_values)}\n\n"
+                _lv_cap = _env_int("SCAL_GT_JSON_MAX_CHARS", 30000)
+                extracted_context += f"[FULLY-VERIFIED EXTRACTION PARAMETERS]:\n{_cap_prompt_block(str(labeled_values), _lv_cap, 'LABELED VALUES')}\n\n"
 
 
         # ── DOCUMENT RECOVERY FOR FOLLOW-UP MESSAGES ──────────────────────────
@@ -5254,12 +5381,16 @@ class PRCChatAssistant:
                             extra_prompt += "You are provided with a MANDATORY_GROUND_TRUTH_INVENTORY and cached data structures extracted programmatically by the Python server from the actual binary file uploaded in this session.\n"
                             extra_prompt += "This data is ABSOLUTE TRUTH. You MUST read and cite only values/sheets/columns listed below.\n\n"
                             
+                            _json_cap = _env_int("SCAL_GT_JSON_MAX_CHARS", 30000)
                             if gt_text:
-                                extra_prompt += f"{gt_text}\n\n"
+                                extra_prompt += f"{_truncate_ground_truth(gt_text)}\n\n"
                             if labeled_vals:
-                                extra_prompt += f"### CACHED LABELED VALUES:\n{_json.dumps(labeled_vals, indent=2)}\n\n"
+                                extra_prompt += f"### CACHED LABELED VALUES:\n{_cap_prompt_block(_json.dumps(labeled_vals, indent=2), _json_cap, 'LABELED VALUES')}\n\n"
                             if flat_vecs:
-                                extra_prompt += f"### CACHED FLAT VECTORS:\n{_json.dumps(flat_vecs, indent=2)}\n\n"
+                                # flat_vectors holds full numeric column vectors for every sheet
+                                # (each stored under two keys) — for a 10-sheet x 2000-row workbook
+                                # this JSON dump alone can exceed the model context. Cap it hard.
+                                extra_prompt += f"### CACHED FLAT VECTORS:\n{_cap_prompt_block(_json.dumps(flat_vecs, indent=2), _json_cap, 'FLAT VECTORS')}\n\n"
                                 
                             extra_prompt += "=========================================\n\n"
                             
