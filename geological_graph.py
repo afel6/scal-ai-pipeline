@@ -82,9 +82,14 @@ class GeologicalGraph:
         Destination SQLite file. When ``None`` the path is taken from
         :data:`config.settings.graph_db_path`. Pass ``":memory:"`` for an
         ephemeral in-process graph (used heavily by the test-suite).
+    seed:
+        When ``True`` (default) an empty database is populated with the
+        default Libyan basin/formation/well slice via
+        :meth:`_seed_default_relations`. Pass ``False`` for a pristine graph
+        (the unit tests rely on this).
     """
 
-    def __init__(self, db_path: Optional[str] = None) -> None:
+    def __init__(self, db_path: Optional[str] = None, seed: bool = True) -> None:
         if db_path is None:
             # Imported lazily so the module stays usable in minimal environments
             # (e.g. isolated unit tests) where the full settings stack is absent.
@@ -100,6 +105,8 @@ class GeologicalGraph:
             sqlite3.connect(db_path) if db_path == ":memory:" else None
         )
         self._initialise_schema()
+        if seed:
+            self._seed_default_relations()
         _logger.info("GeologicalGraph ready at %s", db_path)
 
     # ── connection management ─────────────────────────────────────────────────
@@ -146,6 +153,55 @@ class GeologicalGraph:
             )
 
     # ── write path ────────────────────────────────────────────────────────────
+
+    def _seed_default_relations(self) -> int:
+        """Populate an empty graph with the default Libyan geological slice.
+
+        Idempotent: any pre-existing node means the store is already seeded (or
+        deliberately curated), so nothing is written and ``0`` is returned.
+        Otherwise the default basin/formation/lithology/fluid/well relations
+        are bulk-loaded and the ingested count is returned.
+        """
+        with self._connect() as conn:
+            row = conn.execute("SELECT 1 FROM nodes LIMIT 1").fetchone()
+        if row is not None:
+            return 0
+
+        relations: List[Sequence[Any]] = [
+            # Formations in Basins
+            ("Gialo Formation", "Formation", "Sirte Basin", "Basin", "LOCATED_IN"),
+            ("Zelten Formation", "Formation", "Sirte Basin", "Basin", "LOCATED_IN"),
+            ("Waha Formation", "Formation", "Sirte Basin", "Basin", "LOCATED_IN"),
+            ("Bahi Formation", "Formation", "Sirte Basin", "Basin", "LOCATED_IN"),
+            ("Dahra Formation", "Formation", "Sirte Basin", "Basin", "LOCATED_IN"),
+            ("Mamuniyat Formation", "Formation", "Murzuq Basin", "Basin", "LOCATED_IN"),
+            # Formation lithologies
+            ("Gialo Formation", "Formation", "Carbonate", "Lithology", "HAS_LITHOLOGY"),
+            ("Zelten Formation", "Formation", "Carbonate", "Lithology", "HAS_LITHOLOGY"),
+            ("Waha Formation", "Formation", "Sandstone", "Lithology", "HAS_LITHOLOGY"),
+            ("Bahi Formation", "Formation", "Sandstone", "Lithology", "HAS_LITHOLOGY"),
+            ("Dahra Formation", "Formation", "Carbonate", "Lithology", "HAS_LITHOLOGY"),
+            ("Mamuniyat Formation", "Formation", "Sandstone", "Lithology", "HAS_LITHOLOGY"),
+            # Formation fluids
+            ("Gialo Formation", "Formation", "Oil", "FluidType", "CONTAINS_FLUID"),
+            ("Zelten Formation", "Formation", "Oil", "FluidType", "CONTAINS_FLUID"),
+            ("Waha Formation", "Formation", "Oil", "FluidType", "CONTAINS_FLUID"),
+            ("Bahi Formation", "Formation", "Gas", "FluidType", "CONTAINS_FLUID"),
+            ("Dahra Formation", "Formation", "Oil", "FluidType", "CONTAINS_FLUID"),
+            ("Mamuniyat Formation", "Formation", "Oil", "FluidType", "CONTAINS_FLUID"),
+            # Wells penetrating formations (petrophysics on the edge metadata)
+            ("Well-A1", "Well", "Gialo Formation", "Formation", "PENETRATES",
+             {"porosity": 0.22, "permeability": 120.0}),
+            ("Well-B2", "Well", "Zelten Formation", "Formation", "PENETRATES",
+             {"porosity": 0.18, "permeability": 45.0}),
+            ("Well-C3", "Well", "Waha Formation", "Formation", "PENETRATES",
+             {"porosity": 0.25, "permeability": 350.0}),
+            ("Well-T1-31", "Well", "Gialo Formation", "Formation", "PENETRATES",
+             {"porosity": 0.21, "permeability": 95.0}),
+        ]
+        ingested = self.import_relations(relations)
+        _logger.info("Seeded geological graph with %d default relations.", ingested)
+        return ingested
 
     def add_relation(
         self,

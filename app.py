@@ -2191,6 +2191,24 @@ _HVIEL_TOOLS = [
                 }
             },
 
+            {
+                "name": "hybrid_geological_search",
+                "description": "Hybrid geological knowledge search: fuses the SQLite Geological Knowledge Graph (Libyan basins, formations, lithologies, fluids, wells) with vector analog-well retrieval. Mention basin/formation/well names in query_text to anchor the graph traversal; pass porosity (porous_low/porous_high, fraction) and permeability (perm_low/perm_high, mD) windows to fetch analog wells from the vector store.",
+                "parameters": {
+                    "type": "OBJECT",
+                    "properties": {
+                        "query_text": {"type": "STRING"},
+                        "porous_low": {"type": "NUMBER"},
+                        "porous_high": {"type": "NUMBER"},
+                        "perm_low": {"type": "NUMBER"},
+                        "perm_high": {"type": "NUMBER"},
+                        "depth_limit": {"type": "INTEGER"},
+                        "n_results": {"type": "INTEGER"}
+                    },
+                    "required": ["query_text"]
+                }
+            },
+
         ]
 
     }
@@ -2378,6 +2396,40 @@ def sandbox_fit_archie_tool(input: SandboxFitArchieInput) -> str:
     if input.sample_name:
         fit_res["sample_name"] = input.sample_name
     return json.dumps(fit_res)
+
+class HybridGeologicalSearchInput(BaseModel):
+    query_text: str
+    porous_low: Optional[float] = None
+    porous_high: Optional[float] = None
+    perm_low: Optional[float] = None
+    perm_high: Optional[float] = None
+    depth_limit: Optional[int] = 1
+    n_results: Optional[int] = 3
+
+@ai.tool(name="hybrid_geological_search", description="Hybrid geological knowledge search: fuses the SQLite Geological Knowledge Graph (Libyan basins, formations, lithologies, fluids, wells) with vector analog-well retrieval. Mention basin/formation/well names in query_text to anchor the graph traversal; pass porosity (porous_low/porous_high, fraction) and permeability (perm_low/perm_high, mD) windows to fetch analog wells from the vector store.")
+def hybrid_geological_search_tool(input: HybridGeologicalSearchInput) -> str:
+    import json
+    from geological_graph import GeologicalGraph
+    from rag_database import RAGDatabase
+    graph = GeologicalGraph(db_path=settings.graph_db_path, seed=True)
+    retriever = RAGDatabase()
+    porous_range = (
+        (float(input.porous_low), float(input.porous_high))
+        if input.porous_low is not None and input.porous_high is not None else None
+    )
+    perm_range = (
+        (float(input.perm_low), float(input.perm_high))
+        if input.perm_low is not None and input.perm_high is not None else None
+    )
+    res = graph.hybrid_search(
+        query_text=input.query_text,
+        porous_range=porous_range,
+        perm_range=perm_range,
+        retriever=retriever,
+        depth_limit=input.depth_limit or 1,
+        n_results=input.n_results or 3,
+    )
+    return json.dumps(res)
 
 # Compatibility Wrapper Classes for Genkit response to Gemini SDK response mapping
 
@@ -3512,6 +3564,53 @@ class PRCChatAssistant:
             except Exception as e:
                 result = _json.dumps({"status": "error", "error": str(e)})
 
+        elif name == "hybrid_geological_search":
+            try:
+                from geological_graph import GeologicalGraph
+
+                query_text = args.get("query_text", "")
+                porous_low = args.get("porous_low")
+                porous_high = args.get("porous_high")
+                perm_low = args.get("perm_low")
+                perm_high = args.get("perm_high")
+                depth_limit = int(args.get("depth_limit") or 1)
+                n_results = int(args.get("n_results") or 3)
+
+                porous_range = (
+                    (float(porous_low), float(porous_high))
+                    if porous_low is not None and porous_high is not None else None
+                )
+                perm_range = (
+                    (float(perm_low), float(perm_high))
+                    if perm_low is not None and perm_high is not None else None
+                )
+
+                graph = GeologicalGraph(db_path=settings.graph_db_path, seed=True)
+
+                retriever = None
+                try:
+                    from rag_database import RAGDatabase
+                    retriever = RAGDatabase()
+                except (KeyboardInterrupt, SystemExit):
+                    raise
+                except BaseException as rag_exc:
+                    # BaseException on purpose: chromadb's Rust bindings raise
+                    # pyo3 PanicException (a BaseException) on corrupt/legacy
+                    # stores; degrade to a graph-only answer instead of dying.
+                    _logger.warning("Hybrid search: vector retriever unavailable (%s) — graph-only result.", rag_exc)
+
+                res = graph.hybrid_search(
+                    query_text=query_text,
+                    porous_range=porous_range,
+                    perm_range=perm_range,
+                    retriever=retriever,
+                    depth_limit=depth_limit,
+                    n_results=n_results,
+                )
+                result = _json.dumps(res)
+            except Exception as e:
+                result = _json.dumps({"status": "error", "error": str(e)})
+
         else:
 
             result = f"Unknown tool: {name}"
@@ -3693,6 +3792,50 @@ class PRCChatAssistant:
                         return f"__PRC_PLOT__\n{_safe_json_dumps(plot_ff)}\n\n"
                 except Exception as e:
                     return f"⚠️ Error formatting sandbox Archie response: {e}"
+
+            if name == "hybrid_geological_search":
+                try:
+                    res = _json.loads(result)
+                    if isinstance(res, dict) and res.get("status") == "error":
+                        return f"⚠️ Hybrid geological search failed: {res.get('error')}"
+
+                    query = res.get("query") or args.get("query_text", "")
+                    graph_part = res.get("graph", {}) or {}
+                    matched = graph_part.get("matched_nodes", []) or []
+                    subgraphs = graph_part.get("subgraphs", []) or []
+                    vector = res.get("vector", []) or []
+
+                    lines = [f"\n\n**🗺️ Hybrid Geological Search** — `{query}`\n"]
+
+                    if matched:
+                        lines.append("**Matched Graph Entities:** " + ", ".join(f"`{m}`" for m in matched) + "\n")
+                    else:
+                        lines.append("**Matched Graph Entities:** none found in the knowledge graph.\n")
+
+                    for sg in subgraphs:
+                        edges = sg.get("edges", []) or []
+                        if not edges:
+                            continue
+                        lines.append(f"**Relations around `{sg.get('root')}`** (depth {sg.get('depth_limit')}):")
+                        for e in edges:
+                            meta = e.get("metadata") or {}
+                            meta_str = ""
+                            if meta:
+                                meta_str = " — *" + ", ".join(f"{k}={v}" for k, v in sorted(meta.items())) + "*"
+                            lines.append(f"- `{e.get('source')}` —[{e.get('relation')}]→ `{e.get('target')}`{meta_str}")
+                        lines.append("")
+
+                    if vector:
+                        lines.append(f"**Analog Wells (vector search — {len(vector)} match(es)):**")
+                        for w in vector:
+                            ctx = str(w.get("context", ""))[:140]
+                            lines.append(f"- `{w.get('id')}` — {ctx}")
+                    else:
+                        lines.append("**Analog Wells:** no vector matches for the requested petrophysical window.")
+
+                    return "\n".join(lines) + "\n\n"
+                except Exception as e:
+                    return f"⚠️ Error formatting hybrid geological search response: {e}"
 
             # â"€â"€ Executive Report â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€
 

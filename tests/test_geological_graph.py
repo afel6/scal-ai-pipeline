@@ -11,7 +11,7 @@ from geological_graph import GeologicalGraph, NodeType, RelationType
 
 @pytest.fixture
 def graph():
-    g = GeologicalGraph(db_path=":memory:")
+    g = GeologicalGraph(db_path=":memory:", seed=False)
     yield g
     g.close()
 
