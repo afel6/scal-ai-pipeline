@@ -488,11 +488,22 @@ class HvielDocEngine:
             content = json.loads(text)
         except (json.JSONDecodeError, ValueError):
             import re
-            m = re.search(r'\{.*\}', text, re.DOTALL)
             try:
+                m = re.search(r'\{.*\}', text, re.DOTALL)
                 content = json.loads(m.group(0)) if m else {}
             except Exception:
                 content = {}
+            if not content:
+                # Lenient fallback (fences / prose tolerance) shared with app.py.
+                try:
+                    from llm_json_utils import parse_llm_json, LLMJsonParseError
+                    try:
+                        parsed = parse_llm_json(raw_content)
+                        content = parsed if isinstance(parsed, dict) else {}
+                    except LLMJsonParseError:
+                        content = {}
+                except ImportError:
+                    content = {}
 
         # Inject well/engineer if not already in content
         if 'author' not in content:

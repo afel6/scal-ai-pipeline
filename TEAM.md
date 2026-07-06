@@ -528,3 +528,53 @@ changed). Frontend untouched this round.
   injected via `register_extra_routes(app, db, verify_admin=None)`.
 - Removed root clutter: `app.py.bak`, `6.31.1`.
 **Verified:** `python -m pytest tests/` -> 248 passed. py_compile clean.
+
+### [2026-07-05] Claude Code — Report pipeline Gemini -> NVIDIA NIM
+**Did:**
+- Migrated the document/report generation pipeline off Google Gemini onto NVIDIA NIM
+  (integrate.api.nvidia.com, `openai/gpt-oss-120b`), reusing the existing NVIDIA-backed
+  wrappers (`_call_gemini_with_retry` / `_nvidia_generate`) — no new HTTP client.
+  Call-site map & changes:
+  - `sync_document_generation_task` (app.py ~9180): extraction call already routed
+    through the NVIDIA shim; removed the dead `genai_new.Client(GEMINI_KEY_POOL[0])`
+    construction (now `client=None`) and the pointless flash->pro "fallback" (both hit
+    the same NVIDIA model). Added an explicit empty-NVIDIA-pool guard that fails the
+    task with a clear "set NVIDIA_API_KEY" error. `max_tokens=8192` for extraction.
+  - `MasterEngineerNode` (llm_insight_generator.py): was a direct `google.genai`
+    `gemini-2.5-flash` call — now takes an injected `llm_call` callable; app.py passes
+    the new shared helper `_nvidia_text_generate` (app.py, next to the chat wrappers:
+    plain prompt -> text via `_nvidia_generate`, same retry/backoff/usage-logging).
+    Same pattern added to `LLMInsightGenerator` + `DashboardArchitectNode` (both are
+    currently not instantiated at runtime, kept consistent). If the NVIDIA call fails
+    AND a real Gemini client exists, the node falls back to the legacy Gemini path;
+    with no Gemini key it returns the existing graceful error/offline strings.
+  - `_extract_petrophysical_summary` (app.py ~670, background session-summary
+    extraction): direct Gemini call replaced with `_nvidia_text_generate`.
+  - `generate_document_json` (app.py ~6070, chat "generate document" -> HvielDocEngine):
+    already on the NVIDIA shim; added a JSON parseability gate + ONE corrective
+    re-prompt so `build_from_json` never silently degrades to an empty document.
+- JSON robustness (gpt-oss wraps JSON in ```json fences / prose): new stdlib-only
+  module `llm_json_utils.py` (`parse_llm_json` = fence-strip + balanced-scan prose
+  tolerance, `llm_json_with_retry` = one corrective re-prompt, `LLMJsonParseError`,
+  `CORRECTIVE_JSON_PROMPT`). Wired into: bg-task `salvage_and_clean_json` (lenient
+  fallback + corrective retry on pure parse failures — structural/permeability HALTs
+  do NOT trigger a retry), `generate_document_json`, `_extract_petrophysical_summary`,
+  and `HvielDocEngine.build_from_json` (last-resort lenient parse).
+- Requirements pins untouched: `genkit==0.4.0` + `genkit-plugin-google-genai==0.4.0`
+  + `google-genai==1.16.0` stay; module-level `from genkit.ai import Genkit` and the
+  `@ai.tool` registrations are untouched, so tests/conftest.py's offline Genkit stub
+  works as before. Chat path (PRCChatAssistant.chat, truncation, injection capping
+  from bf34be4) untouched. Frontend untouched.
+**Verified:** `python -m py_compile` clean on app.py / llm_insight_generator.py /
+llm_json_utils.py / hviel_doc_engine.py. New `tests/test_llm_json_utils.py` (17 tests:
+fenced JSON, prose-wrapped, corrective-retry paths) passes. Full suite
+`py -3.13 -m pytest tests/` green (see commit).
+**For Antigravity:** Runtime LLM *generation* is now fully NVIDIA (chat + reports +
+extraction + summaries). Gemini remains in exactly three non-generation places:
+(1) startup `validate_gemini_api_keys()` in lifespan still HARD-REQUIRES a Gemini key
+(os._exit(1)) — decide if you want to relax it to NVIDIA-key validation; (2) RAG
+embeddings (`_get_embed_client`, `gemini-embedding-2`) — gpt-oss can't embed, so this
+stays until we pick a sovereign embedder; (3) genkit/GoogleAI module-level init +
+legacy fallback clients (inert unless NVIDIA fails with a real GEMINI_API_KEY set).
+Keep genkit pinned 0.4.0. If NVIDIA_API_KEY is unset, report generation now fails
+fast with a clear message instead of half-running.

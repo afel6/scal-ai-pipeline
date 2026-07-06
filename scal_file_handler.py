@@ -563,10 +563,21 @@ def extract_absolute_file_truth(temp_file_paths: list) -> str:
 
                 for sheet in sheet_names:
                     df = pd.read_excel(xl, sheet_name=sheet, engine=engine)
+                    from src.utils.units import detect_unit, normalize_value
+                    normalized_cols = []
+                    for col in df.columns:
+                        col_str = str(col)
+                        det = detect_unit(col_str)
+                        if det:
+                            prop_type, unit_symbol = det
+                            df[col] = df[col].apply(lambda x: normalize_value(float(x), prop_type, unit_symbol) if isinstance(x, (int, float, np.integer, np.floating)) and not pd.isna(x) else x)
+                            normalized_cols.append(f"column '{col_str}' to standard {prop_type} unit")
                     full_df_shape = pd.read_excel(xl, sheet_name=sheet, header=None, engine=engine).shape
                     columns = list(df.columns)
                     sanitized_columns = [sanitize_prompt(str(c)) for c in columns]
                     lines.append(f"  SHEET: \"{sanitize_prompt(sheet)}\"")
+                    if normalized_cols:
+                        lines.append(f"    [UNITS NORMALIZED]: {', '.join(normalized_cols)}")
                     lines.append(f"    COLUMNS ({len(columns)}): {sanitized_columns}")
                     lines.append(f"    FULL SHAPE: ({full_df_shape[0]} rows × {full_df_shape[1]} cols)")
                     # Print all rows as raw values to completely hydrate the data cache
@@ -584,11 +595,22 @@ def extract_absolute_file_truth(temp_file_paths: list) -> str:
 
             elif ext == '.csv':
                 df = smart_read_csv(file_path)
+                from src.utils.units import detect_unit, normalize_value
+                normalized_cols = []
+                for col in df.columns:
+                    col_str = str(col)
+                    det = detect_unit(col_str)
+                    if det:
+                        prop_type, unit_symbol = det
+                        df[col] = df[col].apply(lambda x: normalize_value(float(x), prop_type, unit_symbol) if isinstance(x, (int, float, np.integer, np.floating)) and not pd.isna(x) else x)
+                        normalized_cols.append(f"column '{col_str}' to standard {prop_type} unit")
                 columns = list(df.columns)
                 sanitized_columns = [sanitize_prompt(str(c)) for c in columns]
                 lines.append(f"TOTAL SHEETS: 1 (CSV)")
                 lines.append(f"SHEET NAMES: ['Sheet1']")
                 lines.append(f"  SHEET: \"Sheet1\"")
+                if normalized_cols:
+                    lines.append(f"    [UNITS NORMALIZED]: {', '.join(normalized_cols)}")
                 lines.append(f"    COLUMNS ({len(columns)}): {sanitized_columns}")
                 lines.append(f"    FULL SHAPE: ({len(df)} rows × {len(columns)} cols)")
                 # Print all rows as raw values to completely hydrate the data cache

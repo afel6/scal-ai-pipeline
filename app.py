@@ -94,6 +94,12 @@ import data_validator
 import visualizer
 from llm_insight_generator import MasterEngineerNode, DashboardArchitectNode
 from dashboard_architect import generate_universal_dashboard, detect_test_type
+from llm_json_utils import (
+    LLMJsonParseError,
+    CORRECTIVE_JSON_PROMPT,
+    parse_llm_json,
+    llm_json_with_retry,
+)
 
 import defusedxml
 defusedxml.defuse_stdlib()
@@ -663,7 +669,7 @@ def _log_physics_audit(sid: str, data_type: str, audit_res: dict, file_name: str
 # ── SESSION MEMORY SUMMARY ────────────────────────────────────────────────────
 
 def _extract_petrophysical_summary(response_text: str, file_name: str) -> dict:
-    """Quick non-streaming Gemini call to extract key params from analysis reply."""
+    """Quick non-streaming NVIDIA NIM call to extract key params from analysis reply."""
     prompt = (
         "You are a petrophysical parameter extractor. Given the assistant response below, "
         "extract key values into JSON. Return ONLY valid JSON with these exact keys "
@@ -676,20 +682,13 @@ def _extract_petrophysical_summary(response_text: str, file_name: str) -> dict:
         f"Source file: {file_name}\n\nAssistant response:\n{response_text[:4000]}"
     )
     try:
-        client = genai_new.Client(api_key=GEMINI_KEY_POOL[0])
-        resp = client.models.generate_content(model="gemini-2.5-flash", contents=prompt)
-        import alerting
-        alerting.record_llm_success()
-        raw = ""
-        if resp and resp.candidates and resp.candidates[0].content:
-            raw = "".join(p.text for p in (resp.candidates[0].content.parts or []) if p.text)
-        raw = raw.strip()
-        if raw.startswith("```"):
-            parts = raw.split("```")
-            raw = parts[1] if len(parts) > 1 else raw
-            if raw.startswith("json"):
-                raw = raw[4:]
-        return _json.loads(raw.strip())
+        # NVIDIA NIM (gpt-oss-120b) may fence the JSON or wrap it in prose;
+        # llm_json_with_retry re-prompts once with a corrective instruction.
+        def _gen(corrective):
+            p = prompt if not corrective else f"{prompt}\n\n{corrective}"
+            return _nvidia_text_generate(p, temperature=0.1, max_tokens=1024)
+        parsed = llm_json_with_retry(_gen, logger=_logger)
+        return parsed if isinstance(parsed, dict) else {}
     except Exception as e:
         import alerting
         alerting.record_llm_failure(str(e))
@@ -858,82 +857,158 @@ def _cap_prompt_block(text: str, max_chars: int, label: str = "BLOCK") -> str:
     return text[:head_len] + marker + text[-tail_len:]
 
 
+def format_sheet_as_markdown(sheet_name, columns, rows, full_shape_str):
+    import ast
+    parsed_rows = []
+    for r_str in rows:
+        start_idx = r_str.find('[')
+        if start_idx != -1:
+            try:
+                vals = ast.literal_eval(r_str[start_idx:])
+                parsed_rows.append(vals)
+            except:
+                pass
+                
+    # If columns list is empty, infer length from the first parsed row
+    if not columns and parsed_rows:
+        columns = [f"Col {i}" for i in range(len(parsed_rows[0]))]
+        
+    num_cols = len(columns)
+    col_types = []
+    
+    for col_idx in range(num_cols):
+        is_numeric = True
+        has_val = False
+        for r in parsed_rows:
+            if col_idx < len(r):
+                val = r[col_idx]
+                if val is not None:
+                    has_val = True
+                    # Check if numeric
+                    if not isinstance(val, (int, float)):
+                        is_numeric = False
+                        break
+        if has_val and is_numeric:
+            col_types.append("numeric")
+        else:
+            col_types.append("string")
+            
+    md_lines = []
+    md_lines.append(f"  SHEET: \"{sheet_name}\"")
+    md_lines.append(f"    FULL SHAPE: {full_shape_str}")
+    md_lines.append(f"    COLUMNS AND DATA TYPES:")
+    for col, c_type in zip(columns, col_types):
+        md_lines.append(f"      - {col} ({c_type})")
+        
+    md_lines.append("    DATA PREVIEW (MARKDOWN):")
+    
+    if num_cols > 0:
+        header_line = "    | " + " | ".join(columns) + " |"
+        sep_line = "    | " + " | ".join(["---"] * num_cols) + " |"
+        md_lines.append(header_line)
+        md_lines.append(sep_line)
+        
+        total_rows = len(parsed_rows)
+        if total_rows <= 10:
+            for r in parsed_rows:
+                # Ensure length matches num_cols
+                r_extended = r + [None] * (num_cols - len(r))
+                row_str = "    | " + " | ".join(str(val) if val is not None else "" for val in r_extended[:num_cols]) + " |"
+                md_lines.append(row_str)
+        else:
+            for idx in range(5):
+                r = parsed_rows[idx]
+                r_extended = r + [None] * (num_cols - len(r))
+                row_str = "    | " + " | ".join(str(val) if val is not None else "" for val in r_extended[:num_cols]) + " |"
+                md_lines.append(row_str)
+                
+            # Truncation marker row
+            trunc_marker = f"    | ... | [TRUNCATED {total_rows - 10} ROWS FOR BREVITY — ask for a specific row range to see them] | " + " | ".join(["..."] * max(0, num_cols - 2)) + " |"
+            md_lines.append(trunc_marker)
+            
+            for idx in range(total_rows - 5, total_rows):
+                r = parsed_rows[idx]
+                r_extended = r + [None] * (num_cols - len(r))
+                row_str = "    | " + " | ".join(str(val) if val is not None else "" for val in r_extended[:num_cols]) + " |"
+                md_lines.append(row_str)
+    else:
+        md_lines.append("    [No columns available to preview]")
+        
+    return "\n".join(md_lines)
+
+
 def _truncate_ground_truth(gt_text: str, max_rows: int = None, max_chars: int = None) -> str:
-    """Truncate large tabular ground-truth inventory data before LLM prompt injection.
+    """Truncate large tabular ground-truth inventory data before LLM prompt injection using a hierarchical capping mechanism.
 
-    Two lines of defense (both env-configurable):
-      1. Per-sheet row capping (SCAL_GT_MAX_ROWS, default 6): each sheet's
-         "    ROW n: [...]" dump is reduced to a head/tail preview with an
-         explicit truncation marker. Sheet names, column headers, and
-         FULL SHAPE dimensions are always preserved so the model still knows
-         what exists and can request specific ranges.
-      2. Overall character cap (SCAL_GT_MAX_CHARS, default 120000): if the
-         row-capped text is still oversized (pathological files with huge
-         cells/headers), rows are re-capped to a minimum preview and finally
-         hard char-capped while preserving a structural sheet index.
-
-    Without this, a 10-sheet workbook produces an ~800K-char inventory that
-    overflows the gpt-oss-120b context (negative max_tokens -> HTTP 400).
+    Each sheet is represented as:
+      - Sheet metadata (Sheet name, row/column count, column headers, data types).
+      - A sampled preview of the data (first 5 and last 5 rows formatted as Markdown tables, with an indicator like `... [N rows truncated] ...` in between).
+    Ensures that dense numeric tables do not exceed 100,000 characters of total injected prompt text.
     """
     if not gt_text:
         return ""
-    if max_rows is None:
-        max_rows = _env_int("SCAL_GT_MAX_ROWS", 6)
+        
     if max_chars is None:
-        max_chars = _env_int("SCAL_GT_MAX_CHARS", 120000)
-
-    def _row_capped(limit: int) -> str:
-        lines = gt_text.splitlines()
-        truncated_lines = []
-        sheet_rows = []
-        in_sheet = False
-
-        def truncate_rows_list(rows: list, lim: int) -> list:
-            if len(rows) <= lim:
-                return rows
-            keep_head = 3
-            keep_tail = 3
-            if lim < 6:
-                keep_head = max(1, lim // 2)
-                keep_tail = max(1, lim - keep_head)
-            head = rows[:keep_head]
-            tail = rows[-keep_tail:]
-            middle = (f"    ... [TRUNCATED {len(rows) - keep_head - keep_tail} ROWS FOR CONTEXT "
-                      f"BREVITY — ask for a specific row range to see them] ...")
-            return head + [middle] + tail
-
-        for line in lines:
-            if line.startswith("  SHEET: ") or "═══ FILE: " in line:
-                if sheet_rows:
-                    truncated_lines.extend(truncate_rows_list(sheet_rows, limit))
-                    sheet_rows = []
-                truncated_lines.append(line)
-                in_sheet = line.startswith("  SHEET: ")
-            elif in_sheet and line.startswith("    ROW "):
-                sheet_rows.append(line)
+        max_chars = 100000
+        
+    import ast
+    import re
+    
+    lines = gt_text.splitlines()
+    output_lines = []
+    
+    current_sheet = None
+    sheet_columns = []
+    sheet_shape = ""
+    sheet_rows = []
+    
+    def flush_sheet():
+        if current_sheet is not None:
+            formatted = format_sheet_as_markdown(current_sheet, sheet_columns, sheet_rows, sheet_shape)
+            output_lines.append(formatted)
+            output_lines.append("")
+            
+    for line in lines:
+        if line.startswith("╔") or line.startswith("║") or line.startswith("╚") or not line.strip():
+            output_lines.append(line)
+        elif line.startswith("═══ FILE:") or line.startswith("TOTAL SHEETS:") or line.startswith("SHEET NAMES:"):
+            flush_sheet()
+            current_sheet = None
+            sheet_rows = []
+            output_lines.append(line)
+        elif line.strip().startswith("SHEET:"):
+            flush_sheet()
+            sheet_rows = []
+            sheet_columns = []
+            sheet_shape = ""
+            m = re.match(r'^\s*SHEET:\s*["\']?(.*?)["\']?$', line)
+            if m:
+                current_sheet = m.group(1)
             else:
-                if sheet_rows:
-                    truncated_lines.extend(truncate_rows_list(sheet_rows, limit))
-                    sheet_rows = []
-                truncated_lines.append(line)
-
-        if sheet_rows:
-            truncated_lines.extend(truncate_rows_list(sheet_rows, limit))
-
-        return "\n".join(truncated_lines)
-
-    out = _row_capped(max_rows)
-
-    # Second line of defense: overall character cap.
-    if len(out) > max_chars and max_rows > 2:
-        # Emergency minimum row preview first (keeps structure fully intact).
-        out = _row_capped(2)
+                current_sheet = "Unknown"
+        elif line.strip().startswith("COLUMNS (") or line.strip().startswith("COLUMNS("):
+            idx = line.find(':')
+            if idx != -1:
+                try:
+                    sheet_columns = ast.literal_eval(line[idx+1:].strip())
+                except:
+                    sheet_columns = []
+        elif line.strip().startswith("FULL SHAPE:"):
+            idx = line.find(':')
+            if idx != -1:
+                sheet_shape = line[idx+1:].strip()
+        elif line.strip().startswith("ROW "):
+            sheet_rows.append(line)
+        else:
+            output_lines.append(line)
+            
+    flush_sheet()
+    
+    out = "\n".join(output_lines)
+    
     if len(out) > max_chars:
-        # Pathological case (huge cells/headers even with 2-row previews):
-        # preserve the full structural skeleton (file/sheet names, column
-        # headers, shapes) in an appended index, then head+tail the body.
         structural_prefixes = ("═══ FILE:", "TOTAL SHEETS:", "SHEET NAMES:",
-                               "  SHEET: ", "    COLUMNS (", "    FULL SHAPE:")
+                               "  SHEET: ", "    COLUMNS AND DATA TYPES:", "    FULL SHAPE:")
         skeleton = [ln for ln in out.splitlines()
                     if ln.startswith(structural_prefixes) or "═══ FILE: " in ln]
         skeleton_text = ""
@@ -943,6 +1018,7 @@ def _truncate_ground_truth(gt_text: str, max_rows: int = None, max_chars: int = 
             skeleton_text = _cap_prompt_block(skeleton_text, max(2000, max_chars // 4), "SHEET INDEX")
         body_budget = max(1000, max_chars - len(skeleton_text))
         out = _cap_prompt_block(out, body_budget, "GROUND TRUTH INVENTORY") + skeleton_text
+        
     return out
 
 
@@ -2868,14 +2944,14 @@ def _nvidia_generate(messages_data, system_instruction, temperature, want_tools,
     raise RuntimeError("All NVIDIA NIM keys failed: %s" % errors)
 
 
-def _call_gemini_with_retry(client, model, contents, config, max_retries=5, base_delay=2):
+def _call_gemini_with_retry(client, model, contents, config, max_retries=5, base_delay=2, max_tokens=4096):
     """NVIDIA NIM-backed non-streaming generate; returns a genai-shaped shim."""
     system_instruction, temperature, want_tools = _nv_config_unpack(config)
     messages_data = _nv_contents_to_neutral(contents)
     last_exc = None
     for attempt in range(max_retries):
         try:
-            resp = _nvidia_generate(messages_data, system_instruction, temperature, want_tools)
+            resp = _nvidia_generate(messages_data, system_instruction, temperature, want_tools, max_tokens=max_tokens)
             try:
                 if resp.usage_metadata:
                     _log_api_usage(getattr(_tls, "current_session_id", "SYSTEM"), NVIDIA_MODEL,
@@ -2894,6 +2970,44 @@ def _call_gemini_with_retry(client, model, contents, config, max_retries=5, base
                 continue
             raise
     raise ValueError("NVIDIA call failed after %d retries: %s" % (max_retries, last_exc))
+
+
+def _nvidia_text_generate(prompt, system_instruction=None, temperature=0.2,
+                          max_retries=3, base_delay=2, max_tokens=4096):
+    """Small shared helper for the report/extraction pipeline: plain prompt ->
+    response text via NVIDIA NIM (no tools), reusing _nvidia_generate with the
+    same retry/backoff, usage logging and alerting as the chat wrappers.
+    Injected into llm_insight_generator nodes as `llm_call` so that module
+    never imports app.py."""
+    if not NVIDIA_KEY_POOL:
+        # Fail fast with a clear, actionable message instead of retry-sleeping.
+        raise RuntimeError(
+            "No NVIDIA API keys configured (set NVIDIA_API_KEY / NVIDIA_API_KEY1..N); "
+            "the report/extraction pipeline requires NVIDIA NIM access."
+        )
+    messages_data = [{"role": "user", "parts": [{"text": str(prompt)}]}]
+    last_exc = None
+    for attempt in range(max_retries):
+        try:
+            resp = _nvidia_generate(messages_data, system_instruction, temperature, False, max_tokens=max_tokens)
+            try:
+                if resp.usage_metadata:
+                    _log_api_usage(getattr(_tls, "current_session_id", "SYSTEM"), NVIDIA_MODEL,
+                                   resp.usage_metadata.prompt_token_count, resp.usage_metadata.candidates_token_count)
+            except Exception as ue:
+                _logger.warning("[CostTracker] usage log failed: %s" % ue)
+            import alerting
+            alerting.record_llm_success()
+            return resp.text or ""
+        except Exception as e:
+            last_exc = e
+            import alerting
+            alerting.record_llm_failure(str(e))
+            if attempt < max_retries - 1:
+                time.sleep(base_delay * (2 ** attempt))
+                continue
+            raise
+    raise ValueError("NVIDIA text call failed after %d retries: %s" % (max_retries, last_exc))
 
 GLOBAL_STREAM_QUEUES = {}
 
@@ -6468,7 +6582,7 @@ class PRCChatAssistant:
 
                 resp = _call_gemini_with_retry(
 
-                    client, active_model, contents, cfg
+                    client, active_model, contents, cfg, max_tokens=8192
 
                 )
 
@@ -6482,7 +6596,35 @@ class PRCChatAssistant:
 
                     if raw.strip():
 
-                        return raw.strip()
+                        raw = raw.strip()
+
+                        # JSON-robustness gate: gpt-oss-120b occasionally fences the
+                        # JSON or wraps it in prose. Verify parseability here and do
+                        # ONE corrective re-prompt on failure so build_from_json never
+                        # silently degrades to an empty document.
+                        try:
+                            parse_llm_json(raw)
+                            return raw
+                        except LLMJsonParseError as _pe:
+                            _logger.warning(f"[DocGen] LLM JSON unparseable ({_pe}); one corrective retry...")
+                            retry_contents = list(contents) + [
+                                genai_types.Content(role="model", parts=[genai_types.Part(text=raw[:4000])]),
+                                genai_types.Content(role="user", parts=[genai_types.Part(text=CORRECTIVE_JSON_PROMPT)]),
+                            ]
+                            resp2 = _call_gemini_with_retry(client, active_model, retry_contents, cfg,
+                                                            max_retries=2, max_tokens=8192)
+                            raw2 = ""
+                            if resp2 and resp2.candidates and resp2.candidates[0].content:
+                                raw2 = "".join(p.text for p in (resp2.candidates[0].content.parts or []) if p.text).strip()
+                            if raw2:
+                                try:
+                                    parse_llm_json(raw2)
+                                    return raw2
+                                except LLMJsonParseError:
+                                    pass
+                            # Last resort: return the original reply and let
+                            # build_from_json's regex salvage attempt it.
+                            return raw
 
                 raise ValueError("Empty response from model")
 
@@ -6506,7 +6648,7 @@ class PRCChatAssistant:
 
                 raise
 
-        raise ValueError("Gemini document generation failed after all retries")
+        raise ValueError("Document generation LLM call (NVIDIA NIM) failed after all retries")
 
 
 
@@ -6893,21 +7035,25 @@ def init_db() -> None:
         "CREATE TABLE IF NOT EXISTS user_files (id INTEGER PRIMARY KEY AUTOINCREMENT, user_email TEXT NOT NULL, filename TEXT NOT NULL, file_hash TEXT NOT NULL, extracted_text TEXT, data_type TEXT, key_params TEXT, created_at REAL, UNIQUE(user_email, file_hash))",
 
         "CREATE TABLE IF NOT EXISTS api_metrics (id INTEGER PRIMARY KEY AUTOINCREMENT, session_id TEXT, timestamp REAL, model TEXT, prompt_tokens INTEGER, completion_tokens INTEGER, cost_usd REAL)",
-
         "CREATE TABLE IF NOT EXISTS user_corrections (id INTEGER PRIMARY KEY AUTOINCREMENT, session_id TEXT, user_email TEXT, original_issue TEXT, corrected_value TEXT, timestamp REAL)",
         "CREATE TABLE IF NOT EXISTS session_cache (sid TEXT PRIMARY KEY, ground_truth TEXT, labeled_values TEXT, flat_vectors TEXT, raw_excel_data TEXT, updated_at REAL)",
-
+        "CREATE TABLE IF NOT EXISTS basin_physics_rules (basin_name TEXT, rule_key TEXT, min_limit REAL, max_limit REAL, PRIMARY KEY (basin_name, rule_key))",
     ]
 
     if _PG_AVAILABLE:
-
         base_stmts = [s.replace("INTEGER PRIMARY KEY AUTOINCREMENT", "SERIAL PRIMARY KEY").replace("BLOB", "BYTEA") for s in base_stmts]
 
     for s in base_stmts:
-
         try: db(s)
-
         except Exception: pass
+    # Seed default basin rules
+    try:
+        db("INSERT INTO basin_physics_rules (basin_name, rule_key, min_limit, max_limit) VALUES "
+           "('Default', 'm', 1.3, 2.5), "
+           "('Default', 'a', 0.5, 1.5) "
+           "ON CONFLICT (basin_name, rule_key) DO NOTHING")
+    except Exception:
+        pass
 
     try: db("CREATE INDEX IF NOT EXISTS idx_query_hash ON response_cache(query_hash)")
     except Exception: pass
@@ -9548,28 +9694,25 @@ def sync_document_generation_task(
         )
         
         TASKS_DB[session_id].update({"progress": 20})
-        
-        client = assistant._client or genai_new.Client(api_key=GEMINI_KEY_POOL[0])
-        try:
-            response = _call_gemini_with_retry(
-                client=client,
-                model="gemini-2.5-flash",
-                contents=contents,
-                config=config,
-                max_retries=3,
-                base_delay=2
+
+        # _call_gemini_with_retry is NVIDIA NIM-backed and ignores client/model —
+        # no Gemini client (or key) is needed on this path anymore.
+        client = None
+        if not NVIDIA_KEY_POOL:
+            raise RuntimeError(
+                "No NVIDIA API keys configured (set NVIDIA_API_KEY / NVIDIA_API_KEY1..N); "
+                "document generation requires NVIDIA NIM access."
             )
-        except Exception as e:
-            _logger.warning(f"[Background Task Fallback] gemini-2.5-flash overloaded (503): {e}. Falling back to gemini-2.5-pro...")
-            response = _call_gemini_with_retry(
-                client=client,
-                model="gemini-2.5-pro",
-                contents=contents,
-                config=config,
-                max_retries=3,
-                base_delay=2
-            )
-            
+        response = _call_gemini_with_retry(
+            client=client,
+            model="gemini-2.5-flash",  # ignored: NVIDIA shim always uses NVIDIA_MODEL
+            contents=contents,
+            config=config,
+            max_retries=3,
+            base_delay=2,
+            max_tokens=8192,
+        )
+
         response_text = response.text or ""
         clean_text = response_text.strip()
         if clean_text.startswith("```"):
@@ -9603,9 +9746,17 @@ def sync_document_generation_task(
                             parsed = _json.loads(clean_t[:last_brace + 1] + ']')
                         except Exception:
                             pass
-            
+
             if parsed is None:
-                raise ValueError("Could not parse or salvage valid JSON from LLM extraction response.")
+                # Lenient fallback: tolerate ```json fences / prose around the JSON
+                # (gpt-oss-120b habit) before declaring a parse failure.
+                try:
+                    parsed = parse_llm_json(text_to_parse)
+                except LLMJsonParseError:
+                    parsed = None
+
+            if parsed is None:
+                raise LLMJsonParseError("Could not parse or salvage valid JSON from LLM extraction response.")
             
             # Phase 0b: Check for STRUCTURAL_HALT from LLM
             if isinstance(parsed, dict) and "STRUCTURAL_HALT" in parsed:
@@ -9653,8 +9804,39 @@ def sync_document_generation_task(
 
         try:
             extracted_json = salvage_and_clean_json(clean_text)
+        except LLMJsonParseError as je:
+            # Pure parse failure (NOT a structural/permeability halt): re-prompt
+            # ONCE with a corrective instruction, then parse again.
+            _logger.warning(f"[BgTask] Extraction JSON unparseable ({je}); one corrective retry...")
+            retry_contents = list(contents) + [
+                genai_types.Content(role="model", parts=[genai_types.Part.from_text(text=response_text[:4000])]),
+                genai_types.Content(role="user", parts=[genai_types.Part.from_text(text=CORRECTIVE_JSON_PROMPT)]),
+            ]
+            try:
+                response = _call_gemini_with_retry(
+                    client=None,
+                    model="gemini-2.5-flash",  # ignored: NVIDIA shim always uses NVIDIA_MODEL
+                    contents=retry_contents,
+                    config=config,
+                    max_retries=2,
+                    base_delay=2,
+                    max_tokens=8192,
+                )
+                response_text = response.text or ""
+                clean_text = response_text.strip()
+                if clean_text.startswith("```"):
+                    _lines = clean_text.splitlines()
+                    if _lines and _lines[0].startswith("```"):
+                        _lines = _lines[1:]
+                    if _lines and _lines[-1].startswith("```"):
+                        _lines = _lines[:-1]
+                    clean_text = "\n".join(_lines).strip()
+                clean_text = strip_thinking_blocks(clean_text)
+                extracted_json = salvage_and_clean_json(clean_text)
+            except Exception as je2:
+                raise ValueError(f"Failed to parse LLM extraction output as JSON (after one corrective retry): {je2}")
         except Exception as je:
-            raise ValueError(f"Failed to parse Gemini extraction output as JSON: {je}")
+            raise ValueError(f"Failed to parse LLM extraction output as JSON: {je}")
                 
         def merge_and_deduplicate_sweeps(samples):
             if not samples or not isinstance(samples, list): return []
@@ -9774,8 +9956,12 @@ def sync_document_generation_task(
         outputs_dir = _os.path.join(base_dir, "outputs", session_id)
         _os.makedirs(outputs_dir, exist_ok=True)
         
-        active_key = GEMINI_KEY_POOL[0]
-        master_eng = MasterEngineerNode(api_key=active_key)
+        # Master Engineer analysis runs on NVIDIA NIM via the injected llm_call
+        # (sovereign path). The Gemini key is only kept as a legacy fallback
+        # client inside the node; with DUMMY_KEY the node degrades to its
+        # offline analysis text instead of crashing.
+        active_key = GEMINI_KEY_POOL[0] if GEMINI_KEY_POOL else "DUMMY_KEY"
+        master_eng = MasterEngineerNode(api_key=active_key, llm_call=_nvidia_text_generate)
         engineer_report = master_eng.analyze_scal_data(extracted_json)
         
         report_path = _os.path.join(outputs_dir, "reservoir_report.md")
@@ -10149,14 +10335,117 @@ async def api_grade_response(
     except Exception as e:
         _logger.error(f"[Grader] {e}")
         raise HTTPException(status_code=500, detail=str(e))
-    finally:
-        try: Path(tmp_path).unlink(missing_ok=True)
-        except Exception: pass
+class ScalCalibrateRequest(BaseModel):
+    # Brooks-Corey points
+    sw: Optional[list[float]] = None
+    krw: Optional[list[float]] = None
+    kro: Optional[list[float]] = None
+    swi: float = 0.15
+    sor: float = 0.2
+    krw_max: float = 0.5
+    kro_max: float = 0.8
+    
+    # Archie points
+    porosity: Optional[list[float]] = None
+    formation_factor: Optional[list[float]] = None
+    
+    basin_name: Optional[str] = "Default"
 
 
+@app.post("/api/scal/calibrate")
+def scal_calibrate(req: ScalCalibrateRequest):
+    import numpy as np
+    from petrophysical_curves import Endpoints, KrCurveFitter
+    from physics_validator import PhysicsGuard
+    
+    # Check if we are calibrating Archie
+    if req.porosity is not None and req.formation_factor is not None:
+        phi_arr = np.array(req.porosity)
+        ff_arr = np.array(req.formation_factor)
+        # Avoid zeros/negatives
+        valid = (phi_arr > 0) & (ff_arr > 0)
+        if np.sum(valid) >= 2:
+            x = np.log(phi_arr[valid])
+            y = np.log(ff_arr[valid])
+            slope, intercept = np.polyfit(x, y, 1)
+            m_fit = -slope
+            a_fit = np.exp(intercept)
+        else:
+            m_fit = 2.0
+            a_fit = 1.0
+            
+        guard = PhysicsGuard()
+        guard.validate_archie_parameters(a=a_fit, m=m_fit, b=1.0, n=2.0, basin_name=req.basin_name)
+        audit = guard.generate_health_score()
+        
+        # Build coordinates for the fitted line
+        phi_line = np.linspace(0.01, 0.4, 50)
+        ff_line = a_fit * (phi_line ** -m_fit)
+        
+        return {
+            "type": "archie",
+            "a": float(a_fit),
+            "m": float(m_fit),
+            "phi_line": phi_line.tolist(),
+            "ff_line": ff_line.tolist(),
+            "physics_audit": audit
+        }
+        
+    # Relative permeability calibration
+    if req.sw is not None and req.krw is not None and req.kro is not None:
+        sw_arr = np.array(req.sw)
+        krw_arr = np.array(req.krw)
+        kro_arr = np.array(req.kro)
+        
+        ep = Endpoints(
+            Swi=req.swi,
+            Sor=req.sor,
+            Krw_max=req.krw_max,
+            Kro_max=req.kro_max
+        )
+        
+        fitter = KrCurveFitter(ep)
+        bc_res = fitter.fit_brooks_corey(sw_arr, krw_arr, kro_arr)
+        plot_data = fitter.to_plot_json(sw_arr, krw_arr, kro_arr, model="brooks_corey", fit_result=bc_res)
+        
+        guard = PhysicsGuard()
+        guard.validate_kr(sw_arr, krw_arr, kro_arr)
+        audit = guard.generate_health_score()
+        
+        plot_data["metadata"] = plot_data.get("metadata", {})
+        plot_data["metadata"]["physics_audit"] = audit
+        plot_data["type"] = "kr"
+        
+        return plot_data
+
+    raise HTTPException(status_code=400, detail="Missing coordinate inputs for calibration.")
 
 
-# â"€â"€ FRONTEND SERVING (SPA) â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€
+class BasinRuleModel(BaseModel):
+    basin_name: str
+    rule_key: str
+    min_limit: float
+    max_limit: float
+
+
+@app.get("/api/admin/rules")
+def get_admin_rules():
+    rows = db("SELECT basin_name, rule_key, min_limit, max_limit FROM basin_physics_rules")
+    return [{"basin_name": r[0], "rule_key": r[1], "min_limit": r[2], "max_limit": r[3]} for r in rows]
+
+
+@app.post("/api/admin/rules")
+def post_admin_rule(req: BasinRuleModel):
+    db(
+        "INSERT INTO basin_physics_rules (basin_name, rule_key, min_limit, max_limit) "
+        "VALUES (?, ?, ?, ?) "
+        "ON CONFLICT(basin_name, rule_key) DO UPDATE SET min_limit=excluded.min_limit, max_limit=excluded.max_limit",
+        (req.basin_name, req.rule_key, req.min_limit, req.max_limit)
+    )
+    return {"status": "success"}
+
+
+# ── FRONTEND SERVING (SPA) ──â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€
 
 _DIST_DIR = str(Path(__file__).parent / "frontend" / "dist")
 

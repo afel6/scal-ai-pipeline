@@ -249,20 +249,141 @@ const ParamPanel = ({ fit_params, endpoints, archie, jfunction }) => {
   );
 };
 
+const InteractivePoint = (props) => {
+  const { cx, cy, fill, r, index, curveIdx, onPointDrag, xScale, yScale } = props;
+  
+  const handleMouseDown = (e) => {
+    e.stopPropagation();
+    e.preventDefault();
+    
+    const chartWrapper = document.querySelector('.recharts-wrapper');
+    const svgElement = chartWrapper ? chartWrapper.querySelector('svg') : null;
+    if (!svgElement) return;
+    
+    const onMouseMove = (moveEvent) => {
+      const rect = svgElement.getBoundingClientRect();
+      const xPx = moveEvent.clientX - rect.left;
+      const yPx = moveEvent.clientY - rect.top;
+      
+      try {
+        const domainX = xScale.invert(xPx);
+        const domainY = yScale.invert(yPx);
+        onPointDrag(curveIdx, index, domainX, domainY, false);
+      } catch (err) {
+        console.error("Scale invert failed:", err);
+      }
+    };
+    
+    const onMouseUp = () => {
+      window.removeEventListener('mousemove', onMouseMove);
+      window.removeEventListener('mouseup', onMouseMove);
+      onPointDrag(curveIdx, index, null, null, true);
+    };
+    
+    window.addEventListener('mousemove', onMouseMove);
+    window.addEventListener('mouseup', onMouseUp);
+  };
+
+  return (
+    <circle
+      cx={cx}
+      cy={cy}
+      r={r || 5}
+      fill={fill}
+      stroke="#000"
+      strokeWidth={1.5}
+      onMouseDown={handleMouseDown}
+      style={{ cursor: 'move', pointerEvents: 'all' }}
+    />
+  );
+};
+
+
 // ── MAIN COMPONENT ─────────────────────────────────────────────────────────────
 export default function KrCurvePlot({ plotData }) {
   const [hiddenCurves, setHiddenCurves] = useState(new Set());
   const [isMounted, setIsMounted] = useState(false);
+  const [currentData, setCurrentData] = useState(null);
 
   useEffect(() => {
     const id = requestAnimationFrame(() => setIsMounted(true));
     return () => cancelAnimationFrame(id);
   }, []);
 
-  const data = useMemo(() => {
-    try { return typeof plotData === 'string' ? JSON.parse(plotData) : plotData; }
-    catch { return null; }
+  useEffect(() => {
+    try {
+      const parsed = typeof plotData === 'string' ? JSON.parse(plotData) : plotData;
+      setCurrentData(parsed);
+    } catch (e) {
+      console.error(e);
+    }
   }, [plotData]);
+
+  const data = currentData;
+
+  const handlePointDrag = (curveIdx, ptIdx, newX, newY, isDragEnd) => {
+    if (!currentData) return;
+
+    if (isDragEnd) {
+      const targetCurve = currentData.curves[curveIdx];
+      const payload = {
+        basin_name: currentData.metadata?.basin_name || 'Default'
+      };
+
+      if (currentData.metadata?.archie) {
+        payload.porosity = targetCurve.data.map(d => d.x);
+        payload.formation_factor = targetCurve.data.map(d => d.y);
+      } else {
+        const krwCurve = currentData.curves.find(c => c.name.toLowerCase().includes('krw') || c.name.toLowerCase().includes('water'));
+        const kroCurve = currentData.curves.find(c => c.name.toLowerCase().includes('kro') || c.name.toLowerCase().includes('oil'));
+        if (krwCurve) {
+          payload.sw = krwCurve.data.map(d => d.x);
+          payload.krw = krwCurve.data.map(d => d.y);
+        }
+        if (kroCurve) {
+          payload.kro = kroCurve.data.map(d => d.y);
+          if (!payload.sw) payload.sw = kroCurve.data.map(d => d.x);
+        }
+      }
+
+      const port = window.location.port === '5174' ? '8000' : window.location.port;
+      fetch(`http://${window.location.hostname}:${port}/api/scal/calibrate`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload)
+      })
+      .then(r => r.json())
+      .then(resData => {
+        setCurrentData(prev => {
+          const next = { ...prev };
+          next.curves = resData.curves || next.curves;
+          if (resData.metadata) {
+            next.metadata = { ...next.metadata, ...resData.metadata };
+          }
+          return next;
+        });
+      })
+      .catch(err => console.error("Calibration error:", err));
+
+      return;
+    }
+
+    // Clamp saturation to [0, 1]
+    const clampedX = Math.max(0, Math.min(1, newX));
+    const clampedY = Math.max(0, newY); // allow FF to go high
+
+    setCurrentData(prev => {
+      const next = { ...prev };
+      const curves = [...next.curves];
+      const curve = { ...curves[curveIdx] };
+      const dataPts = [...curve.data];
+      dataPts[ptIdx] = { ...dataPts[ptIdx], x: clampedX, y: clampedY };
+      curve.data = dataPts;
+      curves[curveIdx] = curve;
+      next.curves = curves;
+      return next;
+    });
+  };
 
   const { lineChartData, lineSeries } = useMemo(() => {
     if (!data?.curves) return { lineChartData: [], lineSeries: [] };
@@ -526,6 +647,13 @@ export default function KrCurvePlot({ plotData }) {
                   stroke="#04040a"
                   strokeWidth={1}
                   r={curve.data && curve.data.length > 20 ? 3 : 4}
+                  shape={(props) => (
+                    <InteractivePoint
+                      {...props}
+                      curveIdx={idx}
+                      onPointDrag={handlePointDrag}
+                    />
+                  )}
                 />
               );
             })}

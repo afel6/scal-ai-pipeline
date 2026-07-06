@@ -306,7 +306,7 @@ class PhysicsGuard:
             )
         return self
 
-    def validate_archie_parameters(self, a: float, m: float, b: float, n: float) -> "PhysicsGuard":
+    def validate_archie_parameters(self, a: float, m: float, b: float, n: float, basin_name: str = "Default") -> "PhysicsGuard":
         """
         Validate fitted Archie equation scalar parameters against physical bounds.
 
@@ -323,28 +323,50 @@ class PhysicsGuard:
         All four checks are HIGH severity: out-of-range parameters are
         impossible fits, not soft warnings.
         """
+        a_min, a_max = 0.5, 1.5
+        m_min, m_max = 1.3, 2.5
+        b_min, b_max = 0.5, 1.5
+        n_min, n_max = 1.5, 2.5
+
+        try:
+            from app import db
+            rows = db("SELECT rule_key, min_limit, max_limit FROM basin_physics_rules WHERE basin_name=?", (basin_name or "Default",))
+            if not rows and basin_name != "Default":
+                rows = db("SELECT rule_key, min_limit, max_limit FROM basin_physics_rules WHERE basin_name='Default'")
+            for r_key, r_min, r_max in rows:
+                if r_key == 'a':
+                    a_min, a_max = float(r_min), float(r_max)
+                elif r_key == 'm':
+                    m_min, m_max = float(r_min), float(r_max)
+                elif r_key == 'b':
+                    b_min, b_max = float(r_min), float(r_max)
+                elif r_key == 'n':
+                    n_min, n_max = float(r_min), float(r_max)
+        except Exception as e:
+            print(f"[PhysicsGuard] Database rule fetch error: {e}")
+
         self._check(
-            0.5 <= float(a) <= 1.5,
+            a_min <= float(a) <= a_max,
             "ARCHIE_A_RANGE",
-            f"Tortuosity factor a = {a:.4f} outside physical bounds [0.5, 1.5]. "
+            f"Tortuosity factor a = {a:.4f} outside physical bounds [{a_min}, {a_max}]. "
             "Values far from 1.0 suggest a poor fit or non-standard rock fabric.",
         )
         self._check(
-            1.3 <= float(m) <= 2.5,
+            m_min <= float(m) <= m_max,
             "ARCHIE_M_RANGE",
-            f"Cementation exponent m = {m:.4f} outside physical bounds [1.3, 2.5]. "
+            f"Cementation exponent m = {m:.4f} outside physical bounds [{m_min}, {m_max}]. "
             "m < 1.3 is sub-physical; m > 2.5 requires independent lithological justification.",
         )
         self._check(
-            0.5 <= float(b) <= 1.5,
+            b_min <= float(b) <= b_max,
             "ARCHIE_B_RANGE",
-            f"Saturation coefficient b = {b:.4f} outside physical bounds [0.5, 1.5]. "
+            f"Saturation coefficient b = {b:.4f} outside physical bounds [{b_min}, {b_max}]. "
             "Standard Archie has b = 1.0; large deviation indicates fit instability.",
         )
         self._check(
-            1.5 <= float(n) <= 2.5,
+            n_min <= float(n) <= n_max,
             "ARCHIE_N_RANGE",
-            f"Saturation exponent n = {n:.4f} outside physical bounds [1.5, 2.5]. "
+            f"Saturation exponent n = {n:.4f} outside physical bounds [{n_min}, {n_max}]. "
             "n < 1.5 is below observed rock range; n > 2.5 may indicate wettability alteration.",
         )
         return self

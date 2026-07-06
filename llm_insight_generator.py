@@ -3,20 +3,28 @@ from google.genai import types
 import os
 import json
 
+# NOTE (2026-07-05): the report pipeline runs on NVIDIA NIM. Each node accepts
+# an injected `llm_call` callable — app.py passes its `_nvidia_text_generate`
+# helper (signature: llm_call(prompt, system_instruction=None, temperature=0.2))
+# so this module never needs to import app.py (no circular import) and stays
+# importable standalone. When `llm_call` is None the legacy google-genai client
+# path (or the offline fallback text) is used unchanged.
+
 class LLMInsightGenerator:
     """
     Acts as a Senior Artificial Intelligence Reservoir Engineer.
     Converts hard mathematical data into natural language analysis for clients.
     (Legacy interface preserved for backward compatibility).
     """
-    def __init__(self, api_key: str):
+    def __init__(self, api_key: str, llm_call=None):
         self.api_key = api_key
+        self.llm_call = llm_call
         self.client = None
         if self.api_key and self.api_key != "DUMMY_KEY":
             self.client = genai.Client(api_key=api_key, http_options={"timeout": 300000})
 
     def generate_report_insights(self, archie_params: dict, endpoints: dict) -> str:
-        if not self.api_key or self.api_key == "DUMMY_KEY":
+        if self.llm_call is None and (not self.api_key or self.api_key == "DUMMY_KEY"):
             return "AI Insights (Offline Mode): The calculated Cementation exponent (m) strongly suggests the presence of vuggy carbonate porosity systems within the analyzed depths. The residual oil saturation (Sor) indicates a highly favorable displacement efficiency, highlighting excellent potential for secondary waterflooding operations. The tortuosity metrics further support a complex pore-throat network typical of Libyan reservoirs."
             
         prompt = f"""
@@ -31,7 +39,20 @@ class LLMInsightGenerator:
         interpreting these results. Discuss wettability, rock type, and displacement efficiency.
         Do NOT use markdown (no asterisks). Write plain text formally suitable for a Microsoft Word document.
         """
-        
+
+        if self.llm_call is not None:
+            try:
+                text = self.llm_call(prompt, temperature=0.2)
+                import alerting
+                alerting.record_llm_success()
+                return text
+            except Exception as e:
+                import alerting
+                alerting.record_llm_failure(str(e))
+                if self.client is None:
+                    return f"AI Generation Failed: {str(e)}"
+                # NVIDIA path failed but a legacy Gemini client exists — fall through.
+
         try:
             response = self.client.models.generate_content(
                 model='gemini-2.5-flash',
@@ -49,17 +70,18 @@ class LLMInsightGenerator:
 class MasterEngineerNode:
     """
     Senior Reservoir Geomechanics & SCAL Engineer.
-    Analyzes validated SCAL JSON data and returns geomechanical deductions, 
+    Analyzes validated SCAL JSON data and returns geomechanical deductions,
     calculated derivative metrics, risk assessments, and a downstream visualizer directive.
     """
-    def __init__(self, api_key: str):
+    def __init__(self, api_key: str, llm_call=None):
         self.api_key = api_key
+        self.llm_call = llm_call
         self.client = None
         if self.api_key and self.api_key != "DUMMY_KEY":
             self.client = genai.Client(api_key=api_key, http_options={"timeout": 300000})
 
     def analyze_scal_data(self, validated_json: list) -> str:
-        if not self.client:
+        if self.llm_call is None and not self.client:
             # Offline / standard fallback message
             return """### Reservoir Report
 Geomechanical Analysis (Offline Mode):
@@ -98,6 +120,19 @@ You MUST format your response into two distinct sections with clear markdown hea
 
         prompt = f"Here is the validated SCAL data in JSON format:\n{json.dumps(validated_json, indent=2)}\n\nGenerate your expert geomechanical analysis and visualizer directive."
 
+        if self.llm_call is not None:
+            try:
+                text = self.llm_call(prompt, system_instruction=system_instruction, temperature=0.2)
+                import alerting
+                alerting.record_llm_success()
+                return text
+            except Exception as e:
+                import alerting
+                alerting.record_llm_failure(str(e))
+                if self.client is None:
+                    return f"Error running Master Engineer analysis: {str(e)}"
+                # NVIDIA path failed but a legacy Gemini client exists — fall through.
+
         try:
             response = self.client.models.generate_content(
                 model='gemini-2.5-flash',
@@ -119,17 +154,27 @@ You MUST format your response into two distinct sections with clear markdown hea
 class DashboardArchitectNode:
     """
     SCAL Dashboard Architect.
-    Consumes validated JSON data and the Master Engineer's directive, 
+    Consumes validated JSON data and the Master Engineer's directive,
     and writes a standalone, executable Streamlit script.
     """
-    def __init__(self, api_key: str):
+    def __init__(self, api_key: str, llm_call=None):
         self.api_key = api_key
+        self.llm_call = llm_call
         self.client = None
         if self.api_key and self.api_key != "DUMMY_KEY":
             self.client = genai.Client(api_key=api_key, http_options={"timeout": 300000})
 
+    @staticmethod
+    def _extract_code_block(text: str) -> str:
+        code = (text or "").strip()
+        if "```python" in code:
+            code = code.split("```python")[1].split("```")[0].strip()
+        elif "```" in code:
+            code = code.split("```")[1].split("```")[0].strip()
+        return code
+
     def generate_dashboard_code(self, validated_json: list, master_engineer_directive: str) -> str:
-        if not self.client:
+        if self.llm_call is None and not self.client:
             # Standard offline fallback dashboard script
             return self.get_offline_dashboard_code(validated_json)
 
@@ -157,6 +202,19 @@ Master Engineer's Directive:
 
 Generate the complete standalone Streamlit Python code."""
 
+        if self.llm_call is not None:
+            try:
+                text = self.llm_call(prompt, system_instruction=system_instruction, temperature=0.1)
+                import alerting
+                alerting.record_llm_success()
+                return self._extract_code_block(text)
+            except Exception as e:
+                import alerting
+                alerting.record_llm_failure(str(e))
+                if self.client is None:
+                    return f"# Streamlit Generation Failed: {str(e)}\n" + self.get_offline_dashboard_code(validated_json)
+                # NVIDIA path failed but a legacy Gemini client exists — fall through.
+
         try:
             response = self.client.models.generate_content(
                 model='gemini-2.5-flash',
@@ -168,14 +226,9 @@ Generate the complete standalone Streamlit Python code."""
             )
             import alerting
             alerting.record_llm_success()
-            
+
             # Clean and extract code from the markdown code block if present
-            code = response.text.strip()
-            if "```python" in code:
-                code = code.split("```python")[1].split("```")[0].strip()
-            elif "```" in code:
-                code = code.split("```")[1].split("```")[0].strip()
-            return code
+            return self._extract_code_block(response.text)
         except Exception as e:
             import alerting
             alerting.record_llm_failure(str(e))
