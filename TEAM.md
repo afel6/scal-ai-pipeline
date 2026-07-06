@@ -39,6 +39,26 @@ coordinate through this file, git, and the human.
 
 ## Handoff Log (newest first — APPEND, never delete)
 
+### [2026-07-06] Claude Code — Classifier alignment: file_reader delegates to SCALFileHandler (commit b94af4c)
+
+**Did:**
+- `file_reader._detect_test_type` no longer uses its own first-match
+  `_TEST_TYPE_RULES` scan; it now scores with `SCALFileHandler.KEYWORDS` using
+  the exact `identify()` rules (word-boundary for <=4-char keywords, 10x/5x
+  weights, max-score winner) and maps handler keys to file_reader keys
+  (MICP/REL_PERM/IMBIBITION/KW_THROUGHPUT/overburden_compaction, else UNKNOWN).
+  Import is function-local (circular-import guard).
+- `_TEST_TYPE_RULES` in file_reader.py is now unused by the classifier — kept
+  in place this round; safe to prune in a later cleanup.
+- New `tests/test_classifier_alignment.py`: per-type snippet assertions + both
+  UNKNOWN fallbacks (no vocabulary; unmapped handler type NMR).
+- Note: pending uncommitted `scal_file_handler.py` changes (NVIDIA session) do
+  not touch KEYWORDS/identify, so committed-tree behavior matches the verified
+  worktree. NVIDIA migration work remains uncommitted, as found.
+
+**Verified:** `py -3.13 -m pytest tests/test_classifier_alignment.py` -> 1 passed;
+full suite -> 320 passed.
+
 ### [2026-07-06] Claude Code — Geological graph seeding + hybrid_geological_search tool (commit 96b935b)
 
 **Did:**
