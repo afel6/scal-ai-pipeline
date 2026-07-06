@@ -2157,6 +2157,40 @@ _HVIEL_TOOLS = [
 
             },
 
+            {
+                "name": "sandbox_fit_brooks_corey",
+                "description": "Fits Brooks-Corey relative permeability curves (exponent nw and no) to Sw, Krw, Kro data in a secure physics sandbox. Automatically enforces physical constraints and corrects anomalies.",
+                "parameters": {
+                    "type": "OBJECT",
+                    "properties": {
+                        "sw": {"type": "ARRAY", "items": {"type": "NUMBER"}},
+                        "krw": {"type": "ARRAY", "items": {"type": "NUMBER"}},
+                        "kro": {"type": "ARRAY", "items": {"type": "NUMBER"}},
+                        "swi": {"type": "NUMBER"},
+                        "sor": {"type": "NUMBER"},
+                        "krw_max": {"type": "NUMBER"},
+                        "kro_max": {"type": "NUMBER"},
+                        "sample_name": {"type": "STRING"}
+                    },
+                    "required": ["sw", "krw", "kro", "swi", "sor"]
+                }
+            },
+
+            {
+                "name": "sandbox_fit_archie",
+                "description": "Fits Archie parameters (a, m or b, n) securely in a sandbox. model_type='FF' fits a/m from porosity vs formation factor. model_type='RI' fits b/n from Sw vs resistivity index.",
+                "parameters": {
+                    "type": "OBJECT",
+                    "properties": {
+                        "x": {"type": "ARRAY", "items": {"type": "NUMBER"}},
+                        "y": {"type": "ARRAY", "items": {"type": "NUMBER"}},
+                        "model_type": {"type": "STRING"},
+                        "sample_name": {"type": "STRING"}
+                    },
+                    "required": ["x", "y", "model_type"]
+                }
+            },
+
         ]
 
     }
@@ -2300,6 +2334,50 @@ def generate_executive_report_tool(input: GenerateExecutiveReportInput) -> str:
 @ai.tool(name="get_audit_history", description="Retrieves the historical record of physics audits (the Auditor's Ledger) for the current session.")
 def get_audit_history_tool(input: GetAuditHistoryInput) -> str:
     return "Audits retrieved"
+
+class SandboxFitBrooksCoreyInput(BaseModel):
+    sw: list[float]
+    krw: list[float]
+    kro: list[float]
+    swi: float
+    sor: float
+    krw_max: Optional[float] = 1.0
+    kro_max: Optional[float] = 1.0
+    sample_name: Optional[str] = None
+
+class SandboxFitArchieInput(BaseModel):
+    x: list[float]
+    y: list[float]
+    model_type: str
+    sample_name: Optional[str] = None
+
+@ai.tool(name="sandbox_fit_brooks_corey", description="Fits Brooks-Corey relative permeability curves (exponent nw and no) to Sw, Krw, Kro data in a secure physics sandbox. Automatically enforces physical constraints and corrects anomalies.")
+def sandbox_fit_brooks_corey_tool(input: SandboxFitBrooksCoreyInput) -> str:
+    import json
+    from physics_sandbox import PhysicsSandbox
+    sandbox = PhysicsSandbox()
+    fit_res = sandbox.fit_brooks_corey(
+        sw=input.sw,
+        krw=input.krw,
+        kro=input.kro,
+        swi=input.swi,
+        sor=input.sor,
+        krw_max=input.krw_max,
+        kro_max=input.kro_max,
+    )
+    if input.sample_name:
+        fit_res["sample_name"] = input.sample_name
+    return json.dumps(fit_res)
+
+@ai.tool(name="sandbox_fit_archie", description="Fits Archie parameters (a, m or b, n) securely in a sandbox. model_type='FF' fits a/m from porosity vs formation factor. model_type='RI' fits b/n from Sw vs resistivity index.")
+def sandbox_fit_archie_tool(input: SandboxFitArchieInput) -> str:
+    import json
+    from physics_sandbox import PhysicsSandbox
+    sandbox = PhysicsSandbox()
+    fit_res = sandbox.fit_archie(x=input.x, y=input.y, model_type=input.model_type)
+    if input.sample_name:
+        fit_res["sample_name"] = input.sample_name
+    return json.dumps(fit_res)
 
 # Compatibility Wrapper Classes for Genkit response to Gemini SDK response mapping
 
@@ -3356,6 +3434,84 @@ class PRCChatAssistant:
 
                     result = "\n\n".join(summary)
 
+        elif name == "sandbox_fit_brooks_corey":
+            from physics_sandbox import PhysicsSandbox, run_sandboxed
+            sw = args.get("sw", [])
+            krw = args.get("krw", [])
+            kro = args.get("kro", [])
+            swi = args.get("swi", 0.0)
+            sor = args.get("sor", 0.0)
+            krw_max = args.get("krw_max", 1.0)
+            kro_max = args.get("kro_max", 1.0)
+
+            sandbox = PhysicsSandbox()
+            inputs = {
+                "sandbox": sandbox,
+                "sw": sw,
+                "krw": krw,
+                "kro": kro,
+                "swi": swi,
+                "sor": sor,
+                "krw_max": krw_max,
+                "kro_max": kro_max
+            }
+            source = "result = sandbox.fit_brooks_corey(sw, krw, kro, swi, sor, krw_max, kro_max)"
+            try:
+                fit_res = run_sandboxed(source, inputs=inputs)
+                sid = getattr(_tls, 'current_session_id', None)
+                if sid and isinstance(fit_res, dict) and "parameters" in fit_res:
+                    with SESSION_DATA_CACHE_LOCK:
+                        if sid not in SESSION_DATA_CACHE:
+                            SESSION_DATA_CACHE[sid] = {}
+                        if "labeled_values" not in SESSION_DATA_CACHE[sid]:
+                            SESSION_DATA_CACHE[sid]["labeled_values"] = {}
+                        params = fit_res.get("parameters", {})
+                        SESSION_DATA_CACHE[sid]["labeled_values"]["nw"] = params.get("nw")
+                        SESSION_DATA_CACHE[sid]["labeled_values"]["no"] = params.get("no")
+                        SESSION_DATA_CACHE[sid]["labeled_values"]["swr"] = params.get("Swi")
+                        SESSION_DATA_CACHE[sid]["labeled_values"]["sor"] = params.get("Sor")
+                        SESSION_DATA_CACHE[sid]["labeled_values"]["krw_max"] = params.get("Krw_max")
+                        SESSION_DATA_CACHE[sid]["labeled_values"]["kro_max"] = params.get("Kro_max")
+                    _logger.info(f"[Skills Audit] Sandbox Brooks-Corey parameters successfully bound to cache for session {sid}.")
+                result = _json.dumps(fit_res)
+            except Exception as e:
+                result = _json.dumps({"status": "error", "error": str(e)})
+
+        elif name == "sandbox_fit_archie":
+            from physics_sandbox import PhysicsSandbox, run_sandboxed
+            x = args.get("x", [])
+            y = args.get("y", [])
+            model_type = args.get("model_type", "RI")
+
+            sandbox = PhysicsSandbox()
+            inputs = {
+                "sandbox": sandbox,
+                "x": x,
+                "y": y,
+                "model_type": model_type
+            }
+            source = "result = sandbox.fit_archie(x, y, model_type)"
+            try:
+                fit_res = run_sandboxed(source, inputs=inputs)
+                sid = getattr(_tls, 'current_session_id', None)
+                if sid and isinstance(fit_res, dict) and "parameters" in fit_res:
+                    with SESSION_DATA_CACHE_LOCK:
+                        if sid not in SESSION_DATA_CACHE:
+                            SESSION_DATA_CACHE[sid] = {}
+                        if "labeled_values" not in SESSION_DATA_CACHE[sid]:
+                            SESSION_DATA_CACHE[sid]["labeled_values"] = {}
+                        params = fit_res.get("parameters", {})
+                        if model_type.upper() == "RI":
+                            SESSION_DATA_CACHE[sid]["labeled_values"]["b"] = params.get("b")
+                            SESSION_DATA_CACHE[sid]["labeled_values"]["n"] = params.get("n")
+                        else:
+                            SESSION_DATA_CACHE[sid]["labeled_values"]["a"] = params.get("a")
+                            SESSION_DATA_CACHE[sid]["labeled_values"]["m"] = params.get("m")
+                    _logger.info(f"[Skills Audit] Sandbox Archie {model_type} parameters successfully bound to cache for session {sid}.")
+                result = _json.dumps(fit_res)
+            except Exception as e:
+                result = _json.dumps({"status": "error", "error": str(e)})
+
         else:
 
             result = f"Unknown tool: {name}"
@@ -3400,6 +3556,143 @@ class PRCChatAssistant:
     def _format_tool_response(self, name: str, args: dict, result: str) -> str:
 
         try:
+
+            if name == "sandbox_fit_brooks_corey":
+                try:
+                    fit_res = _json.loads(result)
+                    if "error" in fit_res:
+                        return f"⚠️ Sandbox Brooks-Corey fitting failed: {fit_res['error']}"
+                    
+                    sw = args.get("sw", [])
+                    krw = args.get("krw", [])
+                    kro = args.get("kro", [])
+                    sample = args.get("sample_name", "Core")
+                    
+                    params = fit_res.get("parameters", {})
+                    nw = params.get("nw")
+                    no = params.get("no")
+                    Swi = params.get("Swi")
+                    Sor = params.get("Sor")
+                    Krw_max = params.get("Krw_max")
+                    Kro_max = params.get("Kro_max")
+                    
+                    coords = fit_res.get("coordinates", {})
+                    sw_fit = coords.get("Sw", [])
+                    krw_fit = coords.get("Krw", [])
+                    kro_fit = coords.get("Kro", [])
+                    
+                    health = fit_res.get("health", {})
+                    
+                    def _pts(S, K): 
+                        return [{"x": round(float(s), 4), "y": round(float(k), 4)} for s, k in zip(S, K)]
+                    
+                    curves = [
+                        {"name": "Krw (Lab)", "data": _pts(sw, krw), "color": "#38bdf8", "showLine": False, "showPoints": True, "yId": "left"},
+                        {"name": "Kro (Lab)", "data": _pts(sw, kro), "color": "#fb923c", "showLine": False, "showPoints": True, "yId": "right"},
+                        {"name": f"Krw (Brooks Corey)", "data": _pts(sw_fit, krw_fit), "color": "#0ea5e9", "showLine": True, "showPoints": False, "yId": "left"},
+                        {"name": f"Kro (Brooks Corey)", "data": _pts(sw_fit, kro_fit), "color": "#f97316", "showLine": True, "showPoints": False, "yId": "right"}
+                    ]
+                    
+                    plot_data = {
+                        "title": f"Relative Permeability — Kr vs Sw ({sample})",
+                        "xAxis": {"label": "Water Saturation Sw"},
+                        "yAxis": {"label": "Krw"}, "yAxis2": {"label": "Kro"},
+                        "dualAxis": True, 
+                        "curves": curves,
+                        "metadata": {
+                            "endpoints": {"Swi": Swi, "Sor": Sor, "Krw_max": Krw_max, "Kro_max": Kro_max},
+                            "validation": {
+                                "is_valid": health.get("grade") in ("A", "B"),
+                                "warnings": health.get("warnings", []),
+                                "errors": health.get("errors", [])
+                            },
+                            "fit_params": {"model": "Brooks Corey", "nw": nw, "no": no}
+                        }
+                    }
+                    
+                    # Log the physics audit
+                    audit = {
+                        "score": health.get("score", 0.0),
+                        "grade": health.get("grade", "F"),
+                        "warnings": health.get("warnings", []),
+                        "errors": health.get("errors", [])
+                    }
+                    _log_physics_audit(
+                        getattr(_tls, 'current_session_id', 'ANONYMOUS'), 
+                        "history_matching", 
+                        audit, 
+                        getattr(_tls, 'last_file_name', None)
+                    )
+                    
+                    return f"__PRC_PLOT__\n{_safe_json_dumps(plot_data)}\n\n"
+                except Exception as e:
+                    return f"⚠️ Error formatting sandbox Brooks-Corey response: {e}"
+
+            if name == "sandbox_fit_archie":
+                try:
+                    fit_res = _json.loads(result)
+                    if "error" in fit_res:
+                        return f"⚠️ Sandbox Archie fitting failed: {fit_res['error']}"
+                    
+                    x = args.get("x", [])
+                    y = args.get("y", [])
+                    model_type = args.get("model_type", "RI").upper()
+                    sample = args.get("sample_name", "Core")
+                    
+                    params = fit_res.get("parameters", {})
+                    health = fit_res.get("health", {})
+                    coords = fit_res.get("coordinates", {})
+                    x_coords = coords.get("x", [])
+                    y_lab = coords.get("y", [[], []])[0]
+                    y_fit = coords.get("y", [[], []])[1]
+                    
+                    if model_type == "RI":
+                        n_val = params.get("n")
+                        plot_ri = {
+                            "title": f"Resistivity Index  -  RI vs Sw ({sample})",
+                            "xAxis": {"label": "Water Saturation Sw (fraction)"},
+                            "yAxis": {"label": "Resistivity Index RI (dimensionless)"},
+                            "xAxisLog": True, "yAxisLog": True,
+                            "curves": [
+                                {"name": f"RI Lab ({sample})", "showLine": False, "showPoints": True, "color": "#f59e0b", "data": [{"x": float(s), "y": float(r)} for s, r in zip(x_coords, y_lab)]},
+                                {"name": f"RI Archie  n={n_val:.3f}", "showLine": True, "showPoints": False, "color": "#fbbf24", "data": [{"x": float(s), "y": float(r)} for s, r in zip(x_coords, y_fit)]},
+                            ],
+                            "metadata": {"archie": {"n": round(n_val, 4)}, "physics_audit": health},
+                        }
+                        
+                        _log_physics_audit(
+                            getattr(_tls, 'current_session_id', 'ANONYMOUS'), 
+                            "ri", 
+                            health, 
+                            getattr(_tls, 'last_file_name', None)
+                        )
+                        
+                        return f"__PRC_PLOT__\n{_safe_json_dumps(plot_ri)}\n\n"
+                    else:
+                        m_val = params.get("m")
+                        a_val = params.get("a")
+                        plot_ff = {
+                            "title": f"Formation Factor  -  FF vs Porosity ({sample})",
+                            "xAxis": {"label": "Porosity φ (fraction)"},
+                            "yAxis": {"label": "Formation Factor FF (dimensionless)"},
+                            "xAxisLog": True, "yAxisLog": True,
+                            "curves": [
+                                {"name": f"FF Lab ({sample})", "showLine": False, "showPoints": True, "color": "#10b981", "data": [{"x": float(p), "y": float(f)} for p, f in zip(x_coords, y_lab)]},
+                                {"name": f"FF Archie  m={m_val:.3f} a={a_val:.3f}", "showLine": True, "showPoints": False, "color": "#34d399", "data": [{"x": float(p), "y": float(f)} for p, f in zip(x_coords, y_fit)]},
+                            ],
+                            "metadata": {"archie": {"m": round(m_val, 4), "a": round(a_val, 4)}, "physics_audit": health},
+                        }
+                        
+                        _log_physics_audit(
+                            getattr(_tls, 'current_session_id', 'ANONYMOUS'), 
+                            "ff", 
+                            health, 
+                            getattr(_tls, 'last_file_name', None)
+                        )
+                        
+                        return f"__PRC_PLOT__\n{_safe_json_dumps(plot_ff)}\n\n"
+                except Exception as e:
+                    return f"⚠️ Error formatting sandbox Archie response: {e}"
 
             # â"€â"€ Executive Report â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€
 
