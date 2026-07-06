@@ -39,6 +39,30 @@ coordinate through this file, git, and the human.
 
 ## Handoff Log (newest first — APPEND, never delete)
 
+### [2026-07-06] Claude Code — Geological graph seeding + hybrid_geological_search tool (commit 96b935b)
+
+**Did:**
+- `geological_graph.py`: `GeologicalGraph.__init__` gained `seed: bool = True`;
+  new `_seed_default_relations()` populates an empty store with the default Libyan
+  slice (Sirte/Murzuq formations, lithologies, fluids, 4 PENETRATES wells with
+  porosity/permeability metadata). Idempotent — any existing node skips seeding.
+- `app.py`: `hybrid_geological_search` registered end-to-end — `_HVIEL_TOOLS`
+  schema, `HybridGeologicalSearchInput` + `@ai.tool` stub, `_execute_tool` branch
+  (graph on `settings.graph_db_path` + `RAGDatabase` analog retriever via
+  `graph.hybrid_search`), `_format_tool_response` Markdown renderer.
+- **Gotcha for future agents:** `RAGDatabase()` against the legacy repo-root
+  `./chroma_db` store makes chromadb's Rust bindings raise `pyo3 PanicException`
+  (a `BaseException` — `except Exception` does NOT catch it). The tool branch
+  catches `BaseException` (re-raising KeyboardInterrupt/SystemExit) and degrades
+  to graph-only. Consider migrating/rebuilding that store.
+- `tests/test_geological_graph.py` fixture now uses `seed=False`; new
+  `tests/test_geological_graph_tool.py` exercises the tool path hermetically
+  (tmp `GRAPH_DB_PATH`, tmp `CHROMA_DIR`, offline fake embedder, pre-ingested analog).
+
+**Verified:** graph + tool tests -> 15 passed; full suite -> 319 passed; suite
+against exact commit content (pending NVIDIA work stashed) -> 296 passed.
+NVIDIA migration work remains uncommitted, as found (see 2026-07-05 entry below).
+
 ### [2026-07-06] Claude Code — Sandbox fitting tools wired to PhysicsSandbox (commit 719137e)
 
 **Did:**
