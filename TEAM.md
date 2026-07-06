@@ -39,6 +39,26 @@ coordinate through this file, git, and the human.
 
 ## Handoff Log (newest first — APPEND, never delete)
 
+### [2026-07-06] Claude Code — Sandbox fitting tools wired to PhysicsSandbox (commit 719137e)
+
+**Did:**
+- Implemented the two stubbed Genkit sandbox tools in `app.py` (~line 2430):
+  `sandbox_fit_brooks_corey_tool` and `sandbox_fit_archie_tool` now instantiate
+  `PhysicsSandbox` (imported inside the functions to avoid circular imports), call
+  `.fit_brooks_corey(...)` / `.fit_archie(...)`, inject `sample_name` when provided,
+  and return the fit dict as a JSON string.
+- Committed the full (previously uncommitted) sandbox feature surface in `app.py`:
+  `_HVIEL_TOOLS` schemas, `_execute_tool` handlers (run_sandboxed + session cache
+  binding), `_format_tool_response` plot formatters, plus `tests/test_sandbox_tools.py`.
+- Deliberately did NOT commit the still-pending NVIDIA NIM migration work
+  (app.py remainder, `llm_json_utils.py`, `hviel_doc_engine.py`, `llm_insight_generator.py`,
+  `scal_file_handler.py`, `physics_validator.py`, `src/`, other new tests, frontend/dist
+  rebuild) — that belongs to the 2026-07-05 report-pipeline entry below and awaits its own commit.
+
+**Verified:** `py -3.13 -m pytest tests/test_sandbox_tools.py` -> 2 passed.
+Full worktree suite -> 318 passed. Suite re-run against exact commit content
+(pending changes stashed) -> 295 passed (the 4 tests for uncommitted features excluded).
+
 ### [2026-07-05] Claude Code — Chat ground-truth injection capping (large-Excel context overflow fix)
 
 **Did:**
