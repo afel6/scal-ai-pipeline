@@ -666,32 +666,9 @@ def _format_column_array(col_name, info):
 # GENERIC SCAL EXTRACTION — 3-LAYER DETECTION SYSTEM
 # ──────────────────────────────────────────────────────────────────────────────
 
-# Layer 1: test-type keyword rules — checked in order, first match wins.
-# Keywords are matched against the combined lowercase string of:
-#   filename + sheet names + all column/label names in the file.
-_TEST_TYPE_RULES = [
-    ("MICP", [
-        "mercury", "micp", "s_hg", "hg sat", "hg injection",
-        "mercury injection", "capillary pressure hg",
-    ]),
-    ("KW_THROUGHPUT", [
-        "throughput", "kw vs", "kw_vs", "formation damage",
-        "sensitivity test", "cum.pv.inj", "fluid sensitivity",
-        "kw throughput",
-    ]),
-    ("IMBIBITION", [
-        "imbibition", "centrifuge", "w-o", "capillary pressure",
-        "porous plate",
-    ]),
-    ("REL_PERM", [
-        "relative perm", "kr data", " kro ", " krw ",
-        "rel perm", "relative permeability",
-    ]),
-    ("overburden_compaction", [
-        "overburden", "compaction", "compressibility", "stress sweep",
-        "phi_k", "phi & k", "pore volume compressibility",
-    ]),
-]
+# Layer 1: test-type detection — see _detect_test_type(), which scores with
+# SCALFileHandler.KEYWORDS (the shared weighted classifier) and maps the
+# handler's type key onto the file_reader vocabulary.
 
 # Layer 2: semantic column aliases per test type.
 # Each key is the canonical field name; the list is all known column-name variants.
