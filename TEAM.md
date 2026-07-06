@@ -39,6 +39,12 @@ coordinate through this file, git, and the human.
 
 ## Handoff Log (newest first — APPEND, never delete)
 
+### [2026-07-06] Claude Code — Pruned dead _TEST_TYPE_RULES from file_reader.py (commit 177bedb)
+
+**Did:** removed the unused first-match rule list flagged in the entry below;
+replaced with a pointer comment to the shared SCALFileHandler.KEYWORDS
+classifier. **Verified:** full suite -> 320 passed.
+
 ### [2026-07-06] Claude Code — Classifier alignment: file_reader delegates to SCALFileHandler (commit b94af4c)
 
 **Did:**
