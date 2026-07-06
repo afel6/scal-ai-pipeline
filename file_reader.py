@@ -794,19 +794,46 @@ def _fuzzy_match(col_name: str, aliases: list) -> bool:
 
 
 def _detect_test_type(filename: str, sheet_names: list, all_text: str) -> str:
-    """Layer 1: detect SCAL test type from filename, sheet names, and header text."""
+    """Layer 1: detect SCAL test type from filename, sheet names, and header text.
+
+    Delegates to the weighted keyword classifier from SCALFileHandler.KEYWORDS
+    (same scoring rules as SCALFileHandler.identify) so the two ingestion paths
+    cannot drift apart, then maps the handler's type key onto the file_reader
+    vocabulary.
+    """
+    # Imported locally to avoid a circular import between the two modules.
+    from scal_file_handler import SCALFileHandler
+
     combined = (filename + " " + " ".join(sheet_names) + " " + all_text).lower()
-    for ttype, keywords in _TEST_TYPE_RULES:
-        for k in keywords:
-            k_clean = k.strip()
-            if len(k_clean) <= 4:
-                # use word boundary matching
-                if re.search(rf"\b{re.escape(k_clean)}\b", combined):
-                    return ttype
+
+    scores = {k: 0 for k in SCALFileHandler.KEYWORDS}
+    for data_type, keywords in SCALFileHandler.KEYWORDS.items():
+        for kw in keywords:
+            kw_clean = kw.strip()
+            # Enforce word boundary for short/abbreviated keywords
+            if len(kw_clean) <= 4:
+                found = bool(re.search(rf"\b{re.escape(kw_clean)}\b", combined))
             else:
-                if k_clean in combined:
-                    return ttype
-    return "UNKNOWN"
+                found = kw_clean in combined
+
+            if found:
+                weight = (10 if kw_clean in ['rpm', 'centrifuge', 'speed', 'produced volume', 'sensitivity test']
+                          else 5 if kw_clean == 'kl'
+                          else 1)
+                scores[data_type] += weight
+
+    best = max(scores, key=scores.get)
+    if scores[best] == 0:
+        best = "UNKNOWN"
+
+    mapping = {
+        "MICP": "MICP",
+        "KR": "REL_PERM",
+        "PC": "IMBIBITION",
+        "FDAM": "KW_THROUGHPUT",
+        "RCAL": "overburden_compaction",
+    }
+    return mapping.get(best, "UNKNOWN")
 
 
 def _extract_well(filename: str) -> str:
