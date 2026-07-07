@@ -1,0 +1,4 @@
+## 2024-07-07 - [Plaintext credential logging and timing attacks in auth]
+**Vulnerability:** Found plaintext credentials (PINs) being logged in `_logger.warning` in authentication endpoints (`user_login` and `admin_login`). Also found vulnerable `!=` comparisons being used to compare PINs which are susceptible to timing attacks.
+**Learning:** Hardcoded simple string comparison (`!=`) on sensitive tokens/PINs opens the application up to timing attacks where the time taken to reject a token could leak the token length or characters. Logging the token/PIN directly logs sensitive information which might end up in external observability systems or text files that could be read by unauthorized actors.
+**Prevention:** Always use constant time comparison like `hmac.compare_digest` when comparing sensitive tokens, secrets, PINs or passwords. Never log sensitive credentials even when authentication fails.
