@@ -23,7 +23,12 @@ export default function Login({ onLogin, setShowPrivacy, setShowTerms }) {
 
       if (resp.ok) {
         const data = await resp.json().catch(() => ({}));
-        onLogin({ name, id, email, token: data.token || '' });
+        if (!data.token) {
+          setError('Invalid MFA Credentials. Access Denied.');
+          setId('');
+          return;
+        }
+        onLogin({ name, id, email, token: data.token });
       } else {
         setError('Invalid MFA Credentials. Access Denied.');
         setId('');

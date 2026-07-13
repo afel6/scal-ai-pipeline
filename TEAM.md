@@ -39,6 +39,27 @@ coordinate through this file, git, and the human.
 
 ## Handoff Log (newest first — APPEND, never delete)
 
+### [2026-07-13] Claude Code — Frontend auth guard: stale tokenless localStorage user forced to re-login
+
+**Did:** Local run surfaced a login bypass: `App.jsx` restored `prc_user` from
+localStorage without checking for a session token, so users persisted before token
+auth existed entered the app with an empty Bearer token — every API call 401'd and
+the SSE error handler showed a misleading "Port 8001 may not be running" message
+(copy left over from the Aviel PVT project; SCAL backend is 8000).
+- `frontend/src/App.jsx`: user-state initializer now drops (and removes from
+  localStorage) any stored user without `token`; corrected both backend-unreachable
+  error strings from 8001 → 8000 and added a "session may have expired — log out and
+  back in" hint on the SSE terminal-error path.
+- `frontend/src/components/Login.jsx`: a 200 from `/api/auth` without a `token` field
+  is now treated as failed auth instead of logging in with an empty token.
+- Rebuilt `frontend/dist` (vite build clean).
+**Verified:** In the running local server (uvicorn :8000 via `.venv_win`): seeded a
+tokenless `prc_user` in localStorage, reloaded — user purged, login screen forced,
+new bundle served. Fresh login path unchanged (live session streamed 200 with token).
+Backend untouched.
+**For Antigravity:** Note the browser caches `index.html` — after a dist rebuild a
+hard refresh (Ctrl+Shift+R) is needed to pick up the new bundle hash.
+
 ### [2026-07-06] Claude Code — Pruned dead _TEST_TYPE_RULES from file_reader.py (commit 177bedb)
 
 **Did:** removed the unused first-match rule list flagged in the entry below;

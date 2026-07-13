@@ -75,7 +75,13 @@ function timeAgo(ts) {
 
 export default function App() {
   const [user, setUser] = useState(() => {
-    try { return JSON.parse(localStorage.getItem('prc_user')); }
+    try {
+      const u = JSON.parse(localStorage.getItem('prc_user'));
+      // Users persisted before token auth existed have no session token —
+      // every API call would 401, so force a fresh login instead.
+      if (!u?.token) { localStorage.removeItem('prc_user'); return null; }
+      return u;
+    }
     catch { return null; }
   });
 
@@ -480,7 +486,7 @@ export default function App() {
         es.close();
         setMessages(prev => [...prev, {
           role: 'model',
-          text: `[!] Cannot connect to the PRC Hub backend. Port 8001 may not be running — start the backend server and retry.`,
+          text: `[!] Connection to the PRC Hub backend failed. If the server is running on port 8000, your session may have expired — log out and log back in.`,
           isError: true,
         }]);
         setLoading(false);
@@ -541,7 +547,7 @@ export default function App() {
         : err.response?.status === 401
         ? ' Session authentication failed. Please log out and log back in.'
         : isNoBackend
-        ? ' Cannot connect to the PRC Hub backend (port 8001 is not responding). Please start the backend server and retry.'
+        ? ' Cannot connect to the PRC Hub backend (port 8000 is not responding). Please start the backend server and retry.'
         : ' Unable to reach the PRC Hub. Please check your connection and retry.';
       setMessages(prev => [...prev, {
         role: 'model', text: msg, isError: true,
