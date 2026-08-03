@@ -1,0 +1,4 @@
+## 2025-02-28 - Secure string comparison for PINs
+**Vulnerability:** Timing attack vulnerability in PIN and API key comparisons. Standard equality operators (`==`, `!=`) were used to compare user-provided strings against sensitive strings like `ADMIN_PIN` and `KB_INGEST_SECRET`.
+**Learning:** Standard string comparisons terminate early upon finding the first character difference, making the time taken proportional to the length of the matching prefix. Attackers can exploit this via statistical timing analysis to iteratively brute-force sensitive strings character by character.
+**Prevention:** Use `hmac.compare_digest` for all cryptographic or sensitive string comparisons (like PINs, tokens, and secrets). Both strings must be encoded to bytes (`.encode('utf-8')`) before comparison, and null checks must be performed before calling `.encode()` to prevent `AttributeError` exceptions.
