@@ -6565,7 +6565,7 @@ async def get_telemetry_metrics(
     
     if not authenticated:
         input_pin = (x_admin_pin or pin or "").strip()
-        if ADMIN_PIN and hmac.compare_digest(input_pin, ADMIN_PIN):
+        if ADMIN_PIN and hmac.compare_digest(input_pin.encode('utf-8'), ADMIN_PIN.encode('utf-8')):
             authenticated = True
             
     if not authenticated:
@@ -6682,7 +6682,7 @@ async def user_login(pin: str = Form(...)):
 
     target_pin = ADMIN_PIN
 
-    if pin != target_pin:
+    if not target_pin or not hmac.compare_digest(pin.encode('utf-8'), target_pin.encode('utf-8')):
 
         _logger.warning(f"[AUTH] Failed user login attempt with code: {pin}")
 
@@ -6702,7 +6702,7 @@ async def admin_login(pin: str = Form(...)):
 
     target_pin = ADMIN_PIN
 
-    if pin != target_pin:
+    if not target_pin or not hmac.compare_digest(pin.encode('utf-8'), target_pin.encode('utf-8')):
 
         _logger.warning(f"[ADMIN] Failed login attempt with PIN: {pin}")
 
@@ -7990,7 +7990,7 @@ async def library_ingest(
     uploader_email: str = Form(""),
     x_ingest_secret: str = Header("", alias="X-Ingest-Secret"),
 ):
-    if not KB_INGEST_SECRET or not hmac.compare_digest(x_ingest_secret.strip(), KB_INGEST_SECRET):
+    if not KB_INGEST_SECRET or not hmac.compare_digest(x_ingest_secret.strip().encode('utf-8'), KB_INGEST_SECRET.encode('utf-8')):
         raise HTTPException(status_code=403, detail="Invalid ingest secret")
     file.filename = sanitize_filename(file.filename)
     file_bytes = await file.read()
@@ -8017,7 +8017,7 @@ async def library_ingest(
 
 @app.get("/api/library/docs")
 async def library_list(x_ingest_secret: str = Header("", alias="X-Ingest-Secret")):
-    if not KB_INGEST_SECRET or not hmac.compare_digest(x_ingest_secret.strip(), KB_INGEST_SECRET):
+    if not KB_INGEST_SECRET or not hmac.compare_digest(x_ingest_secret.strip().encode('utf-8'), KB_INGEST_SECRET.encode('utf-8')):
         raise HTTPException(status_code=403, detail="Invalid ingest secret")
     rows = db("SELECT id, filename, data_type, uploaded_by, created_at FROM library_docs ORDER BY created_at DESC")
     return {"docs": [{"id": r[0], "filename": r[1], "data_type": r[2], "uploaded_by": r[3], "created_at": r[4]} for r in rows]}
@@ -8107,8 +8107,8 @@ async def kb_ingest(
     file: UploadFile = File(...),
     password: str = Form(...),
 ):
-    is_valid = (KB_INGEST_SECRET and hmac.compare_digest(password.strip(), KB_INGEST_SECRET)) or \
-               (ADMIN_PIN and hmac.compare_digest(password.strip(), ADMIN_PIN))
+    is_valid = (KB_INGEST_SECRET and hmac.compare_digest(password.strip().encode('utf-8'), KB_INGEST_SECRET.encode('utf-8'))) or \
+               (ADMIN_PIN and hmac.compare_digest(password.strip().encode('utf-8'), ADMIN_PIN.encode('utf-8')))
     if not is_valid:
         raise HTTPException(status_code=403, detail="Invalid admin pin")
     file.filename = sanitize_filename(file.filename)
@@ -8153,9 +8153,9 @@ async def kb_delete(
     password: str = Form(...),
 ):
     is_valid = False
-    if KB_INGEST_SECRET and hmac.compare_digest(password.strip(), KB_INGEST_SECRET):
+    if KB_INGEST_SECRET and hmac.compare_digest(password.strip().encode('utf-8'), KB_INGEST_SECRET.encode('utf-8')):
         is_valid = True
-    elif ADMIN_PIN and hmac.compare_digest(password.strip(), ADMIN_PIN):
+    elif ADMIN_PIN and hmac.compare_digest(password.strip().encode('utf-8'), ADMIN_PIN.encode('utf-8')):
         is_valid = True
     if not is_valid:
         raise HTTPException(status_code=403, detail="Invalid admin pin")
