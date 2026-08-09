@@ -6682,7 +6682,8 @@ async def user_login(pin: str = Form(...)):
 
     target_pin = ADMIN_PIN
 
-    if pin != target_pin:
+    # Security: using hmac.compare_digest instead of != to prevent timing attacks
+    if not target_pin or not hmac.compare_digest(pin.encode("utf-8"), target_pin.encode("utf-8")):
 
         _logger.warning(f"[AUTH] Failed user login attempt with code: {pin}")
 
@@ -6702,7 +6703,8 @@ async def admin_login(pin: str = Form(...)):
 
     target_pin = ADMIN_PIN
 
-    if pin != target_pin:
+    # Security: using hmac.compare_digest instead of != to prevent timing attacks
+    if not target_pin or not hmac.compare_digest(pin.encode("utf-8"), target_pin.encode("utf-8")):
 
         _logger.warning(f"[ADMIN] Failed login attempt with PIN: {pin}")
 
