@@ -97,36 +97,6 @@ class NMRExtractor(BaseExtractor):
         return self.extracted
 
 
-class PVTExtractor(BaseExtractor):
-    """Extractor for Pressure-Volume-Temperature (PVT) data sweeps."""
-    def extract(self) -> dict:
-        results = {}
-        pvt_cols = ['pressure', 'bo', 'rs', 'gor', 'bg', 'viscosity', 'mu']
-        for sheet, df in self.raw_data.items():
-            text = ' '.join(str(v).lower() for v in df.values.flatten() if pd.notna(v))
-            if not any(k in text for k in pvt_cols):
-                continue
-            for i in range(min(30, len(df))):
-                row = [str(v).lower() for df_row in [df.iloc[i]] for v in df_row if pd.notna(v)]
-                found = [k for k in pvt_cols if any(k in cell for cell in row)]
-                if len(found) >= 2:
-                    headers = list(df.iloc[i])
-                    data = df.iloc[i+1:].reset_index(drop=True)
-                    data.columns = range(len(data.columns))
-                    sheet_data = {}
-                    for j, h in enumerate(headers):
-                        for k in pvt_cols:
-                            if k in str(h).lower():
-                                vals = pd.to_numeric(data.iloc[:, j], errors='coerce').dropna().tolist()
-                                if vals:
-                                    sheet_data[str(h)] = vals
-                    if sheet_data:
-                        results[sheet] = sheet_data
-                        break
-        self.extracted = {'type': 'PVT', 'samples': results}
-        return self.extracted
-
-
 class WettabilityExtractor(BaseExtractor):
     """Extractor for Wettability test datasets (Amott-Harvey/USBM)."""
     def extract(self) -> dict:

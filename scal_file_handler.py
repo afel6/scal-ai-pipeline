@@ -74,6 +74,12 @@ class SCALFileHandler:
     # STEP 2 — IDENTIFY DATA TYPE (keyword scan across all sheets)
     # ------------------------------------------------------------------ #
 
+    PVT_REJECTION_MSG = (
+        "PVT fluid data detected — this is Hviel's SCAL pipeline and it does not "
+        "parse PVT reports. Upload this file to Aviel on the PVT pipeline "
+        "(port 8001) instead."
+    )
+
     KEYWORDS = {
         'MICP': [
             'mercury', 'hg', 'intrusion', 'psia', 'mpa', 'threshold pressure',
@@ -168,8 +174,17 @@ class SCALFileHandler:
         from extractors.rcal import RCALExtractor
         from extractors.other import (
             FRFExtractor, RIExtractor, NMRExtractor,
-            PVTExtractor, WettabilityExtractor, FDAMExtractor
+            WettabilityExtractor, FDAMExtractor
         )
+
+        # PVT is detected (see KEYWORDS) but never parsed here — fluid data
+        # belongs to Aviel's PVT pipeline, not Hviel's SCAL one.
+        if self.data_type == 'PVT':
+            self.extracted = {
+                'type': 'PVT', 'samples': {},
+                'error': self.PVT_REJECTION_MSG,
+            }
+            return self
 
         extractors = {
             'MICP':        MICPExtractor,
@@ -177,7 +192,6 @@ class SCALFileHandler:
             'FRF':         FRFExtractor,
             'RI':          RIExtractor,
             'NMR':         NMRExtractor,
-            'PVT':         PVTExtractor,
             'RCAL':        RCALExtractor,
             'WETTABILITY': WettabilityExtractor,
             'PC':          PCExtractor,
@@ -1655,6 +1669,15 @@ def extract_file_data(filepath):
     try:
         handler = SCALFileHandler(filepath)
         result = handler.process()
+        # PVT files are rejected outright — do NOT fall through to the robust
+        # extractor, which would misparse fluid data under a SCAL track.
+        if result and result.get("data_type") == "PVT":
+            return {
+                "status": "rejected_wrong_dataset", "data_type": "PVT",
+                "sheet_names": result.get("sheet_names", []), "row_count": 0,
+                "extracted": {},
+                "errors": [SCALFileHandler.PVT_REJECTION_MSG],
+            }
         if result and result.get("row_count", 0) > 0:
             return result
     except Exception as e:
