@@ -27,6 +27,8 @@ frontend/node_modules/
 
 # Temp files
 *.log
+logs/
+backups/
 .DS_Store
 Thumbs.db
 
