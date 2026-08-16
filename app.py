@@ -9359,7 +9359,15 @@ def start_session_ttl_monitor():
                 
                 with SESSION_DATA_CACHE_LOCK:
                     for sid, cache_item in list(SESSION_DATA_CACHE.items()):
-                        last_act = cache_item.get("last_activity") or cache_item.get("timestamp") or now
+                        # Untouched sessions used to fall back to `now`, so they
+                        # never aged and the cache grew unbounded until OOM.
+                        # setdefault stamps created_at the first time the monitor
+                        # sees a session, so every session ages from creation.
+                        # This only pops the in-memory copy; the session_cache DB
+                        # row remains and re-loads on the next access.
+                        last_act = (cache_item.get("last_activity")
+                                    or cache_item.get("timestamp")
+                                    or cache_item.setdefault("created_at", now))
                         if now - last_act > 15 * 60:  # 15 minutes idle
                             evicted_sessions.append(sid)
                             SESSION_DATA_CACHE.pop(sid, None)

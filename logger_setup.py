@@ -1,6 +1,8 @@
 import contextvars
 import logging
+import logging.handlers
 import json
+import os
 from datetime import datetime, timezone
 
 request_id_var = contextvars.ContextVar("request_id", default="-")
@@ -24,11 +26,27 @@ def setup_logging(debug_mode: bool):
     for handler in list(root_logger.handlers):
         root_logger.removeHandler(handler)
     
+    formatter = JSONFormatter() if not debug_mode else logging.Formatter("%(asctime)s [%(levelname)s] %(name)s: %(message)s")
+    level = logging.DEBUG if debug_mode else logging.INFO
+
     handler = logging.StreamHandler()
-    if not debug_mode:
-        handler.setFormatter(JSONFormatter())
-    else:
-        handler.setFormatter(logging.Formatter("%(asctime)s [%(levelname)s] %(name)s: %(message)s"))
+    handler.setFormatter(formatter)
     
     root_logger.addHandler(handler)
-    root_logger.setLevel(logging.DEBUG if debug_mode else logging.INFO)
+    root_logger.setLevel(level)
+
+    # Rotating file handler (skip if the log dir can't be created — stdout logging still works)
+    log_dir = os.getenv("LOG_DIR", "./logs")
+    try:
+        os.makedirs(log_dir, exist_ok=True)
+        file_handler = logging.handlers.RotatingFileHandler(
+            os.path.join(log_dir, "app.log"),
+            maxBytes=10 * 1024 * 1024,
+            backupCount=5,
+            encoding="utf-8",
+        )
+        file_handler.setFormatter(formatter)
+        file_handler.setLevel(level)
+        root_logger.addHandler(file_handler)
+    except OSError as exc:
+        logging.getLogger(__name__).warning("File logging disabled, using stdout only: %s", exc)
