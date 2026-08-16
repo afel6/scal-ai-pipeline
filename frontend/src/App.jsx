@@ -16,7 +16,6 @@ import {
 import axios from 'axios';
 
 import SidebarTabs       from './SidebarTabs';
-import Mermaid           from './Mermaid';
 import VisualAudit       from './VisualAudit';
 import SimulationHeatmap from './SimulationHeatmap';
 import KrCurvePlot from './components/KrCurvePlot';

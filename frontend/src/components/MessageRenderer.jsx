@@ -1,9 +1,11 @@
 /* eslint-disable */
-import React from 'react';
+import React, { lazy, Suspense } from 'react';
 import { Database, Activity, CheckCircle2 } from 'lucide-react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
-import Mermaid from '../Mermaid';
+// Lazy — mermaid pulls cytoscape+katex (~800kB); only load it when a message
+// actually contains a diagram.
+const Mermaid = lazy(() => import('../Mermaid'));
 import PetrophysicalTable from './PetrophysicalTable';
 import SimulationHeatmap from '../SimulationHeatmap';
 import KrCurvePlot from './KrCurvePlot';
@@ -369,7 +371,11 @@ export function renderMessageContent(text) {
   // ── RENDER ───────────────────────────────────────────────────────────────────
   return finalParts.map((part, i) => {
     if (part.type === 'img') return <img key={i} src={part.src} alt={part.alt} className="w-full rounded-xl border border-white/10 my-8 shadow-2xl animate-fade-in" />;
-    if (part.type === 'mermaid') return <Mermaid key={i} content={part.content} />;
+    if (part.type === 'mermaid') return (
+      <Suspense key={i} fallback={<div className="text-xs opacity-60 p-4">Rendering diagram…</div>}>
+        <Mermaid content={part.content} />
+      </Suspense>
+    );
     if (part.type === 'plot') return <KrCurvePlot key={i} plotData={part.content} />;
     if (part.type === 'simulation') return <SimulationHeatmap key={i} content={JSON.stringify(part.content)} />;
     if (part.type === 'plot_error') return (
