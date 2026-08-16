@@ -372,7 +372,23 @@ if DATABASE_URL:
 
     except Exception as _e:
 
-        _logger.warning(f"[DB] PostgreSQL unavailable, using SQLite: {_e}")
+        # DATABASE_URL is set, so Postgres is the intended store. Silently
+        # falling back to a local SQLite file splits production data across two
+        # stores until someone notices a log line. Fail loud unless the operator
+        # explicitly opts in (or we're under pytest).
+        _allow_fallback = (
+            os.environ.get("ALLOW_SQLITE_FALLBACK", "").lower() in ("1", "true", "yes")
+            or "pytest" in sys.modules
+        )
+        if _allow_fallback:
+            _logger.warning(f"[DB] PostgreSQL unavailable, using SQLite fallback: {_e}")
+        else:
+            _logger.error(f"[DB] PostgreSQL unavailable and DATABASE_URL is set: {_e}")
+            raise RuntimeError(
+                "PostgreSQL connection failed while DATABASE_URL is set. Refusing "
+                "to silently fall back to SQLite (data would split across two "
+                "stores). Set ALLOW_SQLITE_FALLBACK=1 to override for local dev."
+            ) from _e
 
 
 
@@ -6883,8 +6899,13 @@ def init_db() -> None:
         base_stmts = [s.replace("INTEGER PRIMARY KEY AUTOINCREMENT", "SERIAL PRIMARY KEY").replace("BLOB", "BYTEA") for s in base_stmts]
 
     for s in base_stmts:
-        try: db(s)
-        except Exception: pass
+        # Every statement is CREATE TABLE IF NOT EXISTS — a failure here is a
+        # real problem (bad DDL, connectivity, permissions, schema drift), not
+        # idempotent re-run noise, so surface it instead of swallowing silently.
+        try:
+            db(s)
+        except Exception as _e:
+            _logger.error(f"[DB] schema init failed: {s[:70]}... — {_e}")
     # Seed default basin rules
     try:
         db("INSERT INTO basin_physics_rules (basin_name, rule_key, min_limit, max_limit) VALUES "
@@ -7167,6 +7188,19 @@ app.add_middleware(
     allow_headers=["*"],
 
 )
+
+
+@app.middleware("http")
+async def _security_headers(request, call_next):
+    resp = await call_next(request)
+    resp.headers["X-Content-Type-Options"] = "nosniff"
+    resp.headers["X-Frame-Options"] = "DENY"
+    resp.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
+    # frame-ancestors defends against clickjacking without restricting the
+    # SPA's own resource loading (a full default-src CSP would need per-asset
+    # testing against the committed dist first).
+    resp.headers.setdefault("Content-Security-Policy", "frame-ancestors 'none'")
+    return resp
 
 
 
