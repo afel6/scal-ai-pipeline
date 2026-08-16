@@ -46,6 +46,7 @@ venv_313/
 scratch/
 outputs/
 startup_*.txt
+frontend/studio-verification.png
 hermes_skills_library/
 # But the runtime petroleum skill scripts (executed by skills_engine.py) MUST stay tracked.
 # Git will not descend into an ignored DIRECTORY, so re-including files inside it requires

@@ -1,52 +1,46 @@
-# 🚀 PRC AI Pipeline: Sovereign Petrophysical Agent (v2.2)
+# SCAL AI Pipeline — Hviel
 
-![PRC Logo](file:///c:/Users/Asus/Downloads/scal-ai-pipeline/prc_logo.png)
+FastAPI backend + React frontend for Special Core Analysis (SCAL) data:
+upload lab spreadsheets (MICP, KR, PC, FRF/RI, NMR, RCAL, wettability,
+formation damage), extract them deterministically, validate the physics, chat
+over the results, and generate reports. The AI agent persona is **Hviel**.
+PVT fluid reports are out of scope — they are rejected with a pointer to the
+PVT pipeline (Aviel, port 8001).
 
-A fully autonomous, multi-modal engineering agent designed specifically for the **Petroleum Research Center (PRC) in Libya**. This system transforms standard RAG applications into a high-performance engineering tool capable of literature research, mathematical simulation, and professional reporting.
+## Quickstart
 
-## 🏗 Architecture v2.2 Overview
+```
+run_local.cmd          # backend on http://127.0.0.1:8000 (login PIN 1509)
+kill_8000.cmd          # free the port if a previous run is stuck
+```
 
-### 💡 Multi-LLM Expert Routing
-- **Conversational Core**: Powered by **Google Gemini** for real-time, low-latency analysis and SSE streaming.
-- **Document Generation Engine**: Computationally heavy data-structuring tasks are routed to **Claude 3.5 Sonnet**, enabling precise .docx and .xlsx exports with complex petrophysical tables and charts.
+Backend by hand: `.venv_win\Scripts\python -m uvicorn app:app --host 127.0.0.1 --port 8000`
 
-### 👁 The Visual Cortex
-- **Interactive Diagramming**: Native React integration with `Mermaid.jsx`.
-- **Autonomous Visualization**: Hviel generates flowcharts, decision trees, and sequence diagrams to illustrate engineering verification strategies directly in the chat interface.
+Frontend dev server (proxies /api to :8000):
 
-### 🛠 Agentic Skills Engine (Hermes)
-The system is equipped with proactive engineering tools:
-- `search_arxiv`: Semantic discovery of petroleum engineering literature.
-- `execute_python_simulation`: Sandboxed execution of models including **Simulated Annealing**, **Brooks-Corey**, and **Archie's Law**.
-- **Skills Dashboard**: Real-time discovery UI panel in the Library sidebar for monitoring agent capabilities.
+```
+cd frontend
+npm install
+npm run dev
+```
 
-### 🧠 Cognitive Engineering Discipline
-- **Mandatory 4-Phase Root Cause Loop**: Implementation of a senior engineering auditor mental model. The system refuses "band-aid" fixes for data anomalies.
-- **Systematic Debugging**: Strict adherence to root cause tracing before suggesting adjustments.
+`frontend/dist/` is committed on purpose — `app.py` serves it directly and the
+Render deploy uses the pre-built assets.
 
-### 🔐 Security & Hardening
-- **Unified 1509 Credential**: Administrative interfaces, book uploads, and backend ingestion pipelines are dynamically locked behind private credentials.
-- **Production-Grade Stability**: Optimized FastAPI asynchronous streaming for high-reliability deployments.
+## Layout
 
----
+| Path | What |
+|------|------|
+| `app.py` | The whole backend: routes, auth, sessions, LLM chat, report generation |
+| `scal_file_handler.py` | Deterministic spreadsheet read → identify → extract pipeline |
+| `extractors/` | Per-data-type parsers (MICP, KR, PC, RCAL, ...) |
+| `petrophysical_curves.py`, `prc_physics.py` | Curve fitting + physics validation |
+| `hermes_skills_library/petroleum/` | Runtime analysis skills executed by `skills_engine.py` |
+| `frontend/` | React + Vite UI |
+| `tests/` | pytest suite (`.venv_win\Scripts\python -m pytest tests/ -q`) |
 
-## 🛠 Tech Stack
-- **Backend**: FastAPI (Python 3.10+)
-- **Frontend**: Vite + React + TailwindCSS
-- **Database**: PostgreSQL (Production) / SQLite (Local Fallback)
-- **AI Layers**: Google GenAI (Gemini) + Anthropic (Claude)
-- **Visuals**: Matplotlib + Mermaid.js
+## More
 
-## 📦 Deployment
-See [docs/README_DEPLOYMENT.md](docs/README_DEPLOYMENT.md) for detailed environment setup and server configuration.
-
-## 📚 Documentation
-- **[HANDOVER.md](HANDOVER.md)** — start here: run steps, module map, data flow, known debt.
-- **[CLAUDE.md](CLAUDE.md)** — engineering rules and the physics gate.
-- **[docs/](docs/)** — deep references (architecture, deployment, operators manual, demo script, etc.).
-
-*(`TEAM.md` and `AGENTS.md` are internal AI-agent development logs — not part of the
-operating documentation.)*
-
----
-*Petroleum Research Center — Engineering the future of energy.*
+- [HANDOVER.md](HANDOVER.md) — full onboarding: environment, credentials, deploys
+- [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md), [docs/CODEBASE_ORGANIZATION.md](docs/CODEBASE_ORGANIZATION.md)
+- [docs/PRC_MAINTENANCE_GUIDE.md](docs/PRC_MAINTENANCE_GUIDE.md) — ops runbook
