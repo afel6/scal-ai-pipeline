@@ -192,6 +192,10 @@ _nvidia_key_lock = threading.Lock()
 KB_INGEST_SECRET = settings.KB_INGEST_SECRET
 
 ADMIN_PIN        = settings.ADMIN_PIN
+USER_PIN         = settings.USER_PIN or ADMIN_PIN
+if USER_PIN == ADMIN_PIN:
+    _logger.warning("[AUTH] USER_PIN is unset — user login shares the ADMIN_PIN. "
+                    "Set a distinct USER_PIN in the environment before production.")
 
 
 
@@ -7046,6 +7050,11 @@ app = FastAPI(
 
 if _RATE_LIMIT:
     app.state.limiter = _limiter
+    # Without this middleware the default_limits above never apply and only
+    # @_limiter.limit-decorated routes are throttled. Wiring it in makes the
+    # 60/min per-IP default cover every endpoint.
+    from slowapi.middleware import SlowAPIMiddleware
+    app.add_middleware(SlowAPIMiddleware)
 
 # Global Exception Handlers
 from fastapi.exceptions import RequestValidationError
@@ -7387,12 +7396,13 @@ def verify_admin(authorization: str = Header(None)):
 
 
 @app.post("/api/auth")
+@_limiter.limit("5/minute")
+async def user_login(request: Request, pin: str = Form(...), name: str = Form(""), email: str = Form("")):
 
-async def user_login(pin: str = Form(...), name: str = Form(""), email: str = Form("")):
+    # Auth against USER_PIN (distinct from ADMIN_PIN so a user credential never
+    # yields an admin token). Hard per-IP limit above blocks PIN brute force.
 
-    # Auth against configured ADMIN_PIN (must be set in environment)
-
-    if not hmac.compare_digest(str(pin), str(ADMIN_PIN)):
+    if not hmac.compare_digest(str(pin), str(USER_PIN)):
 
         _logger.warning("[AUTH] Failed user login attempt")
 
@@ -7424,10 +7434,11 @@ async def user_login(pin: str = Form(...), name: str = Form(""), email: str = Fo
 
 
 @app.post("/api/admin/auth")
+@_limiter.limit("5/minute")
+async def admin_login(request: Request, pin: str = Form(...)):
 
-async def admin_login(pin: str = Form(...)):
-
-    # Auth against configured ADMIN_PIN (must be set in environment)
+    # Auth against configured ADMIN_PIN (must be set in environment).
+    # Hard per-IP limit above blocks PIN brute force.
 
     if not hmac.compare_digest(str(pin), str(ADMIN_PIN)):
 

@@ -19,9 +19,12 @@ mermaid.initialize({
     fontSize: '14px',
     fontFamily: "'Outfit', sans-serif"
   },
-  flowchart: { curve: 'basis', htmlLabels: true },
+  flowchart: { curve: 'basis', htmlLabels: false },
   sequence: { showSequenceNumbers: true },
-  securityLevel: 'loose'
+  // Diagram source is LLM-generated (and can carry prompt-injected content),
+  // so keep mermaid in strict mode: no inline HTML in labels, no click/script
+  // directives. This is the XSS guard — do not relax to 'loose'.
+  securityLevel: 'strict'
 });
 
 const Mermaid = ({ content }) => {

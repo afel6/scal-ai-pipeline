@@ -11,6 +11,7 @@ class Settings(BaseSettings):
     PRC_AI_VAULT: str = Field("C:/Users/Asus/Downloads/PRC_AI_Vault", description="Shared Vault Export Directory")
     ALLOWED_ORIGINS: str = Field("http://localhost:5173,http://127.0.0.1:5173", description="Comma-separated allowed origins")
     ADMIN_PIN: str = Field(default_factory=lambda: secrets.token_hex(32), description="Admin secure PIN")
+    USER_PIN: str = Field(default="", description="User access PIN; falls back to ADMIN_PIN when unset — set a distinct value in production")
     KB_INGEST_SECRET: str = Field(default_factory=lambda: secrets.token_hex(32), description="KB Ingestion Secret")
     SCAL_MAX_UPLOAD_MB: int = Field(75, description="Max upload size in MB")
     TESTING: bool = Field(False, description="Pytest mode")
