@@ -27,7 +27,7 @@
 import json
 import os
 import textwrap
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional
 
 # ── SCAL Test Type Detection ─────────────────────────────────────────────────
 

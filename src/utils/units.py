@@ -1,5 +1,5 @@
 import re
-from typing import Dict, Any, Tuple, Optional, List
+from typing import Tuple, Optional
 
 # Conversion factors to target units
 # Pressure: target is psi

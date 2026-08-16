@@ -215,7 +215,6 @@ def fit_brooks_corey(json_data: list[dict]) -> dict:
     
     where Se = (Sw - Swi) / (1 - Swi - Sor)
     """
-    import numpy as np
     
     # 1. Filter rows with valid Sw, Pc, or Kr
     valid_rows = []

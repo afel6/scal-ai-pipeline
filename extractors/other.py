@@ -1,4 +1,3 @@
-import re
 import pandas as pd
 from extractors.base import BaseExtractor
 

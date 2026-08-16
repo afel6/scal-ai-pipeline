@@ -28,7 +28,7 @@ from docx import Document as DocxDocument
 from docx.shared import Inches, Pt, Cm, RGBColor
 from docx.enum.text import WD_ALIGN_PARAGRAPH
 from docx.enum.table import WD_TABLE_ALIGNMENT, WD_ALIGN_VERTICAL
-from docx.oxml.ns import qn, nsdecls
+from docx.oxml.ns import nsdecls
 from docx.oxml import parse_xml
 
 from openpyxl import Workbook
@@ -48,7 +48,7 @@ from reportlab.platypus import (
     Table as RLTable, TableStyle
 )
 from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
-from reportlab.lib.enums import TA_CENTER, TA_LEFT
+from reportlab.lib.enums import TA_CENTER
 
 
 # ═══════════════════════════════════════════════════════
@@ -87,8 +87,7 @@ class HvielDocEngine:
     Claude API returns structured JSON → this class builds .docx/.xlsx/.pptx/.pdf
     """
 
-    def __init__(self, api_key: str = None, output_dir: str = "."):
-        self.api_key    = api_key
+    def __init__(self, output_dir: str = "."):
         self.output_dir = output_dir
         os.makedirs(output_dir, exist_ok=True)
 
@@ -585,37 +584,6 @@ class HvielDocEngine:
         else:
             raise ValueError(f'Unknown file_type: {file_type}')
 
-    # ─────────────────────────────────────────
-    # OPTIONAL: Full end-to-end with Claude API
-    # ─────────────────────────────────────────
-    def handle_request(self, user_message: str, context: str = '') -> dict:
-        """Full pipeline: detect type → ask Claude → build file → return path."""
-        if not self.api_key:
-            return {'success': False, 'error': 'No API key set'}
-
-        file_type = self._detect_type(user_message)
-        if not file_type:
-            return {'success': False, 'error': 'Could not detect file type'}
-
-        content = self._ask_claude(user_message, context, file_type)
-        if not content:
-            return {'success': False, 'error': 'Claude API returned no valid content'}
-
-        ts = int(time.time())
-        fname = f'hviel_{file_type}_{ts}'
-        try:
-            if file_type == 'docx':
-                path = self._build_word(content, fname)
-            elif file_type == 'xlsx':
-                path = self._build_excel(content, fname)
-            elif file_type == 'pptx':
-                path = self._build_pptx(content, fname)
-            elif file_type == 'pdf':
-                path = self._build_pdf(content, fname)
-            return {'success': True, 'path': path, 'type': file_type}
-        except Exception as e:
-            return {'success': False, 'error': str(e)}
-
     def _detect_type(self, msg: str) -> str | None:
         import re
         m = msg.lower()
@@ -711,42 +679,6 @@ class HvielDocEngine:
                 
         return None
 
-
-    def _ask_claude(self, user_message: str, context: str, file_type: str) -> dict | None:
-        """Call Claude API for structured JSON content."""
-        import anthropic
-        schemas = {
-            'docx': '{"title":"...","subtitle":"...","author":"...","sections":[{"heading":"...","level":1,"paragraphs":["..."],"bullets":["..."]}],"tables":[{"caption":"...","headers":["Col1"],"rows":[["val1"]]}]}',
-            'xlsx': '{"title":"...","sheets":[{"name":"SheetName","headers":["Col1"],"rows":[["val1"]],"column_widths":[15]}]}',
-            'pptx': '{"title":"...","subtitle":"...","slides":[{"title":"SlideTitle","content":"...","bullets":["..."]}]}',
-            'pdf':  '{"title":"...","author":"...","sections":[{"heading":"...","paragraphs":["..."],"bullets":["..."]}],"tables":[{"caption":"...","headers":["Col1"],"rows":[["val1"]]}]}',
-        }
-        system = (
-            f"You are Hviel, PRC AI Petrophysical Specialist. Generate a professional {file_type.upper()} file.\n"
-            f"Respond with ONLY valid JSON matching this schema:\n{schemas[file_type]}\n"
-            "Use real petrophysical data, proper units (mD, %, psi, m TVDSS). Minimum 3 sections/slides."
-        )
-        try:
-            client = anthropic.Anthropic(api_key=self.api_key)
-            resp = client.messages.create(
-                model='claude-3-5-sonnet-20241022',
-                max_tokens=6000,
-                system=system,
-                messages=[{'role': 'user',
-                           'content': f"REQUEST: {user_message}\nCONTEXT:\n{context}" if context
-                                      else f"REQUEST: {user_message}"}]
-            )
-            text = resp.content[0].text.strip().lstrip('`').rstrip('`').strip()
-            if text.startswith('json'):
-                text = text[4:].strip()
-            return json.loads(text)
-        except Exception as e:
-            _logger.error("Claude API call failed: %s", e)
-            return None
-
-    # ════════════════════════════════════════════════════════
-    # FILE BUILDERS
-    # ════════════════════════════════════════════════════════
 
     def _build_word(self, content: dict, filename: str) -> str:
         doc = DocxDocument()

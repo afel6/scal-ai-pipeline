@@ -6,7 +6,6 @@ from pathlib import Path
 
 try:
     import psycopg2
-    from psycopg2 import sql
 except ImportError:
     psycopg2 = None
 

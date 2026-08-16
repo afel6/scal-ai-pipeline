@@ -5,7 +5,6 @@
 
 import numpy as np
 from scipy.optimize import curve_fit
-from scipy.interpolate import PchipInterpolator
 from dataclasses import dataclass, field
 from typing import Optional
 
@@ -59,14 +58,6 @@ class LETResult:
     r2_kro:        float = 0.0
     rmse_krw:      float = 0.0
     rmse_kro:      float = 0.0
-
-
-@dataclass
-class PcBrooksCoreyResult:
-    Pd:     float   # displacement (entry) pressure [psi or bar]
-    lam:    float   # pore size distribution index λ
-    r2:     float = 0.0
-    rmse:   float = 0.0
 
 
 @dataclass
@@ -158,41 +149,12 @@ def let_kro(Sw: np.ndarray, ep: Endpoints, L: float, E: float, T: float) -> np.n
     return np.clip(kr, 0.0, None)
 
 
-def bc_pc(Sw: np.ndarray, Swi: float, Pd: float, lam: float) -> np.ndarray:
-    """
-    Brooks-Corey Pc = Pd · Se^(−1/λ).  Se = (Sw−Swi)/(1−Swi).
-
-    Edge-case guards:
-    - lam=0 would produce a division-by-zero in the exponent (−1/λ); it is clamped
-      to a minimum of 1e-9 so the function returns a finite (very large) Pc instead
-      of crashing.
-    - (1−Swi) can be zero only when Swi=1, which is physically nonsensical; it is
-      also clamped to avoid a silent NaN.
-    - All-identical Sw inputs (e.g. every value = Swi) collapse Se to the ε floor
-      via np.clip, which is already in place, so no extra guard is needed there.
-    - If all Sw values are 0 the clip to 1e-6 still produces a valid, finite result.
-    - Final np.nan_to_num ensures no NaN/Inf escapes to callers regardless of
-      extreme Pd or lam values.
-    """
-    lam_safe = lam if abs(lam) > 1e-9 else 1e-9  # prevent -1/0 in the exponent
-    denom = 1.0 - Swi
-    denom_safe = denom if abs(denom) > 1e-9 else 1e-9
-    Se = np.clip((Sw - Swi) / denom_safe, 1e-6, 1.0)
-    with np.errstate(divide="ignore", invalid="ignore", over="ignore"):
-        result = Pd * Se ** (-1.0 / lam_safe)
-    return np.nan_to_num(result, nan=Pd, posinf=1e15, neginf=0.0)
-
-
 # ── STATISTICS ────────────────────────────────────────────────────────────────
 
 def _r2(y: np.ndarray, y_hat: np.ndarray) -> float:
     ss_res = float(np.sum((y - y_hat) ** 2))
     ss_tot = float(np.sum((y - np.mean(y)) ** 2))
     return 1.0 - ss_res / ss_tot if ss_tot > 1e-12 else 0.0
-
-
-def _rmse(y: np.ndarray, y_hat: np.ndarray) -> float:
-    return float(np.sqrt(np.mean((y - y_hat) ** 2)))
 
 
 # ── Kr CURVE FITTER ────────────────────────────────────────────────────────────
@@ -207,29 +169,6 @@ class KrCurveFitter:
     def __init__(self, endpoints: Endpoints):
         self.ep   = endpoints
         self._Sw  = np.linspace(endpoints.Swi, endpoints.Sw_max, self.N_GRID)
-
-    def smooth(
-        self,
-        Sw_raw: np.ndarray,
-        Kr_raw: np.ndarray,
-        phase:  str = "water",
-    ) -> tuple[np.ndarray, np.ndarray]:
-        pairs = np.column_stack([Sw_raw, Kr_raw])
-        pairs = pairs[np.argsort(pairs[:, 0])]
-        Sw_u, idx = np.unique(pairs[:, 0], return_index=True)
-        Kr_u = np.clip(pairs[idx, 1], 0.0, None)
-        mask = (Sw_u >= self.ep.Swi) & (Sw_u <= self.ep.Sw_max)
-        Sw_u, Kr_u = Sw_u[mask], Kr_u[mask]
-        if len(Sw_u) < 2:
-            return self._Sw.copy(), np.zeros_like(self._Sw)
-        pchip     = PchipInterpolator(Sw_u, Kr_u, extrapolate=False)
-        Kr_smooth = np.nan_to_num(pchip(self._Sw), nan=0.0)
-        Kr_smooth = np.clip(Kr_smooth, 0.0, None)
-        if phase == "water":
-            Kr_smooth = np.maximum.accumulate(Kr_smooth)
-        else:
-            Kr_smooth = np.minimum.accumulate(Kr_smooth[::-1])[::-1]
-        return self._Sw.copy(), Kr_smooth
 
     def fit_brooks_corey(self, Sw: np.ndarray, Krw: np.ndarray, Kro: np.ndarray) -> BrooksCoreyResult:
         """
@@ -290,59 +229,6 @@ class KrCurveFitter:
         Krw_h, Kro_h = bc_krw(Sw, ep, nw), bc_kro(Sw, ep, no)
         return BrooksCoreyResult(
             nw=round(nw, 4), no=round(no, 4), endpoints=ep,
-            r2_krw=round(_r2(Krw, Krw_h), 4), r2_kro=round(_r2(Kro, Kro_h), 4),
-        )
-
-    def fit_let(self, Sw: np.ndarray, Krw: np.ndarray, Kro: np.ndarray) -> LETResult:
-        """
-        Fit LET (L, E, T) parameters for both water and oil curves.
-
-        Edge-case guards:
-        - Sw, Krw, Kro are sorted by ascending Sw and deduplicated before fitting so
-          that non-monotonic or repeated saturation arrays do not cause curve_fit to
-          fail with a singular Jacobian.
-        - curve_fit failures are caught with explicit Exception (not bare except) and
-          the initial guess p0 = [1.5, 1.0, 1.5] is used as a physically reasonable
-          fallback rather than silently discarding the error.
-        - Fewer than 2 valid interior points returns a safe default LETResult
-          immediately.
-        """
-        ep = self.ep
-
-        # Sort and deduplicate by Sw to handle non-monotonic lab arrays.
-        sort_idx = np.argsort(Sw)
-        Sw, Krw, Kro = Sw[sort_idx], Krw[sort_idx], Kro[sort_idx]
-        _, uniq_idx = np.unique(Sw, return_index=True)
-        Sw, Krw, Kro = Sw[uniq_idx], Krw[uniq_idx], Kro[uniq_idx]
-
-        valid = (Sw > ep.Swi) & (Sw < ep.Sw_max)
-        if not np.any(valid):
-            return LETResult(1.5, 1.0, 1.5, 1.5, 1.0, 1.5, ep)
-
-        p0     = [1.5, 1.0, 1.5]
-        bounds = ([0.1, 0.01, 0.1], [10.0, 100.0, 10.0])
-
-        try:
-            pw, _ = curve_fit(
-                lambda s, L, E, T: let_krw(s, ep, L, E, T),
-                Sw[valid], Krw[valid], p0=p0, bounds=bounds,
-            )
-        except Exception:
-            pw = p0  # fallback to initial guess
-
-        try:
-            po, _ = curve_fit(
-                lambda s, L, E, T: let_kro(s, ep, L, E, T),
-                Sw[valid], Kro[valid], p0=p0, bounds=bounds,
-            )
-        except Exception:
-            po = p0  # fallback to initial guess
-
-        Lw, Ew, Tw = [round(float(v), 4) for v in pw]
-        Lo, Eo, To = [round(float(v), 4) for v in po]
-        Krw_h, Kro_h = let_krw(Sw, ep, Lw, Ew, Tw), let_kro(Sw, ep, Lo, Eo, To)
-        return LETResult(
-            Lw=Lw, Ew=Ew, Tw=Tw, Lo=Lo, Eo=Eo, To=To, endpoints=ep,
             r2_krw=round(_r2(Krw, Krw_h), 4), r2_kro=round(_r2(Kro, Kro_h), 4),
         )
 

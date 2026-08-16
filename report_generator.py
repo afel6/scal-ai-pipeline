@@ -1,13 +1,12 @@
 import os
 import sqlite3
 import json
-import re
 from datetime import datetime
 from docx import Document
 from docx.shared import Inches, Pt, Cm, RGBColor
-from docx.enum.text import WD_ALIGN_PARAGRAPH, WD_LINE_SPACING
-from docx.enum.table import WD_TABLE_ALIGNMENT, WD_ALIGN_VERTICAL
-from docx.oxml.ns import qn, nsdecls
+from docx.enum.text import WD_ALIGN_PARAGRAPH
+from docx.enum.table import WD_TABLE_ALIGNMENT
+from docx.oxml.ns import nsdecls
 from docx.oxml import parse_xml
 import matplotlib.pyplot as plt
 import numpy as np
@@ -39,18 +38,6 @@ class PRCReportEngine:
     def _set_cell_shading(self, cell, color_hex):
         shading_elm = parse_xml(f'<w:shd {nsdecls("w")} w:fill="{color_hex}" w:val="clear"/>')
         cell._element.get_or_add_tcPr().append(shading_elm)
-
-    def _set_cell_border(self, cell, **kwargs):
-        tc = cell._element
-        tcPr = tc.get_or_add_tcPr()
-        tcBorders = parse_xml(f'<w:tcBorders {nsdecls("w")}></w:tcBorders>')
-        for edge, attrs in kwargs.items():
-            element = parse_xml(
-                f'<w:{edge} {nsdecls("w")} w:val="{attrs.get("val", "single")}" '
-                f'w:sz="{attrs.get("sz", "4")}" w:space="0" w:color="{attrs.get("color", "CCCCCC")}"/>'
-            )
-            tcBorders.append(element)
-        tcPr.append(tcBorders)
 
     def _add_heading(self, doc, text, level=1):
         heading = doc.add_heading(level=level)

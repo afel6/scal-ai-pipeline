@@ -46,7 +46,7 @@ except Exception:
     pass
 
 from pathlib import Path
-import os, io, uuid, time, re, hmac, hashlib, secrets as _secrets
+import os, uuid, time, re, hmac, hashlib, secrets as _secrets
 import json as _json, logging, threading, asyncio
 import anyio
 from config import settings
@@ -55,7 +55,6 @@ GLOBAL_EVENT_LOOP = None
 
 from contextlib import asynccontextmanager, contextmanager
 from typing import Optional
-from concurrent.futures import ThreadPoolExecutor
 
 import numpy as np
 
@@ -86,13 +85,13 @@ from petrophysical_curves import Endpoints, KrCurveFitter
 from physics_validator import PhysicsGuard
 
 from scal_file_handler import SCALFileHandler, extract_file_data, _extract_pdf as _sfh_extract_pdf, _extract_docx as _sfh_extract_docx, strip_thinking_blocks, strip_placeholder_artifacts, clean_citation_clutter, validate_extraction_against_inventory, extract_absolute_file_truth, validate_permeability_column_binding, compress_traceability_ledger
-from file_reader import read_file, to_prompt_string, build_gemini_message
+from file_reader import read_file, to_prompt_string
 
 from report_generator import PRCReportEngine
 from grader import grade_ai_response
 import data_validator
 import visualizer
-from llm_insight_generator import MasterEngineerNode, DashboardArchitectNode
+from llm_insight_generator import MasterEngineerNode
 from dashboard_architect import generate_universal_dashboard, detect_test_type
 from llm_json_utils import (
     LLMJsonParseError,
@@ -134,7 +133,7 @@ try:
 
     import sys
 
-    from slowapi import Limiter, _rate_limit_exceeded_handler
+    from slowapi import Limiter
 
     from slowapi.util import get_remote_address
 
@@ -2507,107 +2506,6 @@ def hybrid_geological_search_tool(input: HybridGeologicalSearchInput) -> str:
     )
     return json.dumps(res)
 
-# Compatibility Wrapper Classes for Genkit response to Gemini SDK response mapping
-
-class GeminiPartCompat:
-    def __init__(self, part):
-        self._part = part
-
-    @property
-    def text(self) -> Optional[str]:
-        p = self._part
-        if hasattr(p, "text") and p.text is not None:
-            return p.text
-        if hasattr(p, "root"):
-            r = p.root
-            if hasattr(r, "text") and r.text is not None:
-                return r.text
-        return None
-
-    @property
-    def function_call(self):
-        p = self._part
-        tr = None
-        if hasattr(p, "tool_request") and p.tool_request is not None:
-            tr = p.tool_request
-        elif hasattr(p, "root"):
-            r = p.root
-            if hasattr(r, "tool_request") and r.tool_request is not None:
-                tr = r.tool_request
-        
-        if tr:
-            class FuncCallCompat:
-                def __init__(self, name, args):
-                    self.name = name
-                    self.args = args
-            return FuncCallCompat(getattr(tr, "name", ""), getattr(tr, "input", {}))
-        return None
-
-class GeminiContentCompat:
-    def __init__(self, message_or_content):
-        self._msg = message_or_content
-        parts_list = []
-        if message_or_content:
-            if hasattr(message_or_content, "content") and message_or_content.content:
-                parts_list = message_or_content.content
-            elif hasattr(message_or_content, "parts") and message_or_content.parts:
-                parts_list = message_or_content.parts
-        self.parts = [GeminiPartCompat(p) for p in parts_list]
-
-class GeminiCandidateCompat:
-    def __init__(self, candidate_or_message):
-        self.content = GeminiContentCompat(candidate_or_message)
-
-class GeminiUsageMetadataCompat:
-    def __init__(self, usage):
-        self._usage = usage
-
-    @property
-    def prompt_token_count(self) -> int:
-        if self._usage and getattr(self._usage, "input_tokens", None) is not None:
-            return int(self._usage.input_tokens)
-        return 0
-
-    @property
-    def candidates_token_count(self) -> int:
-        if self._usage and getattr(self._usage, "output_tokens", None) is not None:
-            return int(self._usage.output_tokens)
-        return 0
-
-class GeminiResponseCompat:
-    def __init__(self, genkit_resp):
-        self._resp = genkit_resp
-        self.candidates = [GeminiCandidateCompat(getattr(genkit_resp, "message", None))]
-        self.usage_metadata = GeminiUsageMetadataCompat(getattr(genkit_resp, "usage", None))
-
-    @property
-    def text(self) -> str:
-        if hasattr(self._resp, "text"):
-            return self._resp.text
-        parts = []
-        msg = getattr(self._resp, "message", None)
-        if msg and hasattr(msg, "content") and msg.content:
-            for p in msg.content:
-                if hasattr(p, "text") and p.text:
-                    parts.append(p.text)
-                elif hasattr(p, "root") and hasattr(p.root, "text") and p.root.text:
-                    parts.append(p.root.text)
-        return "".join(parts)
-
-class GeminiChunkCompat:
-    def __init__(self, genkit_chunk):
-        self._chunk = genkit_chunk
-        class MockContent:
-            def __init__(self, parts):
-                self.parts = parts
-        class MockCandidate:
-            def __init__(self, parts):
-                self.content = MockContent(parts)
-        
-        parts_list = getattr(genkit_chunk, "content", []) or []
-        self.candidates = [MockCandidate([GeminiPartCompat(p) for p in parts_list])]
-        self.usage_metadata = GeminiUsageMetadataCompat(getattr(genkit_chunk, "usage", None))
-
 def _add_breadcrumb(msg: str):
     if not hasattr(_tls, "breadcrumbs"):
         _tls.breadcrumbs = []
@@ -3732,37 +3630,6 @@ class PRCChatAssistant:
         
 
         yield (True, result)
-
-
-
-    def _filter_duplicate_plots(self, tool_calls_in_turn: list) -> list[str]:
-        """
-        Filters out intermediate plots of the same model type, preserving only the last plot payload
-        for each curve-fitting type to prevent visual clutter in the chat UI.
-        """
-        formatted_outputs = []
-        last_call_index = {}
-        
-        # Track the last index of the tool call for each model/type
-        for idx, (fc, raw, fmt) in enumerate(tool_calls_in_turn):
-            if fc.name == "fit_petrophysical_curve":
-                model = fc.args.get("model")
-                if model:
-                    last_call_index[model] = idx
-                    
-        for idx, (fc, raw, fmt) in enumerate(tool_calls_in_turn):
-            if fc.name == "fit_petrophysical_curve":
-                model = fc.args.get("model")
-                # If this is not the last call for this model, strip the __PRC_PLOT__ block
-                if model and last_call_index.get(model) != idx:
-                    cleaned_fmt = re.sub(r'__PRC_PLOT__\n.*?\n\n', '', fmt, flags=re.DOTALL)
-                    formatted_outputs.append(cleaned_fmt)
-                else:
-                    formatted_outputs.append(fmt)
-            else:
-                formatted_outputs.append(fmt)
-                
-        return formatted_outputs
 
 
 
@@ -5776,38 +5643,6 @@ class PRCChatAssistant:
             def _gen_refusal():
                 yield _refusal
             return _gen_refusal() if stream else _refusal
-
-        # ── INCOMPLETE-LOAD GATE (fluid-saturation-bound completeness) ────────
-        # [DELEGATED TO LLM SYSTEM PROMPT INSTEAD OF BLANKET INTERCEPT FOR BATCH QUERIES]
-        # if has_cached_data and msg:
-        #     def _cache_has(param: str) -> bool:
-        #         if param in labeled_values:
-        #             return True
-        #         for _k in labeled_values.keys():
-        #             if param in _re_gate.split(r'[^a-z0-9]+', str(_k).lower()):
-        #                 return True
-        #         return False
-        #     _sat_query = _re_gate.search(
-        #         r"(?i)\b(?:swi|sor|displacement\s+effic|recover|mobile\s+(?:oil|fluid)|"
-        #         r"residual\s+oil|irreducible\s+water|saturation\s+endpoint)\b",
-        #         msg,
-        #     )
-        #     if _sat_query:
-        #         _has_swi, _has_sor = _cache_has("swi"), _cache_has("sor")
-        #         if not (_has_swi and _has_sor):
-        #             _missing = ("Swi and Sor" if not (_has_swi or _has_sor)
-        #                         else ("Swi" if not _has_swi else "Sor"))
-        #             _refusal2 = (
-        #                 f"⚠️ I can't compute that: the session cache is loaded but its verified "
-        #                 f"parameters are missing the required fluid-saturation bound(s) ({_missing}). "
-        #                 f"Saturation-dependent results (displacement efficiency, recovery, residual "
-        #                 f"saturations) cannot be derived without them, and I will not substitute "
-        #                 f"assumed values. Please re-upload a file whose extraction yields explicit "
-        #                 f"Swi and Sor."
-        #             )
-        #             def _gen_refusal2():
-        #                 yield _refusal2
-        #             return _gen_refusal2() if stream else _refusal2
 
         # Strict Context Shielding
 

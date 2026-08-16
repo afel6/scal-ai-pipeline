@@ -1,8 +1,5 @@
 import os
-import json
 import re
-import pandas as pd
-import numpy as np
 from file_reader import read_file, to_prompt_string
 
 def grade_ai_response(filepath, ai_response_text):
