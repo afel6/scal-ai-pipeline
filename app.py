@@ -265,8 +265,9 @@ _USER_TOKEN_TTL: int = 86400  # 24 hours
 _sqlite_executor = ThreadPoolExecutor(max_workers=1)
 
 def is_testing() -> bool:
-    """Returns True if running in a test suite (pytest)."""
-    return "pytest" in sys.modules or "PYTEST_CURRENT_TEST" in os.environ or settings.TESTING
+    """True only under a genuine pytest run. The deployable TESTING env flag
+    must never disable auth — verify_user_or_admin short-circuits on this."""
+    return "pytest" in sys.modules or "PYTEST_CURRENT_TEST" in os.environ
 
 def normalize_email(email: Optional[str]) -> Optional[str]:
     if not email:
@@ -283,6 +284,11 @@ def verify_user_or_admin(
     """Enforces token-based authentication on all user-facing endpoints (Security Issue 1)."""
 
     if is_testing():
+        return True
+
+    # Local dev escape: no ADMIN_PIN configured -> nothing to log in against,
+    # auth stays open. Deploys MUST set ADMIN_PIN (checklist section 6).
+    if not ADMIN_PIN:
         return True
 
     # Safely extract string values from FastAPI defaults
