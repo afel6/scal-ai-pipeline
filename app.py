@@ -84,7 +84,7 @@ from petrophysical_curves import Endpoints, KrCurveFitter
 
 from physics_validator import PhysicsGuard
 
-from scal_file_handler import SCALFileHandler, extract_file_data, _extract_pdf as _sfh_extract_pdf, _extract_docx as _sfh_extract_docx, strip_thinking_blocks, strip_placeholder_artifacts, clean_citation_clutter, validate_extraction_against_inventory, extract_absolute_file_truth, validate_permeability_column_binding, compress_traceability_ledger
+from scal_file_handler import SCALFileHandler, extract_file_data, _extract_pdf as _sfh_extract_pdf, _extract_docx as _sfh_extract_docx, strip_thinking_blocks, strip_placeholder_artifacts, clean_citation_clutter, validate_extraction_against_inventory, extract_absolute_file_truth, validate_permeability_column_binding, compress_traceability_ledger, sanitize_prompt
 from file_reader import read_file, to_prompt_string
 
 from report_generator import PRCReportEngine
@@ -176,8 +176,15 @@ def _load_nvidia_keys() -> list[str]:
     return list(dict.fromkeys(keys))
 
 NVIDIA_KEY_POOL: list[str] = _load_nvidia_keys()
-NVIDIA_BASE_URL = "https://integrate.api.nvidia.com/v1/chat/completions"
-NVIDIA_MODEL = "openai/gpt-oss-120b"
+# SCAL_LLM_BASE_URL / SCAL_LLM_MODEL point the OpenAI-compatible chat backend
+# at any endpoint — e.g. local Ollama (http://localhost:11434/v1/chat/completions).
+# Defaults preserve the original NVIDIA NIM cloud config.
+NVIDIA_BASE_URL = os.getenv("SCAL_LLM_BASE_URL", "").strip() or "https://integrate.api.nvidia.com/v1/chat/completions"
+NVIDIA_MODEL = os.getenv("SCAL_LLM_MODEL", "").strip() or "openai/gpt-oss-120b"
+# A local endpoint (Ollama) needs no API key; seed the pool with a placeholder
+# bearer token so the request loop runs instead of raising "no keys configured".
+if not NVIDIA_KEY_POOL and ("localhost" in NVIDIA_BASE_URL or "127.0.0.1" in NVIDIA_BASE_URL):
+    NVIDIA_KEY_POOL = ["local-ollama"]
 # HTTP timeout (seconds) for a single NVIDIA NIM completion call. Large multi-sheet
 # prompts on a reasoning model can exceed the old hardcoded 120s; env-configurable.
 try:
@@ -296,38 +303,32 @@ def verify_user_or_admin(
     if t:
         if t in _ADMIN_TOKENS and time.time() <= _ADMIN_TOKENS[t]:
             return True
-        if t in _USER_TOKENS and time.time() <= _USER_TOKENS[t]:
-            return True
+        rec = _USER_TOKENS.get(t)
+        if rec is not None:
+            # Legacy float entries (pre-identity-binding) carry no email.
+            exp = rec["exp"] if isinstance(rec, dict) else rec
+            bound = rec.get("email") if isinstance(rec, dict) else None
+            if time.time() <= exp:
+                # Identity binding (IDOR guard): a user token may only act on the
+                # email it was issued for. Admin tokens (above) are exempt.
+                supplied = normalize_email(user_email if isinstance(user_email, str) else None) \
+                    or normalize_email(email_query if isinstance(email_query, str) else None)
+                if supplied:
+                    if not bound:
+                        raise HTTPException(
+                            status_code=403,
+                            detail="Token is not bound to a user identity — log in with your email to access user data")
+                    if supplied != bound:
+                        raise HTTPException(
+                            status_code=403,
+                            detail="Token identity does not match the requested user")
+                return True
         raise HTTPException(status_code=401, detail="Invalid or expired token")
 
     raise HTTPException(status_code=401, detail="Authentication token required")
 
-def sanitize_prompt(prompt: str) -> str:
-    """Sanitizes user prompt inputs against prompt injection attacks (Security Issue 3)."""
-    if not prompt:
-        return ""
-    adversarial_patterns = [
-        r"(?i)\bignore\s+(?:all\s+)?previous\s+instructions\b",
-        r"(?i)\bignore\s+(?:the\s+)?above\s+instructions\b",
-        r"(?i)\bignore\s+(?:the\s+)?system\s+prompt\b",
-        r"(?i)\byou\s+are\s+now\s+a\s+different\s+ai\b",
-        r"(?i)\bforget\s+(?:all\s+)?previous\s+instructions\b",
-        r"(?i)\bforget\s+(?:your\s+)?system\s+prompt\b",
-        r"(?i)\bswitch\s+(?:your\s+)?persona\b",
-        r"(?i)\bact\s+as\s+a\b",
-        r"(?i)\bnew\s+rule\b",
-        r"(?i)\bdo\s+not\s+follow\s+any\s+restrictions\b",
-        r"(?i)\breveal\s+(?:your\s+)?system\s+prompt\b",
-        r"(?i)\bshow\s+(?:your\s+)?system\s+prompt\b",
-        r"(?i)\bprint\s+(?:your\s+)?system\s+prompt\b",
-        r"(?i)\bwhat\s+is\s+your\s+system\s+prompt\b",
-        r"(?i)\boutput\s+(?:your\s+)?system\s+prompt\b",
-        r"(?i)\bexport\s+(?:your\s+)?system\s+prompt\b"
-    ]
-    sanitized = prompt
-    for pattern in adversarial_patterns:
-        sanitized = re.sub(pattern, "[PROMPT INJECTION BLOCK]", sanitized)
-    return sanitized
+# sanitize_prompt is imported from scal_file_handler (single implementation);
+# the byte-identical local copy that used to live here was removed.
 
 def validate_gemini_api_keys():
     """Validates the configured Gemini API keys on startup by making a small check.
@@ -915,7 +916,7 @@ def format_sheet_as_markdown(sheet_name, columns, rows, full_shape_str):
     md_lines = []
     md_lines.append(f"  SHEET: \"{sheet_name}\"")
     md_lines.append(f"    FULL SHAPE: {full_shape_str}")
-    md_lines.append(f"    COLUMNS AND DATA TYPES:")
+    md_lines.append("    COLUMNS AND DATA TYPES:")
     for col, c_type in zip(columns, col_types):
         md_lines.append(f"      - {col} ({c_type})")
         
@@ -1201,8 +1202,7 @@ def _detect_main_table(df):
     # 3. Score groups to find the main data table
     best_group = None
     best_score = -1
-    best_numeric_cols = []
-    
+
     for group in groups:
         numeric_cols = []
         for c in range(n_cols):
@@ -1215,8 +1215,7 @@ def _detect_main_table(df):
         if score > best_score:
             best_score = score
             best_group = group
-            best_numeric_cols = numeric_cols
-            
+
     if best_score < 4 or not best_group:
         # Fallback to simple backward-compatible heuristic
         data_start_row = None
@@ -2288,7 +2287,7 @@ _HVIEL_TOOLS = [
 
             {
                 "name": "hybrid_geological_search",
-                "description": "Hybrid geological knowledge search: fuses the SQLite Geological Knowledge Graph (Libyan basins, formations, lithologies, fluids, wells) with vector analog-well retrieval. Mention basin/formation/well names in query_text to anchor the graph traversal; pass porosity (porous_low/porous_high, fraction) and permeability (perm_low/perm_high, mD) windows to fetch analog wells from the vector store.",
+                "description": "Hybrid geological knowledge search: fuses the SQLite Geological Knowledge Graph (Libyan basins, formations, lithologies, fluids, wells, and the lab samples extracted from uploaded SCAL files, linked Well -[HAS_SAMPLE]-> Sample) with vector analog-well retrieval. Mention basin/formation/well names in query_text to anchor the graph traversal (a well anchors its linked samples too); pass porosity (porous_low/porous_high, fraction) and permeability (perm_low/perm_high, mD) windows to fetch analog wells from the vector store.",
                 "parameters": {
                     "type": "OBJECT",
                     "properties": {
@@ -2501,7 +2500,7 @@ class HybridGeologicalSearchInput(BaseModel):
     depth_limit: Optional[int] = 1
     n_results: Optional[int] = 3
 
-@ai.tool(name="hybrid_geological_search", description="Hybrid geological knowledge search: fuses the SQLite Geological Knowledge Graph (Libyan basins, formations, lithologies, fluids, wells) with vector analog-well retrieval. Mention basin/formation/well names in query_text to anchor the graph traversal; pass porosity (porous_low/porous_high, fraction) and permeability (perm_low/perm_high, mD) windows to fetch analog wells from the vector store.")
+@ai.tool(name="hybrid_geological_search", description="Hybrid geological knowledge search: fuses the SQLite Geological Knowledge Graph (Libyan basins, formations, lithologies, fluids, wells, and the lab samples extracted from uploaded SCAL files, linked Well -[HAS_SAMPLE]-> Sample) with vector analog-well retrieval. Mention basin/formation/well names in query_text to anchor the graph traversal (a well anchors its linked samples too); pass porosity (porous_low/porous_high, fraction) and permeability (perm_low/perm_high, mD) windows to fetch analog wells from the vector store.")
 def hybrid_geological_search_tool(input: HybridGeologicalSearchInput) -> str:
     import json
     from geological_graph import GeologicalGraph
@@ -2816,7 +2815,6 @@ def _nvidia_generate(messages_data, system_instruction, temperature, want_tools,
         pass
     body = _json.dumps(payload).encode("utf-8")
     errors = []
-    last_exc = None
     for _ in range(len(NVIDIA_KEY_POOL)):
         with _nvidia_key_lock:
             key = NVIDIA_KEY_POOL[_nvidia_key_idx % len(NVIDIA_KEY_POOL)]
@@ -2845,7 +2843,6 @@ def _nvidia_generate(messages_data, system_instruction, temperature, want_tools,
             usage = data.get("usage") or {}
             return _NvResponse(parts, _NvUsage(usage.get("prompt_tokens", 0), usage.get("completion_tokens", 0)))
         except Exception as exc:
-            last_exc = exc
             detail = exc
             if isinstance(exc, _nv_urlerr.HTTPError):
                 try:
@@ -2958,6 +2955,47 @@ def _call_gemini_stream_with_retry(client, model, contents, config, max_retries=
                 continue
             raise
     raise ValueError("NVIDIA stream failed after %d retries: %s" % (max_retries, last_exc))
+
+
+# -- TOOL FAILURE TRACKING --------------------------------------------------- #
+
+from collections import Counter as _Counter
+
+# Per-tool failure counts for trajectory analysis; append-only within a process.
+TOOL_FAILURE_COUNTS: "_Counter[str]" = _Counter()
+
+
+def _record_tool_failure(name: str, detail) -> None:
+    """Dedicated failure ledger: every failed tool step is counted and logged so
+    trajectory analysis can compute real step success rates."""
+    TOOL_FAILURE_COUNTS[name] += 1
+    _logger.error("[TOOL-FAIL] %s (#%d): %s",
+                  name, TOOL_FAILURE_COUNTS[name], str(detail)[:500])
+
+
+def _tool_result_error(result):
+    """Classify a tool result payload. Returns the error detail string when the
+    payload encodes a failure, else None. Plain text / plot payloads are success."""
+    if result is None or (isinstance(result, str) and not result.strip()):
+        return "tool returned no result"
+    if isinstance(result, str):
+        if result.startswith("Unknown tool:"):
+            return result
+        stripped = result.lstrip()
+        if stripped.startswith("ERROR:") or stripped.startswith("Traceback (most recent call last):"):
+            return stripped[:500]
+        try:
+            payload = _json.loads(result)
+        except Exception:
+            return None
+    else:
+        payload = result
+    if isinstance(payload, dict):
+        if payload.get("status") == "error":
+            return str(payload.get("error") or payload)[:500]
+        if payload.get("error") and "status" not in payload:
+            return str(payload["error"])[:500]
+    return None
 
 
 # -- GEMINI HA CLIENT -------------------------------------------------------- #
@@ -3075,7 +3113,11 @@ class PRCChatAssistant:
 
             
 
-            full_out = []
+            # stdout and stderr are kept strictly separate: a crashed simulation
+            # must never hand its traceback back to the model as "the result".
+            stdout_parts, stderr_parts = [], []
+            spawn_error = None
+            exit_code = None
 
             for chunk in SkillsEngine.run_skill_stream("petroleum", "simulator", "simulation_core.py", [_json.dumps(p)]):
 
@@ -3083,27 +3125,47 @@ class PRCChatAssistant:
 
                     line = chunk["stdout"]
 
-                    full_out.append(line)
+                    stdout_parts.append(line)
 
                     if "PROGRESS:" in line:
 
-                        yield (False, line.strip())
+                        yield (False, True, line.strip())
 
                 elif "stderr" in chunk:
 
-                    full_out.append(chunk["stderr"])
+                    stderr_parts.append(chunk["stderr"])
 
-            
+                elif "exit_code" in chunk:
 
-            out = "".join(full_out)
+                    exit_code = chunk["exit_code"]
 
-            if args.get("mode") == "2d" and "success" in (out or ""):
+                elif "error" in chunk:
 
-                yield (True, f"__SIMULATION_START__\n{out}\n__SIMULATION_END__")
+                    spawn_error = chunk["error"]
+
+            out = "".join(stdout_parts)
+            err = "".join(stderr_parts)
+
+            failed_detail = None
+            if spawn_error:
+                failed_detail = spawn_error
+            elif exit_code not in (0, None):
+                failed_detail = (err.strip() or f"Subprocess exited with code {exit_code}")
+            elif "Traceback (most recent call last)" in err:
+                failed_detail = err.strip()
+            elif not out.strip():
+                failed_detail = err.strip() or "simulation produced no output"
+
+            if failed_detail:
+                _record_tool_failure(name, failed_detail)
+                yield (True, False, _json.dumps({"status": "error", "error": str(failed_detail)[:2000]}))
+            elif args.get("mode") == "2d" and "success" in out:
+
+                yield (True, True, f"__SIMULATION_START__\n{out}\n__SIMULATION_END__")
 
             else:
 
-                yield (True, out or "")
+                yield (True, True, out)
 
             return
 
@@ -3138,7 +3200,7 @@ class PRCChatAssistant:
                     if phi and max(phi) > 1.0:
                         phi = [v / 100.0 for v in phi]
                         p["phi"] = phi
-                        _logger.info(f"[FZI/RQI AutoExtract] Manually passed porosity was in percent (>1.0), normalized to fraction.")
+                        _logger.info("[FZI/RQI AutoExtract] Manually passed porosity was in percent (>1.0), normalized to fraction.")
                 
                 p["k_groups"] = k_groups
 
@@ -3399,7 +3461,10 @@ class PRCChatAssistant:
             except Exception as cache_err:
                 _logger.warning(f"Failed to auto-bind petrophysics properties to cache: {cache_err}")
 
-            yield (True, result)
+            _petro_err = _tool_result_error(result)
+            if _petro_err:
+                _record_tool_failure(name, _petro_err)
+            yield (True, _petro_err is None, result)
 
             return
 
@@ -3647,9 +3712,10 @@ class PRCChatAssistant:
 
             result = f"Unknown tool: {name}"
 
-        
-
-        yield (True, result)
+        _tail_err = _tool_result_error(result)
+        if _tail_err:
+            _record_tool_failure(name, _tail_err)
+        yield (True, _tail_err is None, result)
 
 
 
@@ -3689,8 +3755,8 @@ class PRCChatAssistant:
                     curves = [
                         {"name": "Krw (Lab)", "data": _pts(sw, krw), "color": "#38bdf8", "showLine": False, "showPoints": True, "yId": "left"},
                         {"name": "Kro (Lab)", "data": _pts(sw, kro), "color": "#fb923c", "showLine": False, "showPoints": True, "yId": "right"},
-                        {"name": f"Krw (Brooks Corey)", "data": _pts(sw_fit, krw_fit), "color": "#0ea5e9", "showLine": True, "showPoints": False, "yId": "left"},
-                        {"name": f"Kro (Brooks Corey)", "data": _pts(sw_fit, kro_fit), "color": "#f97316", "showLine": True, "showPoints": False, "yId": "right"}
+                        {"name": "Krw (Brooks Corey)", "data": _pts(sw_fit, krw_fit), "color": "#0ea5e9", "showLine": True, "showPoints": False, "yId": "left"},
+                        {"name": "Kro (Brooks Corey)", "data": _pts(sw_fit, kro_fit), "color": "#f97316", "showLine": True, "showPoints": False, "yId": "right"}
                     ]
                     
                     plot_data = {
@@ -3734,8 +3800,6 @@ class PRCChatAssistant:
                     if "error" in fit_res:
                         return f"⚠️ Sandbox Archie fitting failed: {fit_res['error']}"
                     
-                    x = args.get("x", [])
-                    y = args.get("y", [])
                     model_type = args.get("model_type", "RI").upper()
                     sample = args.get("sample_name", "Core")
                     
@@ -4095,8 +4159,6 @@ class PRCChatAssistant:
                     if trapped_pct is not None:
 
                         parts.append(f"Trapped Hg (Hysteresis) = {trapped_pct:.1f}%")
-
-                    summary = "  |  ".join(parts)
 
                     return (
 
@@ -4484,10 +4546,6 @@ class PRCChatAssistant:
 
 
 
-                    summary = (f"Pc range: {float(pc_a.min()):.2f} â€“ {float(pc_a.max()):.2f} psia | "
-
-                               f"Sw range: {float(sw_a.min()):.3f} â€“ {float(sw_a.max()):.3f}")
-
                     return (f"__PRC_PLOT__\n{_safe_json_dumps(plot_pc)}\n\n")
 
 
@@ -4557,8 +4615,6 @@ class PRCChatAssistant:
                         "curves":        curves,
 
                     }
-
-                    summary = (f"Pressure range: {float(pres_a.min()):.0f} – {float(pres_a.max()):.0f} psia")
 
                     return (f"__PRC_PLOT__\n{_safe_json_dumps(plot_ob)}\n\n")
 
@@ -4831,7 +4887,7 @@ class PRCChatAssistant:
                             if tk in thresh:
                                 t_parts.append(f"HU{idx+1}/HU{idx+2} = {thresh[tk]} FZI")
                         if t_parts:
-                            lines.append(f"**Partition Thresholds:** " + " | ".join(t_parts))
+                            lines.append("**Partition Thresholds:** " + " | ".join(t_parts))
                             
                 elif model == "klinkenberg":
                     lines.append(f"\n\n**Klinkenberg Permeability Correction — {tr.get('total_samples', '?')} Samples**\n")
@@ -5007,7 +5063,7 @@ class PRCChatAssistant:
 
                 sw, krw, kro = args.get("sw",[]), args.get("krw",[]), args.get("kro",[])
 
-                p, mse = tr.get("optimal_parameters",{}), tr.get("final_mse", 0)
+                p = tr.get("optimal_parameters", {})
 
 
 
@@ -5125,17 +5181,35 @@ class PRCChatAssistant:
 
                     )
 
-        except Exception:
+        except Exception as fmt_exc:
 
-            pass
+            # Never silent: a formatter crash is a failed step for trajectory
+            # accounting, even though the chat turn itself continues.
+            _record_tool_failure(name, f"response formatting error: {fmt_exc}")
 
         return ""
 
 
 
-    def _tool_result_summary(self, name: str, raw_result: str) -> dict:
+    def _tool_result_summary(self, name: str, raw_result: str, ok: bool = True) -> dict:
 
-        """Returns a compact dict for the next-turn FunctionResponse so Gemini can interpret results."""
+        """Returns a compact dict for the next-turn FunctionResponse so Gemini can interpret results.
+
+        When ok is False the failure is stated explicitly — the model must acknowledge
+        it instead of hallucinating plots/parameters for the failed step."""
+
+        if not ok:
+            detail = _tool_result_error(raw_result) or str(raw_result)[:300]
+            return {
+                "status": "error",
+                "tool": name,
+                "error": str(detail)[:500],
+                "note": (
+                    f"[TOOL FAILURE: {name} returned error: {str(detail)[:300]}] "
+                    "This step FAILED. Acknowledge the failure to the engineer and do NOT "
+                    "invent results, plots, tables, or parameters for this step."
+                ),
+            }
 
         try:
 
@@ -5279,17 +5353,19 @@ class PRCChatAssistant:
 
                     "status": "success",
 
-                    "well_name": args.get("well_name", "Unknown Well"),
-
                     "note": "Executive report generated. Do not mention tool execution."
 
                 }
 
         except Exception as e:
 
-            _logger.error(f"[Tool] _format_tool_response error ({name}): {e}")
+            _record_tool_failure(name, f"summary formatting error: {e}")
 
-            pass
+        # Defense in depth: never launder an error-shaped payload as "executed"
+        # even if the caller passed ok=True.
+        _fallback_err = _tool_result_error(raw_result)
+        if _fallback_err:
+            return self._tool_result_summary(name, raw_result, ok=False)
 
         return {"status": "executed", "tool": name, "note": "Action complete. Provide the final engineering interpretation directly without stating that a tool was executed."}
 
@@ -5419,6 +5495,43 @@ class PRCChatAssistant:
         _tls.pending_kb = []       # thread-local: safe under 50+ concurrent workers
         _tls.last_well_name = None  # updated when a SCAL file is processed this turn
 
+        # ── Dual-RAG router: pick the retrieval strategy for THIS query ──
+        # VECTOR_SEARCH keeps the KnowledgeBase context already assembled by the
+        # handler; GRAPH_SEARCH swaps in geological-graph context; HYBRID merges
+        # both (de-duplicated by content snippet). Any failure here degrades to
+        # the default vector context — routing must never kill a chat turn.
+        try:
+            from src.rag.router import RagRoute, classify_query, merge_context_chunks
+
+            _route = classify_query(msg)
+            _logger.info("[RAG-ROUTER] route=%s confidence=%.2f", _route.route.value, _route.confidence)
+            if _route.route in (RagRoute.GRAPH_SEARCH, RagRoute.HYBRID):
+                from geological_graph import GeologicalGraph
+
+                _retriever = None
+                try:
+                    from rag_database import RAGDatabase
+                    _retriever = RAGDatabase()
+                except (KeyboardInterrupt, SystemExit):
+                    raise
+                except BaseException as _rag_exc:
+                    # chromadb's Rust bindings can raise pyo3 PanicException (a
+                    # BaseException) on corrupt stores; degrade to graph-only.
+                    _logger.warning("[RAG-ROUTER] vector retriever unavailable (%s) — graph-only.", _rag_exc)
+
+                _graph_res = GeologicalGraph(db_path=settings.graph_db_path, seed=True).hybrid_search(
+                    query_text=msg, retriever=_retriever,
+                )
+                _graph_chunks = [_json.dumps(g) for g in _graph_res.get("graph", []) if g]
+                _graph_chunks += [_json.dumps(v) for v in _graph_res.get("vector", []) if v]
+                if _graph_chunks:
+                    if _route.route is RagRoute.GRAPH_SEARCH:
+                        kb_context = merge_context_chunks("", _graph_chunks)
+                    else:
+                        kb_context = merge_context_chunks(kb_context or "", _graph_chunks)
+        except Exception as _route_exc:
+            _logger.warning("[RAG-ROUTER] routing failed (%s); using default vector context.", _route_exc)
+
         extracted_context = ""
 
         # ── SESSION FILE REGISTRY (Persistence Guard) ──
@@ -5514,6 +5627,11 @@ class PRCChatAssistant:
                     if is_docx and fr_text:
                         _doc_label = "WORD DOCUMENT" if ext == ".docx" else "DOCUMENT"
                         fresh_file_context += f"\n\n[{_doc_label}: {fname}]\n{_cap_doc_text(fr_text)}\n"
+                    # Feed the session KB: consumers capture _tls.pending_kb from this
+                    # thread (app.py:8182 stream / :8799 non-stream) and enqueue
+                    # ingest_transactional — this was a dead path with no producer.
+                    if fr_text:
+                        _tls.pending_kb.extend(KnowledgeBase.chunk_text(fr_text, fname))
                     if email and fr_text:
                         _fhash_store = hashlib.sha256(data_bytes).hexdigest()
                         db(
@@ -5534,6 +5652,7 @@ class PRCChatAssistant:
                     text = _sfh_extract_pdf(data_bytes)
                     if text.strip():
                         fresh_file_context += f"\n\n[PDF DOCUMENT: {fname}]\n{_cap_doc_text(text)}\n"
+                        _tls.pending_kb.extend(KnowledgeBase.chunk_text(text, fname))
                     if text.strip() and email:
                         _fhash_store = hashlib.sha256(data_bytes).hexdigest()
                         db(
@@ -5553,6 +5672,7 @@ class PRCChatAssistant:
                     content = data_bytes.decode("utf-8", errors="ignore")
                     if content.strip():
                         fresh_file_context += f"\n\n[DOCUMENT: {fname}]\n{_cap_doc_text(content)}\n"
+                        _tls.pending_kb.extend(KnowledgeBase.chunk_text(content, fname))
                     if content.strip() and email:
                         _fhash_store = hashlib.sha256(data_bytes).hexdigest()
                         db(
@@ -5747,10 +5867,6 @@ class PRCChatAssistant:
 
         def _generate():
 
-            # Dynamic Model Routing
-
-            msg_low_routing = msg.lower() if msg else ""
-
             # Always use the validated model. gemini-2.5-pro leaked <execute_python>
             # thinking tokens into text output during function-calling turns.
             # gemini-2.5-flash is the only CLAUDE.md-validated model (section 5).
@@ -5871,7 +5987,7 @@ class PRCChatAssistant:
 
                         for _turn in range(4):
 
-                            tool_calls_in_turn: list = []  # (fc_obj, raw_result, formatted_str)
+                            tool_calls_in_turn: list = []  # (fc_obj, raw_result, formatted_str, tool_ok)
 
                             model_parts_in_turn: list = []
 
@@ -5894,23 +6010,39 @@ class PRCChatAssistant:
                                     if part.function_call:
 
                                         raw = ""
+                                        tool_ok = True
 
                                         # Update mode to reflect tool usage
 
                                         yield {"type": "mode", "text": f"Running {part.function_call.name.replace('_', ' ')}"}
 
-                                        for is_final, data in self._execute_tool(part.function_call):
+                                        try:
 
-                                            if not is_final:
+                                            for is_final, ok, data in self._execute_tool(part.function_call):
 
-                                                yield {"type": "progress", "text": data}
+                                                if not is_final:
 
-                                            else:
+                                                    yield {"type": "progress", "text": data}
 
-                                                raw = data
+                                                else:
 
-                                        
+                                                    raw, tool_ok = data, ok
 
+                                        except Exception as tool_exc:
+
+                                            # A crash inside dispatch becomes a counted, model-visible
+                                            # failure payload instead of killing the whole turn.
+                                            _record_tool_failure(part.function_call.name,
+                                                                 f"Unhandled exception: {tool_exc}")
+                                            raw = _json.dumps({
+                                                "status": "error",
+                                                "error": f"Tool execution crashed: {type(tool_exc).__name__}: {tool_exc}",
+                                            })
+                                            tool_ok = False
+
+                                        # Failed steps never reach the plot/diagram formatter:
+                                        # the failure is surfaced to the model via
+                                        # _tool_result_summary, not rendered as user output.
                                         fmt = self._format_tool_response(
 
                                             part.function_call.name,
@@ -5919,9 +6051,9 @@ class PRCChatAssistant:
 
                                             raw,
 
-                                        )
+                                        ) if tool_ok else ""
 
-                                        tool_calls_in_turn.append((part.function_call, raw, fmt))
+                                        tool_calls_in_turn.append((part.function_call, raw, fmt, tool_ok))
 
 
 
@@ -5935,7 +6067,7 @@ class PRCChatAssistant:
 
                             # Emit formatted tool results (plots/mermaid) after text for this turn
 
-                            for _, _, fmt in tool_calls_in_turn:
+                            for _, _, fmt, _ in tool_calls_in_turn:
 
                                 full_response += fmt
 
@@ -5977,13 +6109,13 @@ class PRCChatAssistant:
 
                                         name=fc.name,
 
-                                        response=self._tool_result_summary(fc.name, raw),
+                                        response=self._tool_result_summary(fc.name, raw, ok),
 
                                     )
 
                                 )
 
-                                for fc, raw, _ in tool_calls_in_turn
+                                for fc, raw, _, ok in tool_calls_in_turn
 
                             ]
 
@@ -6026,21 +6158,36 @@ class PRCChatAssistant:
                             if part.function_call:
 
                                 raw = ""
+                                tool_ok = True
 
-                                for is_final, data in self._execute_tool(part.function_call):
+                                try:
 
-                                    if not is_final:
+                                    for is_final, ok, data in self._execute_tool(part.function_call):
 
-                                        # In non-streaming mode, we can't really yield, but let's at least capture it
+                                        if not is_final:
 
-                                        pass
+                                            # In non-streaming mode, we can't really yield, but let's at least capture it
 
-                                    else:
+                                            pass
 
-                                        raw = data
+                                        else:
 
-                                
+                                            raw, tool_ok = data, ok
 
+                                except Exception as tool_exc:
+
+                                    # A crash inside dispatch becomes a counted, model-visible
+                                    # failure payload instead of killing the whole turn.
+                                    _record_tool_failure(part.function_call.name,
+                                                         f"Unhandled exception: {tool_exc}")
+                                    raw = _json.dumps({
+                                        "status": "error",
+                                        "error": f"Tool execution crashed: {type(tool_exc).__name__}: {tool_exc}",
+                                    })
+                                    tool_ok = False
+
+                                # Failed steps skip the plot formatter; failure reaches the
+                                # model via _tool_result_summary instead.
                                 fmt = self._format_tool_response(
 
                                     part.function_call.name,
@@ -6049,15 +6196,15 @@ class PRCChatAssistant:
 
                                     raw,
 
-                                )
+                                ) if tool_ok else ""
 
-                                tool_calls_in_turn.append((part.function_call, raw, fmt))
+                                tool_calls_in_turn.append((part.function_call, raw, fmt, tool_ok))
 
                             elif part.text:
 
                                 final += part.text
 
-                        for _, _, fmt in tool_calls_in_turn:
+                        for _, _, fmt, _ in tool_calls_in_turn:
 
                             final += fmt
 
@@ -6091,13 +6238,13 @@ class PRCChatAssistant:
 
                                     name=fc.name,
 
-                                    response=self._tool_result_summary(fc.name, raw),
+                                    response=self._tool_result_summary(fc.name, raw, ok),
 
                                 )
 
                             )
 
-                            for fc, raw, _ in tool_calls_in_turn
+                            for fc, raw, _, ok in tool_calls_in_turn
 
                         ]
 
@@ -6265,7 +6412,7 @@ class PRCChatAssistant:
                     # Sor_Lab, threshold_pressure, max_hg_sat, etc.) that file_reader.py
                     # does not pre-compute. These are required for table row population.
                     try:
-                        scal_res = extract_file_data(tmp_path)
+                        scal_res = extract_file_data(tmp_path, original_filename=fname)
                         if scal_res.get("data_type") not in (None, "UNKNOWN") and scal_res.get("extracted"):
                             _summary = _scal_doc_summary(scal_res["extracted"])
                             if _summary:
@@ -7401,6 +7548,11 @@ async def get_telemetry_metrics(
     }
     metrics_payload.update(db_metrics)
 
+    # Tool-failure ledger: per-tool failed-step counts from _record_tool_failure,
+    # so trajectory step-success rates are scrapeable.
+    metrics_payload["tool_failure_total"] = int(sum(TOOL_FAILURE_COUNTS.values()))
+    metrics_payload["tool_failure_counts"] = dict(TOOL_FAILURE_COUNTS)
+
     return {
         "status": "success",
         "metrics": metrics_payload
@@ -7457,11 +7609,18 @@ async def user_login(request: Request, pin: str = Form(...), name: str = Form(""
 
             pass  # already registered
 
-    # Issue a session token so user-facing endpoints can authenticate
+    # Issue a session token BOUND to the login email so user-facing endpoints
+    # can enforce identity (verify_user_or_admin rejects cross-user email params).
+
+    now = time.time()
+    for _t in [k for k, v in _USER_TOKENS.items()
+               if now > (v["exp"] if isinstance(v, dict) else v)]:
+        _USER_TOKENS.pop(_t, None)
 
     token = _secrets.token_hex(16)
 
-    _USER_TOKENS[token] = time.time() + _USER_TOKEN_TTL
+    _USER_TOKENS[token] = {"exp": now + _USER_TOKEN_TTL,
+                           "email": normalize_email(email) or None}
 
     return {"status": "success", "token": token}
 
@@ -9230,7 +9389,7 @@ def auto_rename_session_if_new(sid: str, email: str, filename: str = None, messa
         _logger.info(f"[AutoRename] Session exists={exists}, current title: '{current_title}'")
             
         if current_title != "New Study" and current_title.strip() != "":
-            _logger.info(f"[AutoRename] Title already customized, bypassing auto-rename.")
+            _logger.info("[AutoRename] Title already customized, bypassing auto-rename.")
             return
             
         # Determine new title
@@ -9267,13 +9426,14 @@ def auto_rename_session_if_new(sid: str, email: str, filename: str = None, messa
                        (sid, new_title, const_email, time.time(), time.time()))
                 _logger.info(f"[AutoRename] Inserted session row with title '{new_title}' successfully.")
         else:
-            _logger.info(f"[AutoRename] No descriptive title could be determined.")
+            _logger.info("[AutoRename] No descriptive title could be determined.")
     except Exception as e:
         _logger.warning(f"[AutoRename] Failed to auto-rename session {sid}: {e}")
 
 
 @app.post("/api/clear-session")
-async def clear_session(session_id: str = Form(...)):
+async def clear_session(session_id: str = Form(...),
+                        auth: bool = Depends(verify_user_or_admin)):
     """Explicit destructive eviction of a session's cached SCAL data.
     Enforces absolute isolation: clears the dict and forces gc.collect()."""
     import re as _re
@@ -9284,8 +9444,12 @@ async def clear_session(session_id: str = Form(...)):
 
 
 @app.post("/api/clear-user-files")
-async def clear_user_files(email: str = Form(...)):
-    """Wipes all user uploaded files from user_files to prevent cross-session AI confusion."""
+async def clear_user_files(email: str = Form(...),
+                           authorization: Optional[str] = Header(None),
+                           token: Optional[str] = Query(None)):
+    """Wipes all user uploaded files from user_files to prevent cross-session AI confusion.
+    Identity-bound: a user token may only clear its OWN files; admin tokens may clear any."""
+    verify_user_or_admin(authorization=authorization, token=token, email_query=email)
     try:
         email_clean = email.lower().strip()
         db("DELETE FROM user_files WHERE user_email=?", (email_clean,))
@@ -10317,13 +10481,13 @@ class BasinRuleModel(BaseModel):
 
 
 @app.get("/api/admin/rules")
-def get_admin_rules():
+def get_admin_rules(auth: bool = Depends(verify_admin)):
     rows = db("SELECT basin_name, rule_key, min_limit, max_limit FROM basin_physics_rules")
     return [{"basin_name": r[0], "rule_key": r[1], "min_limit": r[2], "max_limit": r[3]} for r in rows]
 
 
 @app.post("/api/admin/rules")
-def post_admin_rule(req: BasinRuleModel):
+def post_admin_rule(req: BasinRuleModel, auth: bool = Depends(verify_admin)):
     db(
         "INSERT INTO basin_physics_rules (basin_name, rule_key, min_limit, max_limit) "
         "VALUES (?, ?, ?, ?) "

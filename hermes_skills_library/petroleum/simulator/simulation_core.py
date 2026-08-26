@@ -1,5 +1,4 @@
 import numpy as np
-from scipy.optimize import minimize
 from scipy.sparse import csr_matrix
 from scipy.sparse.linalg import spsolve
 import json
@@ -132,7 +131,6 @@ class SCALSimulator:
             
             # 3. Update Saturation (Explicit)
             # Simplified saturation update based on fractional flow
-            fw = lambda_w / lambda_t
             sw_new = sw.copy()
             # This is a very simplified explicit update for demonstration
             # In a real simulator, we use the divergence of the water flux

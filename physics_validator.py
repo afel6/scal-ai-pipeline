@@ -64,7 +64,6 @@ class PhysicsGuard:
         kro_a = np.asarray(kro, dtype=float)
 
         idx   = np.argsort(sw_a)
-        sw_s  = sw_a[idx]
         krw_s = krw_a[idx]
         kro_s = kro_a[idx]
 
@@ -231,7 +230,6 @@ class PhysicsGuard:
             return self
 
         idx = np.argsort(x_a)
-        x_s = x_a[idx]
         y_s = y_a[idx]
         mt  = (model_type or "RI").upper()
 

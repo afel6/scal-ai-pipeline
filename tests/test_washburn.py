@@ -1,7 +1,5 @@
 import pytest
 from prc_physics import calculate_washburn_radius
-from scal_file_handler import SCALFileHandler
-import os
 
 def test_washburn_calculation():
     # Test a typical reservoir pressure of 100 psia

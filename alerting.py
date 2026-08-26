@@ -24,7 +24,7 @@ def send_alert(subject: str, message: str):
                 data=json.dumps(payload).encode("utf-8"),
                 headers={"Content-Type": "application/json"}
             )
-            with urllib.request.urlopen(req, timeout=5) as response:
+            with urllib.request.urlopen(req, timeout=5):
                 pass
             logger.info("Webhook alert sent successfully.")
         except Exception as e:

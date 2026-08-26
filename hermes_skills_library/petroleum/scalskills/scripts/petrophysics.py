@@ -642,7 +642,6 @@ class PetrophysicsSkills:
         n = len(perm_clean)
 
         # 1. Dykstra-Parsons Coefficient VDP
-        perm_sorted = np.sort(perm_clean)[::-1]
         k50 = np.percentile(perm_clean, 50.0)
         k84_1 = np.percentile(perm_clean, 15.9) # 84.1% cumulative probability in descending list
         vdp = (k50 - k84_1) / k50 if k50 > 0 else 0.0

@@ -29,8 +29,12 @@ from file_reader import smart_read_csv, _excel_engine
 
 class SCALFileHandler:
 
-    def __init__(self, file_path: str):
+    def __init__(self, file_path: str, display_name: str = None):
         self.file_path = file_path
+        # Uploads arrive as NamedTemporaryFile paths; display_name carries the
+        # real uploaded filename so well-name fallbacks never key off a random
+        # temp stem like 'tmpxaws8hw4'.
+        self.display_name = display_name or Path(file_path).name
         self.extension = Path(file_path).suffix.lower()
         self.sheet_names = []
         self.raw_data = {}      # sheet_name -> DataFrame (raw, no header)
@@ -241,7 +245,7 @@ class SCALFileHandler:
                                             return _val
         
         # ── 2. FILENAME FALLBACK ──
-        _stem = Path(self.file_path).stem
+        _stem = Path(self.display_name).stem
         # Common well patterns: T1-31, A-12, B_10, etc.
         well_match = re.search(r'([A-Z]{1,3}[-_]?\d{1,4}[A-Z]?)', _stem, re.IGNORECASE)
         if well_match:
@@ -619,9 +623,9 @@ def extract_absolute_file_truth(temp_file_paths: list) -> str:
                         normalized_cols.append(f"column '{col_str}' to standard {prop_type} unit")
                 columns = list(df.columns)
                 sanitized_columns = [sanitize_prompt(str(c)) for c in columns]
-                lines.append(f"TOTAL SHEETS: 1 (CSV)")
-                lines.append(f"SHEET NAMES: ['Sheet1']")
-                lines.append(f"  SHEET: \"Sheet1\"")
+                lines.append("TOTAL SHEETS: 1 (CSV)")
+                lines.append("SHEET NAMES: ['Sheet1']")
+                lines.append("  SHEET: \"Sheet1\"")
                 if normalized_cols:
                     lines.append(f"    [UNITS NORMALIZED]: {', '.join(normalized_cols)}")
                 lines.append(f"    COLUMNS ({len(columns)}): {sanitized_columns}")
@@ -661,7 +665,7 @@ def extract_absolute_file_truth(temp_file_paths: list) -> str:
                     lines.append("")
 
             else:
-                lines.append(f"  [Non-tabular file, no sheet/column inventory applicable]")
+                lines.append("  [Non-tabular file, no sheet/column inventory applicable]")
                 lines.append("")
 
         except Exception as e:
@@ -843,7 +847,7 @@ def clean_citation_clutter(text: str, filenames: list = None) -> str:
     # Also clean up standard Source: filename.xlsx:sheet:range format
     cleaned = re.sub(
         r'(?i)source:\s*([a-zA-Z0-9_\-\.]+\.xlsx?|[a-zA-Z0-9_\-\.]+\.docx?|[a-zA-Z0-9_\-\.]+\.csv|[a-zA-Z0-9_\-\.]+\.pdf|[a-zA-Z0-9_\-\.]+\.txt)(?::[a-zA-Z0-9_\-\s\(\)\.]+)*',
-        fr'*Source: \1*',
+        r'*Source: \1*',
         cleaned
     )
     
@@ -1032,12 +1036,6 @@ def detect_multi_well_mixing(raw_data: dict, filename: str = "") -> dict | None:
         r'\b([A-Z]{1,3}[-_]?\d{1,4}[A-Z]?(?:[-_]\d{1,3})?)\b',
         re.IGNORECASE,
     )
-    # Extract primary well from filename
-    primary_well = None
-    fn_match = well_pattern.search(Path(filename).stem)
-    if fn_match:
-        primary_well = fn_match.group(1).upper()
-
     well_sheet_map = {}  # well_id -> [sheet_names]
 
     for sheet_name, df in raw_data.items():
@@ -1294,7 +1292,6 @@ def robust_extract_scal(filepath):
     else:
         engines_to_try = ["openpyxl", "xlrd", "pyxlsb"]
 
-    xls_obj = None
     sheets_dict = None
     last_err = None
     for eng in engines_to_try:
@@ -1381,8 +1378,30 @@ def _extract_docx(file_bytes: bytes) -> str:
     return "\n".join(para.text for para in doc.paragraphs if para.text.strip())
 
 
-def extract_file_data(filepath):
+def _link_samples_to_graph(well_name: str, samples: dict, data_type: str, source_name: str) -> None:
+    """Best-effort Well -[HAS_SAMPLE]-> Sample registration in the geological graph.
+
+    Extraction must never fail because of the graph, so every error is logged
+    and swallowed.
+    """
+    try:
+        if not samples:
+            return
+        from geological_graph import GeologicalGraph
+
+        GeologicalGraph().link_samples(well_name, samples, data_type, source_name)
+    except Exception as exc:
+        import logging
+        logging.getLogger("prc-graph").warning(
+            "Sample→well graph registration skipped: %s", exc
+        )
+
+
+def extract_file_data(filepath, original_filename: str = None):
     ext = Path(filepath).suffix.lower()
+    # The real uploaded filename (uploads reach us as temp paths). Drives well
+    # fallbacks and graph provenance — never persist a random temp stem.
+    source_name = original_filename or Path(filepath).name
 
     if ext == '.pdf':
         try:
@@ -1456,9 +1475,11 @@ def extract_file_data(filepath):
                 "sheet_names": [], "row_count": 0, "extracted": {}, "errors": [str(e)],
             }
 
+    well_hint = ""
     try:
-        handler = SCALFileHandler(filepath)
+        handler = SCALFileHandler(filepath, display_name=source_name)
         result = handler.process()
+        well_hint = result.get("well_name", "")
         # PVT files are rejected outright — do NOT fall through to the robust
         # extractor, which would misparse fluid data under a SCAL track.
         if result and result.get("data_type") == "PVT":
@@ -1469,14 +1490,34 @@ def extract_file_data(filepath):
                 "errors": [SCALFileHandler.PVT_REJECTION_MSG],
             }
         if result and result.get("row_count", 0) > 0:
+            _link_samples_to_graph(
+                well_hint,
+                (result.get("extracted") or {}).get("samples") or {},
+                result.get("data_type", "UNKNOWN"),
+                source_name,
+            )
             return result
-    except Exception as e:
+    except Exception:
         pass
 
     robust_result = robust_extract_scal(filepath)
     if any(s.get("data_block") for s in robust_result["sheets"]):
         data_types = [s["track"] for s in robust_result["sheets"] if s.get("data_block") and s["track"] != "UNKNOWN"]
         dt = data_types[0] if data_types else "UNKNOWN"
+        if not well_hint:
+            # Handler never produced a well (e.g. .xlsb/.tsv raise in read());
+            # the robust parser still captures 'Well: X' header labels.
+            well_hint = next(
+                (s.get("metadata", {}).get("well")
+                 for s in robust_result["sheets"] if s.get("metadata", {}).get("well")),
+                "",
+            )
+        _link_samples_to_graph(
+            well_hint,
+            {s["name"]: s["data_block"] for s in robust_result["sheets"] if s.get("data_block")},
+            dt,
+            source_name,
+        )
         return {
             "data_type": dt,
             "sheet_names": [s["name"] for s in robust_result["sheets"]],

@@ -10,7 +10,6 @@ Coverage targets:
   - Archie math: RI normalization, FF monotonicity, exponent range compliance
 """
 
-import math
 import os
 import sys
 import pytest

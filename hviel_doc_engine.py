@@ -100,7 +100,6 @@ class HvielDocEngine:
             return {}, text
             
         parts = text.split('__PRC_PLOT__', 1)
-        leading_text = parts[0].strip()
         rest = parts[1].strip()
         
         # Clean potential markdown block prefix

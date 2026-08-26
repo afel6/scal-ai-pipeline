@@ -1,4 +1,3 @@
-import pytest
 from scal_file_handler import sanitize_well_hallucinations
 
 def test_empty_input():

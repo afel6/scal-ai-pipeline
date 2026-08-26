@@ -85,8 +85,9 @@ def test_hybrid_geological_search_execution(hermetic_stores):
 
     res_list = list(assistant._execute_tool(call))
     assert len(res_list) > 0
-    is_final, result = res_list[-1]
+    is_final, ok, result = res_list[-1]
     assert is_final is True
+    assert ok is True
 
     payload = json.loads(result)
     assert "graph" in payload

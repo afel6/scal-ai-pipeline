@@ -2,7 +2,7 @@ import pytest
 import re
 import os
 from fastapi.testclient import TestClient
-from app import app, init_db
+from app import app
 
 
 def _resolve_key():
@@ -48,15 +48,15 @@ def send_chat(client, message: str, user_email: str = "test@prc.local", file_pat
         "user_email": user_email
     }
     
-    files = {}
+    # Endpoint signature is `files: list[UploadFile] = File(default=[])`, so the
+    # multipart field name must be "files" — a mismatched name is silently dropped.
+    files = []
     if file_path and os.path.exists(file_path):
-        files["file"] = open(file_path, "rb")
-        
-    response = client.post(url, data=data, files=files if files else None)
-    
-    if "file" in files:
-        files["file"].close()
-        
+        with open(file_path, "rb") as fh:
+            files.append(("files", (os.path.basename(file_path), fh.read(), "application/vnd.ms-excel")))
+
+    response = client.post(url, data=data, files=files or None)
+
     response.raise_for_status()
     return response.json()["reply"]
 

@@ -50,17 +50,6 @@ class BrooksCoreyResult:
 
 
 @dataclass
-class LETResult:
-    Lw: float; Ew: float; Tw: float
-    Lo: float; Eo: float; To: float
-    endpoints:     Endpoints
-    r2_krw:        float = 0.0
-    r2_kro:        float = 0.0
-    rmse_krw:      float = 0.0
-    rmse_kro:      float = 0.0
-
-
-@dataclass
 class ValidationResult:
     is_valid:         bool
     crossover_sw:     Optional[float]
@@ -103,47 +92,6 @@ def bc_krw(Sw: np.ndarray, ep: Endpoints, nw: float) -> np.ndarray:
 def bc_kro(Sw: np.ndarray, ep: Endpoints, no: float) -> np.ndarray:
     """Brooks-Corey Kro = Kro_max · (1−Se)^no with hard endpoint enforcement."""
     kr = ep.Kro_max * (1.0 - _Se(Sw, ep.Swi, ep.Sor)) ** no
-    kr = np.where(Sw <= ep.Swi,    ep.Kro_max, kr)
-    kr = np.where(Sw >= ep.Sw_max, 0.0,        kr)
-    return np.clip(kr, 0.0, None)
-
-
-def let_krw(Sw: np.ndarray, ep: Endpoints, L: float, E: float, T: float) -> np.ndarray:
-    """
-    LET Krw: Se^L / (Se^L + E·(1−Se)^T).
-
-    Edge-case guard: the LET denominator (Se^L + E·(1−Se)^T) can theoretically
-    reach zero when both Se and (1−Se) are simultaneously near-zero (impossible for
-    well-clamped Se, but can occur with extreme parameter values from the optimizer).
-    np.errstate suppresses the divide-by-zero warning; np.nan_to_num replaces any
-    resulting NaN/Inf with 0.0 before endpoint overrides are applied.
-    """
-    Se = _Se(Sw, ep.Swi, ep.Sor)
-    num = Se ** L
-    denom = num + E * (1.0 - Se) ** T
-    with np.errstate(divide="ignore", invalid="ignore"):
-        kr = ep.Krw_max * np.where(denom != 0.0, num / denom, 0.0)
-    kr = np.nan_to_num(kr, nan=0.0, posinf=ep.Krw_max, neginf=0.0)
-    kr = np.where(Sw <= ep.Swi,    0.0,        kr)
-    kr = np.where(Sw >= ep.Sw_max, ep.Krw_max, kr)
-    return np.clip(kr, 0.0, None)
-
-
-def let_kro(Sw: np.ndarray, ep: Endpoints, L: float, E: float, T: float) -> np.ndarray:
-    """
-    LET Kro: (1−Se)^L / ((1−Se)^L + E·Se^T).
-
-    Edge-case guard: same denominator-zero risk as let_krw.  np.errstate suppresses
-    the divide-by-zero warning; np.nan_to_num replaces any resulting NaN/Inf with
-    0.0 before endpoint overrides are applied.
-    """
-    Se = _Se(Sw, ep.Swi, ep.Sor)
-    f   = 1.0 - Se
-    num = f ** L
-    denom = num + E * Se ** T
-    with np.errstate(divide="ignore", invalid="ignore"):
-        kr = ep.Kro_max * np.where(denom != 0.0, num / denom, 0.0)
-    kr = np.nan_to_num(kr, nan=0.0, posinf=ep.Kro_max, neginf=0.0)
     kr = np.where(Sw <= ep.Swi,    ep.Kro_max, kr)
     kr = np.where(Sw >= ep.Sw_max, 0.0,        kr)
     return np.clip(kr, 0.0, None)
@@ -233,11 +181,14 @@ class KrCurveFitter:
         )
 
     def generate_grid(self, model: str, params) -> dict:
+        # Brooks-Corey only: the LET model (LETResult/let_krw/let_kro) was removed
+        # as dead code — no fitter ever produced it and every caller passes
+        # 'brooks_corey'. The LET chat tool runs its own independent copy in
+        # hermes_skills_library/petroleum/curve_fitting_skill.py.
+        if model != "brooks_corey":
+            raise ValueError(f"Unsupported Kr model '{model}' (only 'brooks_corey' is implemented)")
         Sw = self._Sw
-        if model == "brooks_corey":
-            Krw, Kro = bc_krw(Sw, self.ep, params.nw), bc_kro(Sw, self.ep, params.no)
-        else:
-            Krw, Kro = let_krw(Sw, self.ep, params.Lw, params.Ew, params.Tw), let_kro(Sw, self.ep, params.Lo, params.Eo, params.To)
+        Krw, Kro = bc_krw(Sw, self.ep, params.nw), bc_kro(Sw, self.ep, params.no)
         fmt = lambda arr: [round(float(v), 6) for v in arr]
         return {"Sw": fmt(Sw), "Krw": fmt(Krw), "Kro": fmt(Kro)}
 

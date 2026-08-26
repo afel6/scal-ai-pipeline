@@ -188,7 +188,6 @@ class PRCReportEngine:
             return {}, text
             
         parts = text.split('__PRC_PLOT__', 1)
-        leading_text = parts[0].strip()
         rest = parts[1].strip()
         
         # Clean potential markdown block prefix
@@ -251,7 +250,6 @@ class PRCReportEngine:
 
     def _draw_chart_for_doc(self, data: dict) -> io.BytesIO | None:
         """Creates a premium, physics-aware chart image buffer suitable for injection into DOCX."""
-        import numpy as np
         try:
             title  = data.get('title', 'PRC Analysis')
             xAxis_cfg = data.get('xAxis') or {}

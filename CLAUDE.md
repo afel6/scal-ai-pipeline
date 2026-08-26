@@ -6,10 +6,9 @@ and enforce these rules without exception.
 
 > [!IMPORTANT]
 > **Multi-agent teamwork:** This repo is built by more than one AI agent (Claude Code
-> and Antigravity/Gemini). **Before starting work, read [`TEAM.md`](TEAM.md)** — the
-> collaboration protocol, the "Do Not Break" invariants (e.g. pinned `genkit==0.4.0`,
-> `/health` not `/api/diag` for liveness), and the async Handoff Log. **When you finish,
-> append a Handoff Log entry to TEAM.md and commit before handing off to Antigravity.**
+> and Antigravity/Gemini). Before starting work, read the "Do-Not-Break invariants"
+> in [`README.md`](README.md) (pinned `genkit==0.4.0`, `/health` not `/api/diag` for
+> liveness, pathlib-only file ops, committed `frontend/dist`).
 
 > [!IMPORTANT]
 > **[2026-05-29] Zero-Memory Footprint, Active Session TTL Eviction & Streaming Truncation Prevention Hotfix**
@@ -185,6 +184,19 @@ or standards-body approved.
 This section is append-only. Every security vulnerability discovered, patched, or
 mitigated during development or audits is recorded here. Do not remove entries.
 Add new entries at the top of the list with date, CVE class, and patch description.
+
+---
+
+### [2026-08-26] Pre-Launch Access-Control Sweep — IDOR Token Binding, Admin-Rules Gating & Aviel Endpoint Auth
+
+**Class:** CWE-639 Authorization Bypass (IDOR) / CWE-306 Missing Authentication for Critical Function / CWE-862 Missing Authorization
+**Discovery:** Pre-launch security audit across Hviel + Aviel repositories.
+**Patch:**
+  1. **TOKEN IDENTITY BINDING (`app.py`):** `_USER_TOKENS` records upgraded from bare expiry floats to `{exp, email}` dicts. `verify_user_or_admin` now rejects any user token acting on an email other than the one it was issued for (admin tokens exempt; legacy float entries carry no email and remain expiry-checked only). Kills cross-user IDOR via a valid token replayed with a foreign `user_email`.
+  2. **ADMIN-RULES AUTHORIZATION (both repos):** `GET/POST /api/admin/rules` were reachable without authentication (CWE-306). Hviel now gates both with `Depends(verify_admin)`; Aviel gates its equivalents with `Depends(verify_pvt_auth)`.
+  3. **DESTRUCTIVE ENDPOINT PROTECTION (`app.py`):** `DELETE /api/session/{sid}` and `POST /api/session/{sid}/title` enforce `verify_user_or_admin` + `_verify_session_owner` — no unauthenticated session deletion or rename, and no cross-owner access.
+  4. **AVIEL ACCESS CONTROLS (`pvt-ai-pipeline/src/api/app.py`):** `POST /api/chat` and `POST /api/v1/analyze-pvt` (plus KB rescan, telemetry, and audit-ledger reads) now sit behind `Depends(verify_pvt_auth)`; the test suite overrides the dependency via `tests/conftest.py` instead of any production bypass flag.
+**Status:** APPLIED IN WORKING TREE 2026-08-26; verified against local test suites (Hviel 326 / Aviel 87 / evals 43). Known open item: `TESTING` env flag still disables `verify_user_or_admin` via `is_testing()` — hardening queued (gate on genuine pytest only).
 
 ---
 

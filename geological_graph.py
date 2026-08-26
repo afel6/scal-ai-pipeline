@@ -30,19 +30,21 @@ import sqlite3
 from collections import deque
 from contextlib import contextmanager
 from enum import Enum
+from pathlib import Path
 from typing import Any, Dict, Iterable, Iterator, List, Optional, Sequence, Tuple
 
 _logger = logging.getLogger("prc-graph")
 
 
 class NodeType(str, Enum):
-    """The five entity kinds the geological graph models."""
+    """The entity kinds the geological graph models."""
 
     BASIN = "Basin"
     FORMATION = "Formation"
     LITHOLOGY = "Lithology"
     WELL = "Well"
     FLUID_TYPE = "FluidType"
+    SAMPLE = "Sample"
 
 
 class RelationType(str, Enum):
@@ -52,6 +54,7 @@ class RelationType(str, Enum):
     HAS_LITHOLOGY = "HAS_LITHOLOGY"  # Formation  -> Lithology
     PENETRATES = "PENETRATES"        # Well       -> Formation
     CONTAINS_FLUID = "CONTAINS_FLUID"  # Formation -> FluidType
+    HAS_SAMPLE = "HAS_SAMPLE"        # Well       -> Sample
 
 
 def _coerce_type(value: "str | NodeType", enum_cls) -> str:
@@ -268,6 +271,45 @@ class GeologicalGraph:
                 _logger.warning("Skipping malformed relation %r: %s", row, exc)
         _logger.info("Imported %d/%d relations.", ingested, _safe_len(relations))
         return ingested
+
+    def link_samples(
+        self,
+        well_name: str,
+        samples: Dict[str, Any],
+        data_type: str,
+        source_file: str = "",
+    ) -> int:
+        """Register extracted lab samples against their well.
+
+        Each key of ``samples`` (the per-sheet dict produced by the extractors)
+        becomes a ``Sample`` node named ``"<well>/<file-stem>/<sheet>"`` —
+        qualified by well AND source file, because generic sheet names
+        ('Sheet1' for every CSV) would otherwise collide across a well's lab
+        files and silently overwrite provenance. Re-linking the same file is
+        idempotent (upsert). Each ``Well -[HAS_SAMPLE]-> Sample`` edge carries
+        the SCAL data type and source filename. Returns the number of samples
+        linked. Wells that could not be identified ('PROVISIONAL WELL') are
+        skipped: an edge to a fake well is worse than no edge.
+        """
+        well = (well_name or "").strip()
+        if not well or well.upper() == "PROVISIONAL WELL":
+            return 0
+        stem = Path(source_file).stem if source_file else ""
+        linked = 0
+        for sheet in samples or {}:
+            meta = {"data_type": data_type, "sheet": str(sheet)}
+            if source_file:
+                meta["source_file"] = source_file
+            sample_id = f"{well}/{stem}/{sheet}" if stem else f"{well}/{sheet}"
+            self.add_relation(
+                well, NodeType.WELL,
+                sample_id, NodeType.SAMPLE,
+                RelationType.HAS_SAMPLE, meta,
+            )
+            linked += 1
+        if linked:
+            _logger.info("Linked %d sample(s) to well '%s'.", linked, well)
+        return linked
 
     # ── read path ─────────────────────────────────────────────────────────────
 

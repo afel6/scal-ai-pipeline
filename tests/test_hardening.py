@@ -1,8 +1,6 @@
 # Save as test_hardening.py then: pytest tests/test_hardening.py
-from scal_file_handler import SCALFileHandler, extract_file_data
 from physics_validator import PhysicsGuard
 from extractors.micp import MICPExtractor
-import numpy as np
 
 def test_physics_guard_incremental_detection():
     # Test 1 — PhysicsGuard incremental detection

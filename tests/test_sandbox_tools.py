@@ -1,4 +1,3 @@
-import pytest
 import json
 from app import PRCChatAssistant
 
@@ -29,8 +28,9 @@ def test_sandbox_fit_brooks_corey_execution():
     generator = assistant._execute_tool(call)
     res_list = list(generator)
     assert len(res_list) > 0
-    is_final, result = res_list[-1]
+    is_final, ok, result = res_list[-1]
     assert is_final is True
+    assert ok is True
     
     fit_res = json.loads(result)
     assert "parameters" in fit_res
@@ -56,8 +56,9 @@ def test_sandbox_fit_archie_execution():
     generator = assistant._execute_tool(call)
     res_list = list(generator)
     assert len(res_list) > 0
-    is_final, result = res_list[-1]
+    is_final, ok, result = res_list[-1]
     assert is_final is True
+    assert ok is True
     
     fit_res = json.loads(result)
     assert "parameters" in fit_res

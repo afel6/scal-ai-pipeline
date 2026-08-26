@@ -15,6 +15,7 @@ __pycache__/
 
 # Database files — keep local only
 *.db
+*.sqlite
 *.sqlite3
 
 # Generated reports
@@ -31,6 +32,13 @@ logs/
 backups/
 .DS_Store
 Thumbs.db
+
+# Tool caches / editors
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.vscode/
+.idea/
 
 .vercel
 .env*.local

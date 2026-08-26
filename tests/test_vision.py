@@ -1,6 +1,4 @@
-import pytest
 import os
-import json
 import base64
 
 # A mock for the google.genai vision client if needed, or simply verify the tool exists.

@@ -1,6 +1,6 @@
 import pytest
 from fastapi.testclient import TestClient
-from app import app, request_id_var
+from app import app
 from config import settings
 import unittest.mock as mock
 
@@ -35,8 +35,6 @@ def test_unhandled_500_exception_handler_and_alerting(mock_trigger):
     SCAL has catch-all routes for both SPA and /api/ paths that intercept
     dynamically added test routes, so we verify the handler directly.
     """
-    from starlette.testclient import TestClient as StarletteClient
-    import asyncio
     
     # 1. Verify the global exception handler IS registered on the app
     assert Exception in app.exception_handlers, \

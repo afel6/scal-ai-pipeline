@@ -48,7 +48,7 @@ This is the `KnowledgeBase` class in `app.py` and is what the chat pipeline actu
 `rag_database.py` defines a separate `RAGDatabase` class backed by **ChromaDB**
 (`chromadb.PersistentClient`, persisted under `./chroma_db`) exposing `ingest_report()` and
 `query_analog_wells()`. This is the "analog wells" feature. It is currently referenced only by
-`ingest_legacy.py`, `e2e_test.py`, and the test suite — it is **not imported or called by
+the test suite — it is **not imported or called by
 `app.py`**, so it does not participate in the live chat/RAG pipeline at this time.
 
 ## 3. Skills Engine (Hermes)

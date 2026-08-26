@@ -40,7 +40,6 @@ def _excel_engine(filepath):
 
 def _read_excel(filepath):
     import pandas as pd
-    ext = Path(filepath).suffix.lower()
     engine = _excel_engine(filepath)
     xl = pd.ExcelFile(filepath, engine=engine)
     result = {"type": "excel", "sheets": {}}
@@ -191,8 +190,8 @@ def smart_read_csv(filepath: str, encodings: list = None, **kwargs):
             logger.warning(f"Encoding {encoding} failed to decode {filepath}. Error: {str(e)}")
             if idx == len(encodings) - 1:
                 raise ValueError(
-                    f"Failed to decode CSV file. File encoding is unsupported. "
-                    f"Please save the data using standard UTF-8 or Latin1 format."
+                    "Failed to decode CSV file. File encoding is unsupported. "
+                    "Please save the data using standard UTF-8 or Latin1 format."
                 ) from e
 
 def _read_csv(filepath):
@@ -1101,7 +1100,6 @@ def _format_scal_for_prompt(scal: dict) -> str:
                 vals = info["values"]
                 unit = info.get("unit", "")
                 note = info.get("note", "")
-                note_str = f"  NOTE: {note}" if note else ""
                 n    = len(vals)
                 frst = vals[0]  if vals else "n/a"
                 lst  = vals[-1] if vals else "n/a"
