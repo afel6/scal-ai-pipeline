@@ -286,10 +286,12 @@ def verify_user_or_admin(
     if is_testing():
         return True
 
-    # Local dev escape: no ADMIN_PIN configured -> nothing to log in against,
-    # auth stays open. Deploys MUST set ADMIN_PIN (checklist section 6).
-    if not ADMIN_PIN:
-        return True
+    # NOTE (Phase B1): the former `if not ADMIN_PIN: return True` escape was
+    # removed. It was a deployable backdoor — a deploy that forgot to set
+    # ADMIN_PIN left every user route wide open. Auth is now fail-closed: with no
+    # PIN there is simply no valid token, so every request is rejected. ADMIN_PIN
+    # is set from config (random default) and documented in .env.example; set a
+    # real value in the environment (checklist section 6).
 
     # Safely extract string values from FastAPI defaults
     auth_str = authorization if isinstance(authorization, str) else None
@@ -2467,169 +2469,6 @@ _tls = TLSContext()
 # removed: it only created a name collision that would have fed the model
 # "Calculated"/"Fitted" success strings the day anyone used `ai.generate`.
 
-class CalculatePetrophysicsInput(BaseModel):
-    script: str = Field(description="One of: petrophysics.py, micp_skill.py, centrifuge_skill.py")
-    model: Optional[str] = Field(None, description="For petrophysics.py: regress_archie_m_a, regress_archie_n, rqi_fzi. For centrifuge: pc_only, full, hassler_brunner. rqi_fzi params: {phi: [fractions 0-1], perm: [mD], depth: [optional array]}. Returns full per-sample table with HU classification.")
-    params: dict = Field(description="Parameters required for the selected script and model.")
-
-class ExecutePythonSimulationParamsInput(BaseModel):
-    swr: Optional[float] = None
-    snr: Optional[float] = None
-    krw_max: Optional[float] = None
-    kro_max: Optional[float] = None
-    nw: Optional[float] = None
-    no: Optional[float] = None
-    nx: Optional[float] = None
-    ny: Optional[float] = None
-    steps: Optional[float] = None
-
-class ExecutePythonSimulationInput(BaseModel):
-    model: str
-    mode: str
-    params: ExecutePythonSimulationParamsInput
-
-class GenerateMermaidDiagramInput(BaseModel):
-    type: str
-    content: str
-
-class FitPetrophysicalCurveInput(BaseModel):
-    model: str
-    sw: Optional[list[float]] = None
-    krw: Optional[list[float]] = None
-    kro: Optional[list[float]] = None
-    pc: Optional[list[float]] = None
-    s_hg: Optional[list[float]] = None
-    pc_imb: Optional[list[float]] = None
-    s_hg_imb: Optional[list[float]] = None
-    ri: Optional[list[float]] = None
-    ff: Optional[list[float]] = None
-    porosity: Optional[list[float]] = None
-    perm: Optional[list[float]] = None
-    pressure: Optional[list[float]] = None
-    depth: Optional[list[float]] = None
-    k_md: Optional[float] = None
-    phi_val: Optional[float] = None
-    ift_cos_theta: Optional[float] = None
-    sample_name: Optional[str] = None
-
-class AgenticHistoryMatchingInput(BaseModel):
-    sw: list[float]
-    krw: list[float]
-    kro: list[float]
-
-class GenerateExecutiveReportInput(BaseModel):
-    well_name: str
-    report_title: Optional[str] = None
-
-class GetAuditHistoryInput(BaseModel):
-    session_id: Optional[str] = Field(None, description="Optional session ID to retrieve audit history for")
-
-@ai.tool(name="calculate_petrophysics_properties", description="**MANDATORY for centrifuge Hassler-Brunner / Forbes corrections and for FZI/RQI calculations. Do not produce Pc(Sw) or RQI values without calling this tool first.** Calculation Engine for SCAL Tracks A, B, D, E. Does NOT generate charts, only returns calculated JSON data.")
-def calculate_petrophysics_properties_tool(input: CalculatePetrophysicsInput) -> str:
-    return "Calculated"
-
-@ai.tool(name="execute_python_simulation", description="Universal petrophysical simulation (Brooks-Corey, 1D Kr curves, 2D IMPES reservoir waterflood). Returns JSON for PRC plotting.")
-def execute_python_simulation_tool(input: ExecutePythonSimulationInput) -> str:
-    return "Simulated"
-
-@ai.tool(name="generate_mermaid_diagram", description="Generates Mermaid.js diagram code for complex workflows.")
-def generate_mermaid_diagram_tool(input: GenerateMermaidDiagramInput) -> str:
-    return "Generated"
-
-@ai.tool(name="fit_petrophysical_curve", description="**MANDATORY before reporting any fitted parameter (Archie n, m, a, MICP Pe/Pd/modal radius, Corey exponents, J-function values). Never report these values without calling this tool first. If the tool fails, report the failure  -  do not estimate.** Fits raw SCAL lab data to standard petrophysical models. Select model by curve type:\n  model='brooks_corey' or 'let'  ->  Relative Permeability (pass sw, krw, kro arrays).\n  model='micp'  ->  Mercury Injection (pass pc=[psia], s_hg=[fraction 0-1]). For imbibition (recovery) cycle: also pass pc_imb=[psia], s_hg_imb=[fraction]. Auto-generates log-scale Pc curve (drainage solid, imbibition dashed) + PSD.\n  model='ri'  ->  Resistivity Index Archie fit (pass sw=[...], ri=[...]). Log-log plot, fits n exponent.\n  model='ff'  ->  Formation Factor Archie fit (pass porosity=[...], ff=[...]). Log-log plot, fits m and a.\n  model='jfunction'  ->  Leverett J-Function (pass sw=[...], pc=[psia], k_md=X, phi_val=Y, ift_cos_theta=26.5).\n  model='pc_centrifuge'  ->  Capillary Pressure direct (pass sw=[...], pc=[psia values]).\n  model='overburden'  ->  Compaction curves (pass pressure=[psia], porosity=[...], perm=[mD]). Dual-axis.\n  model='poroperm'  ->  Porosity vs Permeability cross-plot with log-linear fit (pass porosity=[...], perm=[mD]).\n  model='poroperm_depth'  ->  Porosity & Permeability vs Depth (pass depth=[...], porosity=[...], perm=[mD]). Dual-axis.\nPass sample_name='Core-1' to label multi-sample charts.")
-def fit_petrophysical_curve_tool(input: FitPetrophysicalCurveInput) -> str:
-    return "Fitted"
-
-@ai.tool(name="agentic_history_matching", description="Simulated Annealing history matching on SCAL lab data.")
-def agentic_history_matching_tool(input: AgenticHistoryMatchingInput) -> str:
-    return "Matched"
-
-@ai.tool(name="generate_executive_report", description="**REFUSE this call if no SCAL analysis tools have been invoked in the current session. A report cannot be generated when no analysis has been performed. Return an error message asking the user to upload data and run analysis first.** Generates a professional PRC Executive SCAL Report (.docx) for the current engineering session. Call this when the user asks for a report, summary document, or engineering deliverable. Pass the well name extracted from the conversation context.")
-def generate_executive_report_tool(input: GenerateExecutiveReportInput) -> str:
-    return "Report generated"
-
-@ai.tool(name="get_audit_history", description="Retrieves the historical record of physics audits (the Auditor's Ledger) for the current session.")
-def get_audit_history_tool(input: GetAuditHistoryInput) -> str:
-    return "Audits retrieved"
-
-class SandboxFitBrooksCoreyInput(BaseModel):
-    sw: list[float]
-    krw: list[float]
-    kro: list[float]
-    swi: float
-    sor: float
-    krw_max: Optional[float] = 1.0
-    kro_max: Optional[float] = 1.0
-    sample_name: Optional[str] = None
-
-class SandboxFitArchieInput(BaseModel):
-    x: list[float]
-    y: list[float]
-    model_type: str
-    sample_name: Optional[str] = None
-
-@ai.tool(name="sandbox_fit_brooks_corey", description="Fits Brooks-Corey relative permeability curves (exponent nw and no) to Sw, Krw, Kro data in a secure physics sandbox. Automatically enforces physical constraints and corrects anomalies.")
-def sandbox_fit_brooks_corey_tool(input: SandboxFitBrooksCoreyInput) -> str:
-    import json
-    from physics_sandbox import PhysicsSandbox
-    sandbox = PhysicsSandbox()
-    fit_res = sandbox.fit_brooks_corey(
-        sw=input.sw,
-        krw=input.krw,
-        kro=input.kro,
-        swi=input.swi,
-        sor=input.sor,
-        krw_max=input.krw_max,
-        kro_max=input.kro_max,
-    )
-    if input.sample_name:
-        fit_res["sample_name"] = input.sample_name
-    return json.dumps(fit_res)
-
-@ai.tool(name="sandbox_fit_archie", description="Fits Archie parameters (a, m or b, n) securely in a sandbox. model_type='FF' fits a/m from porosity vs formation factor. model_type='RI' fits b/n from Sw vs resistivity index.")
-def sandbox_fit_archie_tool(input: SandboxFitArchieInput) -> str:
-    import json
-    from physics_sandbox import PhysicsSandbox
-    sandbox = PhysicsSandbox()
-    fit_res = sandbox.fit_archie(x=input.x, y=input.y, model_type=input.model_type)
-    if input.sample_name:
-        fit_res["sample_name"] = input.sample_name
-    return json.dumps(fit_res)
-
-class HybridGeologicalSearchInput(BaseModel):
-    query_text: str
-    porous_low: Optional[float] = None
-    porous_high: Optional[float] = None
-    perm_low: Optional[float] = None
-    perm_high: Optional[float] = None
-    depth_limit: Optional[int] = 1
-    n_results: Optional[int] = 3
-
-@ai.tool(name="hybrid_geological_search", description="Hybrid geological knowledge search: fuses the SQLite Geological Knowledge Graph (Libyan basins, formations, lithologies, fluids, wells, and the lab samples extracted from uploaded SCAL files, linked Well -[HAS_SAMPLE]-> Sample) with vector analog-well retrieval. Mention basin/formation/well names in query_text to anchor the graph traversal (a well anchors its linked samples too); pass porosity (porous_low/porous_high, fraction) and permeability (perm_low/perm_high, mD) windows to fetch analog wells from the vector store.")
-def hybrid_geological_search_tool(input: HybridGeologicalSearchInput) -> str:
-    import json
-    from geological_graph import GeologicalGraph
-    from rag_database import RAGDatabase
-    graph = GeologicalGraph(db_path=settings.graph_db_path, seed=True)
-    retriever = RAGDatabase()
-    porous_range = (
-        (float(input.porous_low), float(input.porous_high))
-        if input.porous_low is not None and input.porous_high is not None else None
-    )
-    perm_range = (
-        (float(input.perm_low), float(input.perm_high))
-        if input.perm_low is not None and input.perm_high is not None else None
-    )
-    res = graph.hybrid_search(
-        query_text=input.query_text,
-        porous_range=porous_range,
-        perm_range=perm_range,
-        retriever=retriever,
-        depth_limit=input.depth_limit or 1,
-        n_results=input.n_results or 3,
-    )
-    return json.dumps(res)
-
 def _add_breadcrumb(msg: str):
     if not hasattr(_tls, "breadcrumbs"):
         _tls.breadcrumbs = []
@@ -3260,12 +3099,6 @@ class PRCChatAssistant:
 
                     self._current_idx = idx
 
-                    try:
-                        google_ai_plugin._client._api_client.api_key = key
-                        google_ai_plugin._client.aio._api_client.api_key = key
-                    except Exception as p_err:
-                        _logger.warning(f"[HA] Failed to propagate key to Genkit: {p_err}")
-
                 _logger.info(f"[HA] Node {idx+1} active ({key[:8]}...)")
 
                 return
@@ -3279,11 +3112,6 @@ class PRCChatAssistant:
             with self._client_lock:
 
                 self._client = genai_new.Client(api_key=self._keys[0])
-                try:
-                    google_ai_plugin._client._api_client.api_key = self._keys[0]
-                    google_ai_plugin._client.aio._api_client.api_key = self._keys[0]
-                except Exception as p_err:
-                    _logger.warning(f"[HA] Failed to propagate fallback key to Genkit: {p_err}")
 
         except Exception as e:
 

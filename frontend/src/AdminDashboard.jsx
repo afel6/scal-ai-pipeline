@@ -1,4 +1,4 @@
-/* eslint-disable no-unused-vars, react-hooks/set-state-in-effect */
+/* eslint-disable no-unused-vars */
 import React, { useState, useEffect, useCallback, useMemo, useRef } from 'react';
 import { Users, MessageSquare, BarChart3, Bug, Database, Activity, ArrowLeft, RefreshCw, Clock, Mail, ChevronDown, ChevronUp, LogOut, Cpu, DollarSign } from 'lucide-react';
 import axios from 'axios';

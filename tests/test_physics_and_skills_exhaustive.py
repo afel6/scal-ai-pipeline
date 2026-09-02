@@ -767,7 +767,11 @@ class TestPhysicsValidator:
 class TestSkillsEngine:
 
     def test_missing_skill_returns_error_dict(self):
-        result = SkillsEngine.run_skill("nonexistent_category", "nonexistent_skill", "script.py")
+        # Use an allowlisted script name so the not-found fall-through is reached:
+        # the B1/B2 allowlist rejects unknown script names *before* the existence
+        # check (see test_skills_allowlist.py), so a bogus name would return
+        # "not permitted" instead. A bogus category/skill still yields "not found".
+        result = SkillsEngine.run_skill("nonexistent_category", "nonexistent_skill", "petrophysics.py")
         assert "error" in result
         assert "not found" in result["error"].lower()
 
