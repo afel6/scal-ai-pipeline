@@ -269,6 +269,45 @@ def is_testing() -> bool:
     must never disable auth — verify_user_or_admin short-circuits on this."""
     return "pytest" in sys.modules or "PYTEST_CURRENT_TEST" in os.environ
 
+
+def _launched_by_asgi_server() -> bool:
+    """True when this process was started by a real ASGI server CLI.
+
+    Keyed on the launcher (sys.argv[0] / SERVER_SOFTWARE), NOT on sys.modules —
+    `import app` pulls uvicorn into sys.modules even under pytest, so that would
+    false-positive. Under pytest argv[0] is the pytest/python launcher, never
+    uvicorn/gunicorn.
+    """
+    argv0 = os.path.basename(sys.argv[0]).lower() if sys.argv else ""
+    if "uvicorn" in argv0 or "gunicorn" in argv0:
+        return True
+    return os.environ.get("SERVER_SOFTWARE", "").lower().startswith("gunicorn")
+
+
+def assert_auth_bypass_disabled_in_production(force: bool = False) -> None:
+    """Hard-fail if the pytest auth bypass could be live outside a pytest run.
+
+    is_testing() short-circuits verify_user_or_admin; it must never be true in a
+    served process. Fail-closed inversion (C1 item 1.3): the PRIMARY trigger is
+    "is_testing() true while pytest is absent from sys.modules" — pytest actually
+    running is the one positive, reliable signal, whereas "is this a server" is a
+    negative signal with unbounded launcher shapes (uvicorn, gunicorn, hypercorn,
+    granian, …). The old enumerated server detection is kept as an additional
+    trigger (it also catches pytest-imported-inside-a-real-server), and force=True
+    covers `python app.py`. Under a genuine pytest run, pytest is in sys.modules,
+    so the suite keeps its bypass.
+    """
+    if not is_testing():
+        return
+    pytest_running = "pytest" in sys.modules
+    if not pytest_running or force or _launched_by_asgi_server():
+        raise RuntimeError(
+            "SECURITY: is_testing() is true outside a genuine pytest run — the "
+            "verify_user_or_admin auth bypass would be active. Refusing to start. "
+            "Unset PYTEST_CURRENT_TEST and ensure pytest is not imported in the "
+            "server process."
+        )
+
 def normalize_email(email: Optional[str]) -> Optional[str]:
     if not email:
         return None
@@ -334,6 +373,20 @@ def verify_user_or_admin(
         raise HTTPException(status_code=401, detail="Invalid or expired token")
 
     raise HTTPException(status_code=401, detail="Authentication token required")
+
+
+def verify_user_or_admin_bearer(authorization: Optional[str] = Header(None),
+                                token: Optional[str] = Query(None)):
+    """Header/query-only wrapper of verify_user_or_admin for JSON-body routes.
+
+    verify_user_or_admin also declares `Form(...)` params (token_form,
+    user_email); attaching it to a route with a JSON Pydantic body forces
+    form-encoding and breaks that body. This variant checks the SAME admin/user
+    token stores with no Form param, so a JSON POST authenticates via the
+    Authorization header — no second credential scheme.
+    """
+    return verify_user_or_admin(authorization=authorization, token=token,
+                                token_form=None, user_email=None, email_query=None)
 
 # sanitize_prompt is imported from scal_file_handler (single implementation);
 # the byte-identical local copy that used to live here was removed.
@@ -3872,8 +3925,24 @@ class PRCChatAssistant:
                     y_lab = coords.get("y", [[], []])[0]
                     y_fit = coords.get("y", [[], []])[1]
                     
+                    # Provenance (A3 pattern): a `corrected` fit had its free
+                    # parameters forced back into the physical window — the value
+                    # sits on a bound, not on the data. It is NOT a fitted result,
+                    # so the rendered plot label must not present it as one (this
+                    # is the n=1.500 leak B0.1 surfaced). The citation gate cannot
+                    # help here — it must never rewrite plot JSON.
+                    corrected = bool(fit_res.get("corrected"))
+                    fit_note = "; ".join(fit_res.get("notes") or []) or \
+                        "parameter fell outside the physical range; no successful fit"
+
                     if model_type == "RI":
                         n_val = params.get("n")
+                        if corrected:
+                            ri_curve_label = "RI Archie (n unresolved — outside physical range, not fitted)"
+                            archie_meta = {"n": None, "fitted": False, "note": fit_note}
+                        else:
+                            ri_curve_label = f"RI Archie  n={n_val:.3f}"
+                            archie_meta = {"n": round(n_val, 4), "fitted": True}
                         plot_ri = {
                             "title": f"Resistivity Index  -  RI vs Sw ({sample})",
                             "xAxis": {"label": "Water Saturation Sw (fraction)"},
@@ -3881,9 +3950,9 @@ class PRCChatAssistant:
                             "xAxisLog": True, "yAxisLog": True,
                             "curves": [
                                 {"name": f"RI Lab ({sample})", "showLine": False, "showPoints": True, "color": "#f59e0b", "data": [{"x": float(s), "y": float(r)} for s, r in zip(x_coords, y_lab)]},
-                                {"name": f"RI Archie  n={n_val:.3f}", "showLine": True, "showPoints": False, "color": "#fbbf24", "data": [{"x": float(s), "y": float(r)} for s, r in zip(x_coords, y_fit)]},
+                                {"name": ri_curve_label, "showLine": True, "showPoints": False, "color": "#fbbf24", "data": [{"x": float(s), "y": float(r)} for s, r in zip(x_coords, y_fit)]},
                             ],
-                            "metadata": {"archie": {"n": round(n_val, 4)}, "physics_audit": health},
+                            "metadata": {"archie": archie_meta, "physics_audit": health},
                         }
                         
                         _log_physics_audit(
@@ -3897,6 +3966,12 @@ class PRCChatAssistant:
                     else:
                         m_val = params.get("m")
                         a_val = params.get("a")
+                        if corrected:
+                            ff_curve_label = "FF Archie (m/a unresolved — outside physical range, not fitted)"
+                            archie_meta = {"m": None, "a": None, "fitted": False, "note": fit_note}
+                        else:
+                            ff_curve_label = f"FF Archie  m={m_val:.3f} a={a_val:.3f}"
+                            archie_meta = {"m": round(m_val, 4), "a": round(a_val, 4), "fitted": True}
                         plot_ff = {
                             "title": f"Formation Factor  -  FF vs Porosity ({sample})",
                             "xAxis": {"label": "Porosity φ (fraction)"},
@@ -3904,9 +3979,9 @@ class PRCChatAssistant:
                             "xAxisLog": True, "yAxisLog": True,
                             "curves": [
                                 {"name": f"FF Lab ({sample})", "showLine": False, "showPoints": True, "color": "#10b981", "data": [{"x": float(p), "y": float(f)} for p, f in zip(x_coords, y_lab)]},
-                                {"name": f"FF Archie  m={m_val:.3f} a={a_val:.3f}", "showLine": True, "showPoints": False, "color": "#34d399", "data": [{"x": float(p), "y": float(f)} for p, f in zip(x_coords, y_fit)]},
+                                {"name": ff_curve_label, "showLine": True, "showPoints": False, "color": "#34d399", "data": [{"x": float(p), "y": float(f)} for p, f in zip(x_coords, y_fit)]},
                             ],
-                            "metadata": {"archie": {"m": round(m_val, 4), "a": round(a_val, 4)}, "physics_audit": health},
+                            "metadata": {"archie": archie_meta, "physics_audit": health},
                         }
                         
                         _log_physics_audit(
@@ -7215,6 +7290,9 @@ def init_db() -> None:
 async def lifespan(app: FastAPI):
     global GLOBAL_EVENT_LOOP
     GLOBAL_EVENT_LOOP = asyncio.get_running_loop()
+    # Enforced invariant: the pytest auth bypass must never be live under a real
+    # ASGI server. Fail fast before serving a single request.
+    assert_auth_bypass_disabled_in_production()
     # API key validation on startup with clear error (Crash Issue 6)
     if not is_testing():
         try:
@@ -9147,7 +9225,7 @@ def _parse_skill_md(file_path: str) -> dict:
 
 
 @app.get("/api/kb/status")
-async def kb_status():
+async def kb_status(auth: bool = Depends(verify_user_or_admin)):
     try:
         # Aggregate global chunks from library_docs and library_chunks
         global_rows = await async_db(
@@ -9270,7 +9348,7 @@ async def kb_delete(
 
 
 @app.get("/api/skills/list")
-async def list_skills_endpoint():
+async def list_skills_endpoint(auth: bool = Depends(verify_user_or_admin)):
     skills_dir = Path(__file__).parent / "hermes_skills_library"
     skills_list = []
     
@@ -10493,25 +10571,33 @@ async def api_grade_response(
     except Exception as e:
         _logger.error(f"[Grader] {e}")
         raise HTTPException(status_code=500, detail=str(e))
+# Calibrate is a public-facing compute route (C1 puts it on the front line).
+# A real SCAL Kr/Archie sweep is tens of points; cap the arrays well above that
+# so an oversized paste is rejected at the request boundary (before np.array /
+# the fit) rather than allocating/fitting a huge vector — the B3 pattern.
+MAX_SCAL_CALIBRATION_POINTS = 500
+
+
 class ScalCalibrateRequest(BaseModel):
     # Brooks-Corey points
-    sw: Optional[list[float]] = None
-    krw: Optional[list[float]] = None
-    kro: Optional[list[float]] = None
+    sw: Optional[list[float]] = Field(None, max_length=MAX_SCAL_CALIBRATION_POINTS)
+    krw: Optional[list[float]] = Field(None, max_length=MAX_SCAL_CALIBRATION_POINTS)
+    kro: Optional[list[float]] = Field(None, max_length=MAX_SCAL_CALIBRATION_POINTS)
     swi: float = 0.15
     sor: float = 0.2
     krw_max: float = 0.5
     kro_max: float = 0.8
-    
+
     # Archie points
-    porosity: Optional[list[float]] = None
-    formation_factor: Optional[list[float]] = None
-    
+    porosity: Optional[list[float]] = Field(None, max_length=MAX_SCAL_CALIBRATION_POINTS)
+    formation_factor: Optional[list[float]] = Field(None, max_length=MAX_SCAL_CALIBRATION_POINTS)
+
     basin_name: Optional[str] = "Default"
 
 
 @app.post("/api/scal/calibrate")
-def scal_calibrate(req: ScalCalibrateRequest):
+def scal_calibrate(req: ScalCalibrateRequest,
+                   auth: bool = Depends(verify_user_or_admin_bearer)):
     import numpy as np
     from petrophysical_curves import Endpoints, KrCurveFitter
     from physics_validator import PhysicsGuard
@@ -10674,6 +10760,10 @@ async def serve_spa(full_path: str):
 if __name__ == "__main__":
 
     import uvicorn
+
+    # `python app.py` is a real server launch (its launcher is app.py, not
+    # uvicorn), so force the auth-bypass invariant here too.
+    assert_auth_bypass_disabled_in_production(force=True)
 
     init_db()
 
