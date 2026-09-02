@@ -160,41 +160,22 @@ except ImportError:
 
 GEMINI_KEY_POOL: list[str] = settings.gemini_keys
 
-# --- NVIDIA NIM (OpenAI-compatible) chat backend --------------------------- #
-# The Hviel chat assistant + petrophysical tool-calling now run on NVIDIA NIM
-# (model nvidia/nemotron-3-super-120b-a12b) instead of Gemini. Keys are read
-# from the environment (NVIDIA_API_KEY, plus optional NVIDIA_API_KEY1..N for
-# failover). Deterministic file extraction (scal_file_handler) is unchanged.
-def _load_nvidia_keys() -> list[str]:
-    keys: list[str] = []
-    base = os.getenv("NVIDIA_API_KEY")
-    if base:
-        keys.extend([k.strip(" \n\r\t\"'") for k in base.split(",") if k.strip(" \n\r\t\"'")])
-    for k, v in os.environ.items():
-        if k.startswith("NVIDIA_API_KEY") and k != "NVIDIA_API_KEY" and v:
-            keys.extend([x.strip(" \n\r\t\"'") for x in v.split(",") if x.strip(" \n\r\t\"'")])
-    return list(dict.fromkeys(keys))
-
-NVIDIA_KEY_POOL: list[str] = _load_nvidia_keys()
-# SCAL_LLM_BASE_URL / SCAL_LLM_MODEL point the OpenAI-compatible chat backend
-# at any endpoint — e.g. local Ollama (http://localhost:11434/v1/chat/completions).
-# Defaults preserve the original NVIDIA NIM cloud config.
-NVIDIA_BASE_URL = os.getenv("SCAL_LLM_BASE_URL", "").strip() or "https://integrate.api.nvidia.com/v1/chat/completions"
-NVIDIA_MODEL = os.getenv("SCAL_LLM_MODEL", "").strip() or "openai/gpt-oss-120b"
-# A local endpoint (Ollama) needs no API key; seed the pool with a placeholder
-# bearer token so the request loop runs instead of raising "no keys configured".
-if not NVIDIA_KEY_POOL and ("localhost" in NVIDIA_BASE_URL or "127.0.0.1" in NVIDIA_BASE_URL):
-    NVIDIA_KEY_POOL = ["local-ollama"]
-# HTTP timeout (seconds) for a single NVIDIA NIM completion call. Large multi-sheet
-# prompts on a reasoning model can exceed the old hardcoded 120s; env-configurable.
-try:
-    NVIDIA_HTTP_TIMEOUT = float(os.getenv("SCAL_LLM_HTTP_TIMEOUT", "300") or 300)
-    if NVIDIA_HTTP_TIMEOUT <= 0:
-        NVIDIA_HTTP_TIMEOUT = 300.0
-except (TypeError, ValueError):
-    NVIDIA_HTTP_TIMEOUT = 300.0
-_nvidia_key_idx = 0
-_nvidia_key_lock = threading.Lock()
+# --- Chat LLM: the single provider-neutral adapter ------------------------- #
+# Every chat call routes through llm_adapter.ChatAdapter. Provider, model, URL
+# and keys come from the environment (LLM_PROVIDER / LLM_MODEL / LLM_BASE_URL /
+# LLM_API_KEYS; legacy SCAL_LLM_* and NVIDIA_API_KEY* still honoured). The
+# adapter reports success/failure to alerting — the provider-neutral signal
+# /health reads. Embeddings (GEMINI_KEY_POOL above) are NOT on this path.
+import alerting
+import llm_adapter
+CHAT = llm_adapter.ChatAdapter(
+    llm_adapter.load_config(),
+    on_success=alerting.record_llm_success,
+    on_failure=alerting.record_llm_failure,
+)
+# Retries of a whole chat turn on transient provider errors (the adapter
+# already rotates keys inside a single call).
+_CHAT_TURN_RETRIES = 3
 
 KB_INGEST_SECRET = settings.KB_INGEST_SECRET
 
@@ -767,7 +748,7 @@ def _extract_petrophysical_summary(response_text: str, file_name: str) -> dict:
         # llm_json_with_retry re-prompts once with a corrective instruction.
         def _gen(corrective):
             p = prompt if not corrective else f"{prompt}\n\n{corrective}"
-            return _nvidia_text_generate(p, temperature=0.1, max_tokens=1024)
+            return chat_text_generate(p, temperature=0.1, max_tokens=1024)
         parsed = llm_json_with_retry(_gen, logger=_logger)
         return parsed if isinstance(parsed, dict) else {}
     except Exception as e:
@@ -2109,33 +2090,6 @@ def _ingest_library_file(file_bytes: bytes, filename: str, uploader_email: str) 
 
 
 
-# -- THREAD-SAFE KEY TRACKING --------------------------------------------------
-
-_FAILED_KEYS:      dict[str, dict] = {}
-
-_FAILED_KEYS_LOCK: threading.Lock  = threading.Lock()
-
-
-
-
-
-def _mark_key_failed(key: str, is_hard: bool = False) -> None:
-
-    with _FAILED_KEYS_LOCK:
-
-        _FAILED_KEYS[key] = {"ts": time.time(), "wait": 3600 if is_hard else 60}
-
-
-
-
-
-def _key_healthy(key: str) -> bool:
-
-    with _FAILED_KEYS_LOCK:
-
-        f = _FAILED_KEYS.get(key, {})
-
-    return (time.time() - f.get("ts", 0)) >= f.get("wait", 0)
 
 
 
@@ -2516,7 +2470,7 @@ class TLSContext:
 _tls = TLSContext()
 
 # The tool schemas the model is offered live in `_HVIEL_TOOLS` (sent via
-# `_nvidia_tools()`) and are implemented in `PRCChatAssistant._execute_tool`.
+# `_chat_tools()`) and are implemented in `PRCChatAssistant._execute_tool`.
 # The former Genkit registration of the same ten names — a parallel set of
 # placeholder stubs on an `ai = Genkit(...)` object nothing ever called — was
 # removed: it only created a name collision that would have fed the model
@@ -2560,20 +2514,18 @@ def _extract_and_log_corrections(session_id: str, email: str, text: str) -> str:
 
 
 # ===================== NVIDIA NIM tool-calling backend ====================== #
-# Genkit/Gemini chat path replaced by direct NVIDIA NIM calls. The big chat
+# Chat path runs through llm_adapter.CHAT (provider from env). The big chat
 # tool-loop downstream is untouched: these helpers return genai-shaped shims
 # (resp.candidates[0].content.parts with .text / .function_call(.name,.args)).
-import urllib.request as _nv_urllib
-import urllib.error as _nv_urlerr
 
 
-class _NvFuncCall:
+class _ChatFuncCall:
     def __init__(self, name, args):
         self.name = name
         self.args = args or {}
 
 
-class _NvPart:
+class _ChatPart:
     def __init__(self, text=None, func=None):
         self._text = text
         self._func = func
@@ -2587,25 +2539,25 @@ class _NvPart:
         return self._func
 
 
-class _NvContent:
+class _ChatContent:
     def __init__(self, parts):
         self.parts = parts
 
 
-class _NvCandidate:
+class _ChatCandidate:
     def __init__(self, parts):
-        self.content = _NvContent(parts)
+        self.content = _ChatContent(parts)
 
 
-class _NvUsage:
+class _ChatUsage:
     def __init__(self, pt, ct):
         self.prompt_token_count = pt
         self.candidates_token_count = ct
 
 
-class _NvResponse:
+class _ChatResponse:
     def __init__(self, parts, usage):
-        self.candidates = [_NvCandidate(parts)]
+        self.candidates = [_ChatCandidate(parts)]
         self.usage_metadata = usage
 
     @property
@@ -2613,7 +2565,7 @@ class _NvResponse:
         return "".join(p.text for p in self.candidates[0].content.parts if p.text)
 
 
-def _nv_lower_schema(s):
+def _chat_lower_schema(s):
     """Recursively lowercase Gemini uppercase JSON-schema type strings for OpenAI."""
     if isinstance(s, dict):
         out = {}
@@ -2621,23 +2573,23 @@ def _nv_lower_schema(s):
             if k == "type" and isinstance(v, str):
                 out[k] = v.lower()
             elif k == "properties" and isinstance(v, dict):
-                out[k] = {pk: _nv_lower_schema(pv) for pk, pv in v.items()}
+                out[k] = {pk: _chat_lower_schema(pv) for pk, pv in v.items()}
             elif k == "items":
-                out[k] = _nv_lower_schema(v)
+                out[k] = _chat_lower_schema(v)
             else:
-                out[k] = _nv_lower_schema(v) if isinstance(v, (dict, list)) else v
+                out[k] = _chat_lower_schema(v) if isinstance(v, (dict, list)) else v
         return out
     if isinstance(s, list):
-        return [_nv_lower_schema(x) for x in s]
+        return [_chat_lower_schema(x) for x in s]
     return s
 
 
-_NVIDIA_TOOLS_CACHE = None
+_CHAT_TOOLS_CACHE = None
 
 
-def _nvidia_tools():
-    global _NVIDIA_TOOLS_CACHE
-    if _NVIDIA_TOOLS_CACHE is None:
+def _chat_tools():
+    global _CHAT_TOOLS_CACHE
+    if _CHAT_TOOLS_CACHE is None:
         tools = []
         for group in _HVIEL_TOOLS:
             for fd in group.get("function_declarations", []):
@@ -2646,14 +2598,14 @@ def _nvidia_tools():
                     "function": {
                         "name": fd["name"],
                         "description": fd.get("description", ""),
-                        "parameters": _nv_lower_schema(fd.get("parameters") or {"type": "object", "properties": {}}),
+                        "parameters": _chat_lower_schema(fd.get("parameters") or {"type": "object", "properties": {}}),
                     },
                 })
-        _NVIDIA_TOOLS_CACHE = tools
-    return _NVIDIA_TOOLS_CACHE
+        _CHAT_TOOLS_CACHE = tools
+    return _CHAT_TOOLS_CACHE
 
 
-def _nv_config_unpack(config):
+def _chat_config_unpack(config):
     system_instruction = None
     temperature = 0.2
     want_tools = False
@@ -2673,7 +2625,7 @@ def _nv_config_unpack(config):
     return system_instruction, temperature, want_tools
 
 
-def _nv_contents_to_neutral(contents):
+def _chat_contents_to_neutral(contents):
     """genai Content list -> neutral [{role, parts:[{text}|{tool_request}|{tool_response}]}].
     file_data parts are intentionally dropped (NVIDIA has no Files API; the
     deterministic ground-truth extraction is already injected as prompt text)."""
@@ -2694,7 +2646,7 @@ def _nv_contents_to_neutral(contents):
     return messages_data
 
 
-def _nv_messages_from_neutral(messages_data, system_instruction):
+def _chat_messages_from_neutral(messages_data, system_instruction):
     """Neutral messages -> OpenAI chat messages, synthesizing tool_call ids."""
     oa = []
     if system_instruction:
@@ -2747,11 +2699,11 @@ def _nv_messages_from_neutral(messages_data, system_instruction):
     return oa
 
 
-def _nvidia_generate(messages_data, system_instruction, temperature, want_tools, max_tokens=4096):
-    global _nvidia_key_idx
-    if not NVIDIA_KEY_POOL:
-        raise RuntimeError("No NVIDIA API keys configured (set NVIDIA_API_KEY).")
-    oa_messages = _nv_messages_from_neutral(messages_data, system_instruction)
+def _chat_generate(messages_data, system_instruction, temperature, want_tools, max_tokens=4096):
+    """One chat completion through the provider adapter (CHAT); returns the
+    genai-shaped shim the tool loop consumes. Key rotation, cooldown and the
+    /health success/failure signal all live in the adapter."""
+    oa_messages = _chat_messages_from_neutral(messages_data, system_instruction)
     # Context-overflow guard: a large multi-sheet workbook's un-truncated ground-truth
     # can exceed the model context window (gpt-oss-120b ~131K tokens), making NVIDIA
     # compute a negative output budget -> 400 "max_tokens must be at least 1". Cap the
@@ -2792,166 +2744,96 @@ def _nvidia_generate(messages_data, system_instruction, temperature, want_tools,
             _logger.warning("[NVIDIA] input %d chars > %d; truncated to ~%d." % (_total, _MAX_INPUT_CHARS, _new))
         except Exception:
             pass
-    payload = {
-        "model": NVIDIA_MODEL,
-        "temperature": 0.2 if temperature is None else float(temperature),
-        "top_p": 0.95,
-        "max_tokens": max_tokens,
-        "stream": False,
-        # gpt-oss is a reasoning model; "low" effort keeps latency down so large
-        # multi-sheet uploads finish inside the chat timeout.
-        "reasoning_effort": "low",
-        "messages": oa_messages,
-    }
-    if want_tools:
-        payload["tools"] = _nvidia_tools()
-        payload["tool_choice"] = "auto"
+    res = CHAT.complete(
+        oa_messages,
+        tools=_chat_tools() if want_tools else None,
+        temperature=0.2 if temperature is None else float(temperature),
+        max_tokens=max_tokens,
+    )
+    parts = []
+    if res.text:
+        parts.append(_ChatPart(text=res.text))
+    for tc in res.tool_calls:
+        parts.append(_ChatPart(func=_ChatFuncCall(tc.name, tc.args)))
+    if not parts:
+        parts.append(_ChatPart(text=""))
+    return _ChatResponse(parts, _ChatUsage(*res.usage))
+
+
+def _log_chat_usage(resp) -> None:
     try:
-        _logger.info("[NVIDIA] generate -> model=%s tools=%s msgs=%d" % (NVIDIA_MODEL, want_tools, len(payload["messages"])))
-    except Exception:
-        pass
-    body = _json.dumps(payload).encode("utf-8")
-    errors = []
-    for _ in range(len(NVIDIA_KEY_POOL)):
-        with _nvidia_key_lock:
-            key = NVIDIA_KEY_POOL[_nvidia_key_idx % len(NVIDIA_KEY_POOL)]
-        try:
-            req = _nv_urllib.Request(NVIDIA_BASE_URL, data=body, method="POST", headers={
-                "accept": "application/json",
-                "content-type": "application/json",
-                "authorization": "Bearer %s" % key,
-            })
-            with _nv_urllib.urlopen(req, timeout=NVIDIA_HTTP_TIMEOUT) as r:
-                data = _json.loads(r.read().decode("utf-8"))
-            msg = data["choices"][0]["message"]
-            parts = []
-            content = msg.get("content")
-            if content:
-                parts.append(_NvPart(text=content))
-            for tc in msg.get("tool_calls") or []:
-                fn = tc.get("function", {})
-                try:
-                    args = _json.loads(fn.get("arguments") or "{}")
-                except Exception:
-                    args = {}
-                parts.append(_NvPart(func=_NvFuncCall(fn.get("name", ""), args)))
-            if not parts:
-                parts.append(_NvPart(text=msg.get("reasoning_content") or ""))
-            usage = data.get("usage") or {}
-            return _NvResponse(parts, _NvUsage(usage.get("prompt_tokens", 0), usage.get("completion_tokens", 0)))
-        except Exception as exc:
-            detail = exc
-            if isinstance(exc, _nv_urlerr.HTTPError):
-                try:
-                    detail = exc.read().decode("utf-8")[:300]
-                except Exception:
-                    pass
-            errors.append(str(detail))
-            try:
-                _logger.warning("[NVIDIA] call failed (key %s...): %s" % (key[:8], detail))
-            except Exception:
-                pass
-            with _nvidia_key_lock:
-                _nvidia_key_idx = (_nvidia_key_idx + 1) % len(NVIDIA_KEY_POOL)
-    raise RuntimeError("All NVIDIA NIM keys failed: %s" % errors)
+        if resp.usage_metadata:
+            _log_api_usage(getattr(_tls, "current_session_id", "SYSTEM"), CHAT.config.model,
+                           resp.usage_metadata.prompt_token_count, resp.usage_metadata.candidates_token_count)
+    except Exception as ue:
+        _logger.warning("[CostTracker] usage log failed: %s" % ue)
 
 
-def _call_gemini_with_retry(client, model, contents, config, max_retries=5, base_delay=2, max_tokens=4096):
-    """NVIDIA NIM-backed non-streaming generate; returns a genai-shaped shim."""
-    system_instruction, temperature, want_tools = _nv_config_unpack(config)
-    messages_data = _nv_contents_to_neutral(contents)
+def chat_generate_with_retry(contents, config, max_retries=5, base_delay=2, max_tokens=4096):
+    """Non-streaming chat turn through the adapter; returns the genai-shaped shim.
+    Success/failure for /health is recorded by the adapter itself."""
+    system_instruction, temperature, want_tools = _chat_config_unpack(config)
+    messages_data = _chat_contents_to_neutral(contents)
     last_exc = None
     for attempt in range(max_retries):
         try:
-            resp = _nvidia_generate(messages_data, system_instruction, temperature, want_tools, max_tokens=max_tokens)
-            try:
-                if resp.usage_metadata:
-                    _log_api_usage(getattr(_tls, "current_session_id", "SYSTEM"), NVIDIA_MODEL,
-                                   resp.usage_metadata.prompt_token_count, resp.usage_metadata.candidates_token_count)
-            except Exception as ue:
-                _logger.warning("[CostTracker] usage log failed: %s" % ue)
-            import alerting
-            alerting.record_llm_success()
+            resp = _chat_generate(messages_data, system_instruction, temperature, want_tools, max_tokens=max_tokens)
+            _log_chat_usage(resp)
             return resp
         except Exception as e:
             last_exc = e
-            import alerting
-            alerting.record_llm_failure(str(e))
             if attempt < max_retries - 1:
                 time.sleep(base_delay * (2 ** attempt))
                 continue
             raise
-    raise ValueError("NVIDIA call failed after %d retries: %s" % (max_retries, last_exc))
+    raise ValueError("chat call failed after %d retries: %s" % (max_retries, last_exc))
 
 
-def _nvidia_text_generate(prompt, system_instruction=None, temperature=0.2,
-                          max_retries=3, base_delay=2, max_tokens=4096):
-    """Small shared helper for the report/extraction pipeline: plain prompt ->
-    response text via NVIDIA NIM (no tools), reusing _nvidia_generate with the
-    same retry/backoff, usage logging and alerting as the chat wrappers.
-    Injected into llm_insight_generator nodes as `llm_call` so that module
-    never imports app.py."""
-    if not NVIDIA_KEY_POOL:
-        # Fail fast with a clear, actionable message instead of retry-sleeping.
+def chat_text_generate(prompt, system_instruction=None, temperature=0.2,
+                       max_retries=3, base_delay=2, max_tokens=4096):
+    """Plain prompt -> text (no tools) through the adapter. Injected into
+    llm_insight_generator as `llm_call` so that module never imports app.py."""
+    if not CHAT.config.api_keys:
         raise RuntimeError(
-            "No NVIDIA API keys configured (set NVIDIA_API_KEY / NVIDIA_API_KEY1..N); "
-            "the report/extraction pipeline requires NVIDIA NIM access."
+            f"No API key configured for chat provider '{CHAT.config.provider}' "
+            "(set LLM_API_KEYS / LLM_API_KEY); the report/extraction pipeline needs one."
         )
     messages_data = [{"role": "user", "parts": [{"text": str(prompt)}]}]
     last_exc = None
     for attempt in range(max_retries):
         try:
-            resp = _nvidia_generate(messages_data, system_instruction, temperature, False, max_tokens=max_tokens)
-            try:
-                if resp.usage_metadata:
-                    _log_api_usage(getattr(_tls, "current_session_id", "SYSTEM"), NVIDIA_MODEL,
-                                   resp.usage_metadata.prompt_token_count, resp.usage_metadata.candidates_token_count)
-            except Exception as ue:
-                _logger.warning("[CostTracker] usage log failed: %s" % ue)
-            import alerting
-            alerting.record_llm_success()
+            resp = _chat_generate(messages_data, system_instruction, temperature, False, max_tokens=max_tokens)
+            _log_chat_usage(resp)
             return resp.text or ""
         except Exception as e:
             last_exc = e
-            import alerting
-            alerting.record_llm_failure(str(e))
             if attempt < max_retries - 1:
                 time.sleep(base_delay * (2 ** attempt))
                 continue
             raise
-    raise ValueError("NVIDIA text call failed after %d retries: %s" % (max_retries, last_exc))
+    raise ValueError("chat text call failed after %d retries: %s" % (max_retries, last_exc))
 
-GLOBAL_STREAM_QUEUES = {}
 
-def _call_gemini_stream_with_retry(client, model, contents, config, max_retries=3, base_delay=2):
-    """NVIDIA NIM-backed 'streaming' generate. NVIDIA is called non-streaming so
-    tool-calls parse reliably; the full result is yielded as one genai-shaped
-    chunk and the caller token-streams part.text downstream."""
-    system_instruction, temperature, want_tools = _nv_config_unpack(config)
-    messages_data = _nv_contents_to_neutral(contents)
+def chat_generate_stream_with_retry(contents, config, max_retries=3, base_delay=2):
+    """'Streaming' chat turn: the adapter is called non-streaming so tool calls
+    parse reliably; the full result is yielded as one genai-shaped chunk and
+    the caller token-streams part.text downstream."""
+    system_instruction, temperature, want_tools = _chat_config_unpack(config)
+    messages_data = _chat_contents_to_neutral(contents)
     last_exc = None
     for attempt in range(max_retries):
         try:
-            resp = _nvidia_generate(messages_data, system_instruction, temperature, want_tools)
-            try:
-                if resp.usage_metadata:
-                    _log_api_usage(getattr(_tls, "current_session_id", "SYSTEM"), NVIDIA_MODEL,
-                                   resp.usage_metadata.prompt_token_count, resp.usage_metadata.candidates_token_count)
-            except Exception as ue:
-                _logger.warning("[CostTracker] stream usage log failed: %s" % ue)
-            import alerting
-            alerting.record_llm_success()
+            resp = _chat_generate(messages_data, system_instruction, temperature, want_tools)
+            _log_chat_usage(resp)
             yield resp
             return
         except Exception as e:
             last_exc = e
-            import alerting
-            alerting.record_llm_failure(str(e))
             if attempt < max_retries - 1:
                 time.sleep(base_delay * (2 ** attempt))
                 continue
             raise
-    raise ValueError("NVIDIA stream failed after %d retries: %s" % (max_retries, last_exc))
+    raise ValueError("chat stream failed after %d retries: %s" % (max_retries, last_exc))
 
 
 # -- TOOL FAILURE TRACKING --------------------------------------------------- #
@@ -2994,7 +2876,10 @@ _PLOT_BLOCK_RE = re.compile(r"__PRC_PLOT__\s*\{.*?\}\s*(?=\n|$)", re.DOTALL)
 # so ordinary prose ("a", "an Amott-Harvey index") is never rewritten.
 _GATE_RE = re.compile(
     r"(?P<cue>\b(?:fitted|exponent|parameter|coefficient|tortuosity|cementation|archie)\b[^.\n]{0,80}?)"
-    r"(?P<open>[`*]{0,2})(?P<param>nw|no|n|m|a)(?P=open)"
+    # The parameter token is word-bounded: without \b the lazy cue gap let the
+    # group land on a letter inside a word ("s-a-turation" -> param "a"), so
+    # the value check consulted the wrong parameter (C2 gate finding).
+    r"(?P<open>[`*]{0,2})\b(?P<param>nw|no|n|m|a)\b(?P=open)"
     # The separator covers prose ("n is 1.98", "n = 1.98") and the markdown table
     # cells the prompt mandates ("| Saturation Exponent (n) | 1.98 |").
     r"(?P<mid>[^.\n]{0,60}?(?:is|=|:|\|)\s*)"
@@ -3003,9 +2888,33 @@ _GATE_RE = re.compile(
 )
 
 
+def _extract_fitted_values(formatted: str) -> Dict[str, float]:
+    """Fitted parameter values a tool's rendered result actually carries, read
+    from its __PRC_PLOT__ metadata (archie n/m/a, fit_params nw/no). These are
+    the numbers a successful call is evidence FOR — nothing else."""
+    values: Dict[str, float] = {}
+    if not isinstance(formatted, str) or "__PRC_PLOT__" not in formatted:
+        return values
+    for match in _PLOT_BLOCK_RE.finditer(formatted):
+        try:
+            meta = _json.loads(match.group(0).split("__PRC_PLOT__", 1)[1].strip()).get("metadata") or {}
+        except Exception:                                   # noqa: BLE001 - not a payload
+            continue
+        for src in (meta.get("archie") or {}, meta.get("fit_params") or {}):
+            for key in _GATED_PARAMETERS:
+                val = src.get(key) if isinstance(src, dict) else None
+                if isinstance(val, (int, float)) and not isinstance(val, bool):
+                    values[key] = float(val)
+    return values
+
+
 def record_tool_call(sid: str, tool: str, status: str, args: dict,
-                     parameters: List[str]) -> str:
+                     parameters: List[str],
+                     values: Optional[Dict[str, float]] = None) -> str:
     """Append one tool-call record and return its call id.
+
+    `values` are the fitted parameter values the call produced; the gate uses
+    them to reject a reported number that differs from the fit.
 
     A record with no session id is NOT retained: the ledger is per-session
     evidence, and an unbound row would land in a shared bucket where a stale
@@ -3018,7 +2927,8 @@ def record_tool_call(sid: str, tool: str, status: str, args: dict,
                         "dropped; it can back nothing", tool, status)
         return call_id
     record: Dict[str, object] = {"call_id": call_id, "tool": tool, "status": status,
-                                 "args": dict(args or {}), "parameters": list(parameters or [])}
+                                 "args": dict(args or {}), "parameters": list(parameters or []),
+                                 "values": dict(values or {})}
     with _TOOL_CALL_LEDGER_LOCK:
         TOOL_CALL_LEDGER.setdefault(sid, []).append(record)
     return call_id
@@ -3051,19 +2961,43 @@ def enforce_citation_gate(text: str, sid: str) -> str:
     if not sid:
         _logger.warning("[citation gate] no session id — treating every fitted value as unbacked")
         succeeded: set = set()
+        successes: List[Dict[str, object]] = []
     else:
-        succeeded = {r["tool"] for r in get_tool_call_records(sid)
-                     if r.get("status") == "success"}
+        successes = [r for r in get_tool_call_records(sid) if r.get("status") == "success"]
+        succeeded = {r["tool"] for r in successes}
     rejected_tools: set = set()
 
+    def _backed_values(param: str, allowed: set) -> List[float]:
+        return [float(v) for r in successes if r["tool"] in allowed
+                for k, v in (r.get("values") or {}).items() if k == param]
+
     def _replace(match: "re.Match") -> str:
-        allowed = _GATED_PARAMETERS[match.group("param").lower()]
+        param = match.group("param").lower()
+        allowed = _GATED_PARAMETERS[param]
+        shown = match.group("num").strip("*")
         if allowed & succeeded:
-            return match.group(0)
+            # A successful call exists — but existence by tool name is not
+            # evidence for a NUMBER. When the call recorded the value it fitted,
+            # the reported number must match it (rounding tolerance); a model
+            # restating 1.999 over a fitted 1.850 is stripped like any
+            # fabrication (C2 gate finding, A2 protocol).
+            backed = _backed_values(param, allowed)
+            try:
+                num = float(shown)
+            except ValueError:
+                return match.group(0)
+            if not backed or any(abs(num - v) <= max(0.006, 0.005 * abs(v)) for v in backed):
+                return match.group(0)
+            _logger.warning(
+                "[citation gate] stripped %s=%s for session %s: fitted value(s) were %s",
+                match.group("param"), shown, sid or "-", sorted(set(backed)))
+            return (match.group("cue") + match.group("open") + match.group("param")
+                    + match.group("open") + match.group("mid")
+                    + "[unverified - value differs from the fitted result]")
         rejected_tools.update(allowed)
         _logger.warning(
             "[citation gate] stripped %s=%s for session %s: no successful call to any of %s",
-            match.group("param"), match.group("num").strip("*"), sid or "-",
+            match.group("param"), shown, sid or "-",
             sorted(allowed))
         # The tool name stays in the log, not in the user-facing text: naming it
         # here would read as a citation of the call that did not succeed.
@@ -3121,87 +3055,16 @@ def _tool_result_error(result):
     return None
 
 
-# -- GEMINI HA CLIENT -------------------------------------------------------- #
+# -- CHAT ASSISTANT ---------------------------------------------------------- #
 
 class PRCChatAssistant:
 
-    def __init__(self, keys: list[str]):
-
-        self.model_name   = "gemini-2.5-pro"
-
-        self._keys        = keys
-
-        self._current_idx = 0
-
-        self._idx_lock    = threading.Lock()
-
-        self._client_lock = threading.Lock()
-
-        self._client      = None
-
-        # _pending_kb lives on _tls (thread-local) — see chat() — NOT on self.
-
-        self._init_client()
-
-
-
-    def _init_client(self) -> None:
-
-        for i in range(len(self._keys)):
-
-            with self._idx_lock:
-
-                idx = (self._current_idx + i) % len(self._keys)
-
-            key = self._keys[idx]
-
-            if not _key_healthy(key):
-
-                continue
-
-            try:
-
-                # Explicitly use 'v1' to avoid 'not found for v1beta' errors
-
-                client = genai_new.Client(api_key=key)
-
-                with self._client_lock:
-
-                    self._client      = client
-
-                    self._current_idx = idx
-
-                _logger.info(f"[HA] Node {idx+1} active ({key[:8]}...)")
-
-                return
-
-            except Exception as e:
-
-                _logger.warning(f"[HA] Node {idx+1} init failed: {e}")
-
-        try:
-
-            with self._client_lock:
-
-                self._client = genai_new.Client(api_key=self._keys[0])
-
-        except Exception as e:
-
-            _logger.error(f"[HA] Emergency fallback failed: {e}")
-
-
-
-    def rotate_key(self, is_hard_fail: bool = False) -> None:
-
-        with self._idx_lock:
-
-            _mark_key_failed(self._keys[self._current_idx], is_hard_fail)
-
-            self._current_idx = (self._current_idx + 1) % len(self._keys)
-
-        self._init_client()
-
-
+    def __init__(self, keys: list[str] = ()):
+        # `keys` is accepted for call-site/test compatibility only: every chat
+        # completion goes through the provider adapter (CHAT), which owns the
+        # credential pool and its rotation. The model reported here is the
+        # model actually sent on the wire.
+        self.model_name = CHAT.config.model
 
     def _execute_tool(self, call):
 
@@ -3848,6 +3711,7 @@ class PRCChatAssistant:
                 "error" if failed else "success",
                 args or {},
                 [] if failed else sorted(_GATED_PARAMETERS),
+                values={} if failed else _extract_fitted_values(formatted),
             )
         except Exception as ledger_exc:                 # noqa: BLE001 - never break an answer
             _logger.warning("[citation gate] could not record tool call: %s", ledger_exc)
@@ -5539,18 +5403,6 @@ class PRCChatAssistant:
 
     def _build_contents(self, history: list, enriched_msg: str, f_parts: list) -> tuple[list, list[str]]:
 
-        SUPPORTED = {
-
-            "application/pdf", "image/jpeg", "image/png", "image/gif", "image/webp",
-
-            "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-
-            "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-
-            "text/plain", "text/csv", "application/json"
-
-        }
-
         contents  = []
 
         for h in history:
@@ -5579,70 +5431,15 @@ class PRCChatAssistant:
 
 
 
-        with self._client_lock:
-
-            client = self._client
-
-
-
         user_parts    = [genai_types.Part(text=enriched_msg)]
 
         uploaded_uris: list[str] = []
 
 
 
-        import tempfile
-
-        for data_bytes, mime, fname in f_parts:
-
-            safe_mime = mime or "application/octet-stream"
-
-            if safe_mime not in SUPPORTED:
-
-                continue
-
-
-
-            # Skip Gemini Files API for spreadsheets, PDFs, DOCX, and plain text — all
-            # extracted locally in chat() and injected into the prompt. Avoids 30-120s upload latency.
-            if any(x in safe_mime for x in ["spreadsheet", "excel", "csv", "sheet", "pdf", "wordprocessingml", "text/plain"]):
-
-                continue
-
-
-
-            with tempfile.NamedTemporaryFile(delete=False) as tf:
-
-                tf.write(data_bytes)
-
-                tmp = tf.name
-
-            try:
-
-                uf = client.files.upload(file=tmp, config={"mime_type": mime})
-
-                for _ in range(7):
-
-                    if str(getattr(uf, "state", "")).upper().endswith("ACTIVE"):
-
-                        break
-
-                    time.sleep(0.5)
-
-                    uf = client.files.get(name=uf.name)
-
-                user_parts.append(genai_types.Part(file_data=genai_types.FileData(file_uri=uf.uri, mime_type=mime)))
-
-                uploaded_uris.append(f"{uf.uri}|{mime}")
-
-            finally:
-
-                try:
-                    Path(tmp).unlink(missing_ok=True)
-                except Exception:
-                    pass
-
-
+        # Uploaded files are extracted locally in chat() and injected as text;
+        # there is no provider-side file upload (the adapter drops file_data
+        # parts), so nothing is uploaded here.
 
         contents.append(genai_types.Content(role="user", parts=user_parts))
 
@@ -6039,10 +5836,6 @@ class PRCChatAssistant:
 
         def _generate():
 
-            # Always use the validated model. gemini-2.5-pro leaked <execute_python>
-            # thinking tokens into text output during function-calling turns.
-            # gemini-2.5-flash is the only CLAUDE.md-validated model (section 5).
-            active_model = "gemini-2.5-flash"
 
 
 
@@ -6050,13 +5843,9 @@ class PRCChatAssistant:
 
             _MAX_503_RETRIES = 3
 
-            for attempt in range(len(self._keys)):
+            for attempt in range(_CHAT_TURN_RETRIES):
 
                 try:
-
-                    with self._client_lock:
-
-                        client = self._client
 
                     # Dynamic prompt construction with continuous learning corrections
                     dynamic_system_prompt = SYSTEM_PROMPT
@@ -6165,9 +5954,7 @@ class PRCChatAssistant:
 
 
 
-                            for chunk in _call_gemini_stream_with_retry(
-
-                                client, active_model, current_contents, cfg
+                            for chunk in chat_generate_stream_with_retry(current_contents, cfg
 
                             ):
 
@@ -6309,9 +6096,7 @@ class PRCChatAssistant:
 
                     for _turn in range(4):
 
-                        resp = _call_gemini_with_retry(
-
-                            client, active_model, current_contents, cfg
+                        resp = chat_generate_with_retry(current_contents, cfg
 
                         )
 
@@ -6442,9 +6227,7 @@ class PRCChatAssistant:
 
                     is_overload = any(x in err for x in ["503","unavailable","overloaded","capacity"])
 
-                    if (is_auth or is_rate or is_overload) and attempt < len(self._keys) - 1:
-
-                        self.rotate_key(is_hard_fail=is_auth)
+                    if (is_auth or is_rate or is_overload) and attempt < _CHAT_TURN_RETRIES - 1:
 
                         if stream:
                             yield {"type": "progress", "text": "PRC Node Rotating - retrying..."}
@@ -6456,7 +6239,7 @@ class PRCChatAssistant:
 
                         _logger.warning(f"[Hviel] All keys returned 503 (overload): {e}")
 
-                        yield {"type": "token", "text": "[!]� Gemini is currently under high demand (503). Please retry in a few seconds."}
+                        yield {"type": "token", "text": "[!] The AI provider is under high demand (503). Please retry in a few seconds."}
 
                         return
 
@@ -6725,7 +6508,6 @@ class PRCChatAssistant:
 
         _logger.debug(f"[DocGen] Prompt built: system_doc={len(system_doc)} chars, user_content={len(user_content)} chars")
 
-        active_model = "gemini-2.5-flash"
 
         # Dynamic document prompt construction with corrections
         dynamic_system_doc = system_doc
@@ -6747,19 +6529,13 @@ class PRCChatAssistant:
 
         _logger.debug(f"[DocGen] Pre-call context: kw={bool(_debug_kw_data)} micp={bool(_debug_micp_data)} imbi={bool(_debug_imbi_data)}")
 
-        with self._client_lock:
-
-            client = self._client
 
 
-
-        for attempt in range(len(self._keys)):
+        for attempt in range(_CHAT_TURN_RETRIES):
 
             try:
 
-                resp = _call_gemini_with_retry(
-
-                    client, active_model, contents, cfg, max_tokens=8192
+                resp = chat_generate_with_retry(contents, cfg, max_tokens=8192
 
                 )
 
@@ -6788,7 +6564,7 @@ class PRCChatAssistant:
                                 genai_types.Content(role="model", parts=[genai_types.Part(text=raw[:4000])]),
                                 genai_types.Content(role="user", parts=[genai_types.Part(text=CORRECTIVE_JSON_PROMPT)]),
                             ]
-                            resp2 = _call_gemini_with_retry(client, active_model, retry_contents, cfg,
+                            resp2 = chat_generate_with_retry(retry_contents, cfg,
                                                             max_retries=2, max_tokens=8192)
                             raw2 = ""
                             if resp2 and resp2.candidates and resp2.candidates[0].content:
@@ -6813,13 +6589,7 @@ class PRCChatAssistant:
 
                 is_rate = any(x in err for x in ["429","resource_exhausted"])
 
-                if (is_auth or is_rate) and attempt < len(self._keys) - 1:
-
-                    self.rotate_key(is_hard_fail=is_auth)
-
-                    with self._client_lock:
-
-                        client = self._client
+                if (is_auth or is_rate) and attempt < _CHAT_TURN_RETRIES - 1:
 
                     continue
 
@@ -7529,7 +7299,7 @@ async def _security_headers(request, call_next):
 
 
 
-assistant = PRCChatAssistant(GEMINI_KEY_POOL)
+assistant = PRCChatAssistant()
 
 # Central shared PRC vault — all exported decks/spreadsheets/Word/PDF reports
 # from BOTH Hviel (SCAL) and Aviel (PVT) are written here. Overridable via env.
@@ -7581,12 +7351,8 @@ def health():
         db_ok = False
         db_err = str(e)
 
-    # Check key pool
-    with _FAILED_KEYS_LOCK:
-        snap = dict(_FAILED_KEYS)
-    now = time.time()
-    cooldown = sum(1 for v in snap.values() if (now - v.get("ts", 0)) < v.get("wait", 0))
-    keys_degraded = len(GEMINI_KEY_POOL) == 0 or (cooldown >= len(GEMINI_KEY_POOL))
+    # Chat credential pool, as the adapter sees it (provider-neutral).
+    keys_degraded = CHAT.keys_degraded()
 
     # Chat-LLM liveness from the same success/failure signal the chat path feeds
     # (alerting.record_llm_success/failure at every provider call). A non-empty
@@ -7601,7 +7367,8 @@ def health():
         if not db_ok:
             details.append(f"Database connectivity failed: {db_err}")
         if keys_degraded:
-            details.append(f"AI API Keys pool is degraded (All {len(GEMINI_KEY_POOL)} keys are in cooldown or pool is empty).")
+            details.append(f"Chat provider '{CHAT.config.provider}' key pool degraded "
+                           f"({CHAT.keys_in_cooldown()}/{len(CHAT.config.api_keys)} keys in cooldown or pool empty).")
         if llm_degraded:
             details.append(f"Chat LLM degraded: {llm['consecutive_failures']} consecutive provider "
                            f"failures (last error: {llm['last_error'] or 'n/a'}).")
@@ -7631,13 +7398,10 @@ def diag(
     token: Optional[str] = Query(None),
 ):
     verify_user_or_admin(authorization=authorization, token=token)
-    with _FAILED_KEYS_LOCK: snap = dict(_FAILED_KEYS)
-
-    now = time.time(); cooldown = sum(1 for v in snap.values() if (now - v.get("ts",0)) < v.get("wait",0))
-
-    with assistant._idx_lock: idx = assistant._current_idx
-
-    return {"version": "PRC-HUB-VER-14-PROD-READY", "node_pool_size": len(GEMINI_KEY_POOL), "active_node_idx": idx, "nodes_in_cooldown": cooldown}
+    st = CHAT.state()
+    return {"version": "PRC-HUB-VER-14-PROD-READY", "chat_provider": st["provider"],
+            "chat_model": st["model"], "node_pool_size": st["keys"],
+            "nodes_in_cooldown": st["keys_in_cooldown"]}
 
 
 
@@ -8938,7 +8702,7 @@ async def handle(
                     "503", "unavailable", "resource_exhausted", "overload", "retries"
                 ])
                 reply = (
-                    " Gemini is currently unavailable after 5 attempts. "
+                    " The AI provider is currently unavailable after 5 attempts. "
                     "Please try again in a few minutes or contact PRC support."
                     if is_overload else
                     f" Document generation failed: {str(e)[:200]}. "
@@ -9072,7 +8836,7 @@ async def handle(
         try:
             resp = await anyio.to_thread.run_sync(_chat_capture)
         except Exception as e:
-            _logger.error(f"[Chat] Gemini/file processing error: {e}")
+            _logger.error(f"[Chat] LLM/file processing error: {e}")
             reply = f"Processing error: {str(e)[:300]}. Please retry or contact PRC support."
             await async_db("INSERT INTO m (sid,role,text,ts,user_email) VALUES (?,?,?,?,?)",
                (sid, "model", reply, time.time(), email))
@@ -9941,17 +9705,12 @@ def sync_document_generation_task(
         
         TASKS_DB[session_id].update({"progress": 20})
 
-        # _call_gemini_with_retry is NVIDIA NIM-backed and ignores client/model —
-        # no Gemini client (or key) is needed on this path anymore.
-        client = None
-        if not NVIDIA_KEY_POOL:
+        if not CHAT.config.api_keys:
             raise RuntimeError(
-                "No NVIDIA API keys configured (set NVIDIA_API_KEY / NVIDIA_API_KEY1..N); "
-                "document generation requires NVIDIA NIM access."
+                f"No API key configured for chat provider '{CHAT.config.provider}' "
+                "(set LLM_API_KEYS / LLM_API_KEY); document generation needs one."
             )
-        response = _call_gemini_with_retry(
-            client=client,
-            model="gemini-2.5-flash",  # ignored: NVIDIA shim always uses NVIDIA_MODEL
+        response = chat_generate_with_retry(
             contents=contents,
             config=config,
             max_retries=3,
@@ -10059,9 +9818,7 @@ def sync_document_generation_task(
                 genai_types.Content(role="user", parts=[genai_types.Part.from_text(text=CORRECTIVE_JSON_PROMPT)]),
             ]
             try:
-                response = _call_gemini_with_retry(
-                    client=None,
-                    model="gemini-2.5-flash",  # ignored: NVIDIA shim always uses NVIDIA_MODEL
+                response = chat_generate_with_retry(
                     contents=retry_contents,
                     config=config,
                     max_retries=2,
@@ -10221,8 +9978,7 @@ def sync_document_generation_task(
         # (sovereign path). The Gemini key is only kept as a legacy fallback
         # client inside the node; with DUMMY_KEY the node degrades to its
         # offline analysis text instead of crashing.
-        active_key = GEMINI_KEY_POOL[0] if GEMINI_KEY_POOL else "DUMMY_KEY"
-        master_eng = MasterEngineerNode(api_key=active_key, llm_call=_nvidia_text_generate)
+        master_eng = MasterEngineerNode(llm_call=chat_text_generate)
         engineer_report = master_eng.analyze_scal_data(extracted_json)
         
         report_path = _os.path.join(outputs_dir, "reservoir_report.md")

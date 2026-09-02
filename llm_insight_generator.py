@@ -1,13 +1,12 @@
-from google import genai
-from google.genai import types
 import json
 
-# NOTE (2026-07-05): the report pipeline runs on NVIDIA NIM. The node accepts
-# an injected `llm_call` callable — app.py passes its `_nvidia_text_generate`
-# helper (signature: llm_call(prompt, system_instruction=None, temperature=0.2))
-# so this module never needs to import app.py (no circular import) and stays
-# importable standalone. When `llm_call` is None the legacy google-genai client
-# path (or the offline fallback text) is used unchanged.
+# The report pipeline's LLM step goes through the injected `llm_call` callable —
+# app.py passes `chat_text_generate`, which routes through the single
+# provider-neutral adapter (signature: llm_call(prompt, system_instruction=None,
+# temperature=0.2)) — so this module never imports app.py (no circular import)
+# and stays importable standalone. With no `llm_call` the offline fallback text
+# is returned. The former legacy google-genai fallback client (a second,
+# Gemini-hardcoded chat path) was removed in C2: one adapter, one model name.
 #
 # Housekeeping 2026-08-25: the dead LLMInsightGenerator and DashboardArchitectNode
 # classes (never instantiated anywhere) were removed; MasterEngineerNode is the
@@ -20,15 +19,13 @@ class MasterEngineerNode:
     Analyzes validated SCAL JSON data and returns geomechanical deductions,
     calculated derivative metrics, risk assessments, and a downstream visualizer directive.
     """
-    def __init__(self, api_key: str, llm_call=None):
-        self.api_key = api_key
+    def __init__(self, api_key: str = "", llm_call=None):
+        # `api_key` is accepted for call-site compatibility only; the provider
+        # credential lives in the adapter behind `llm_call`.
         self.llm_call = llm_call
-        self.client = None
-        if self.api_key and self.api_key != "DUMMY_KEY":
-            self.client = genai.Client(api_key=api_key, http_options={"timeout": 300000})
 
     def analyze_scal_data(self, validated_json: list) -> str:
-        if self.llm_call is None and not self.client:
+        if self.llm_call is None:
             # Offline / standard fallback message
             return """### Reservoir Report
 Geomechanical Analysis (Offline Mode):
@@ -67,32 +64,8 @@ You MUST format your response into two distinct sections with clear markdown hea
 
         prompt = f"Here is the validated SCAL data in JSON format:\n{json.dumps(validated_json, indent=2)}\n\nGenerate your expert geomechanical analysis and visualizer directive."
 
-        if self.llm_call is not None:
-            try:
-                text = self.llm_call(prompt, system_instruction=system_instruction, temperature=0.2)
-                import alerting
-                alerting.record_llm_success()
-                return text
-            except Exception as e:
-                import alerting
-                alerting.record_llm_failure(str(e))
-                if self.client is None:
-                    return f"Error running Master Engineer analysis: {str(e)}"
-                # NVIDIA path failed but a legacy Gemini client exists — fall through.
-
+        # Success/failure for /health is recorded by the adapter behind llm_call.
         try:
-            response = self.client.models.generate_content(
-                model='gemini-2.5-flash',
-                contents=prompt,
-                config=types.GenerateContentConfig(
-                    system_instruction=system_instruction,
-                    temperature=0.2,
-                )
-            )
-            import alerting
-            alerting.record_llm_success()
-            return response.text
+            return self.llm_call(prompt, system_instruction=system_instruction, temperature=0.2)
         except Exception as e:
-            import alerting
-            alerting.record_llm_failure(str(e))
             return f"Error running Master Engineer analysis: {str(e)}"
