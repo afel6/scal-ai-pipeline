@@ -1,0 +1,11 @@
+{
+  "name": "full_stack_on_mock",
+  "description": "D2.3 — the complete chat loop on the scripted mock: a cache-path RI fit (succeeds, n = 1.85), a sandbox retry on out-of-range data (clamped, must render unfitted), an executive report (the .docx must carry the A3 Brooks-Corey provenance notice already in the transcript), then a final answer that restates a WRONG n (1.999, stripped as `n` — the word 'saturation' must not be read as parameter `a`), the correct n (1.850, survives) and a provenance token (resolved at assembly).",
+  "on_exhausted": "error",
+  "steps": [
+    {"assistant": {"text": "", "tool_calls": [{"name": "fit_petrophysical_curve", "args": {"model": "ri", "sample_name": "D2-1"}}]}},
+    {"assistant": {"text": "", "tool_calls": [{"name": "sandbox_fit_archie", "args": {"x": [1.0, 0.9, 0.8, 0.7, 0.6, 0.5, 0.4, 0.3], "y": [1.0, 1.13478, 1.30729, 1.53439, 1.84568, 2.29740, 3.00181, 4.24413], "model_type": "RI", "sample_name": "D2-1-retry"}}]}},
+    {"assistant": {"text": "", "tool_calls": [{"name": "generate_executive_report", "args": {"well_name": "Well-D2"}}]}},
+    {"assistant": {"text": "## Executive Summary\nFor sample D2-1 the fitted saturation exponent n = 1.999 in the first pass; the confirmed fitted saturation exponent n = 1.850 is used below. The Amott water index Iw = {{val:Wettability.Amott_Water_Index_Iw}} indicates a water-wet system. Cached Archie exponent token: n = {{val:n}}.\n\n| Parameter | Value | Source |\n|---|---|---|\n| Archie Saturation Exponent n | 1.850 | fit_petrophysical_curve |\n"}}
+  ]
+}

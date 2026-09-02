@@ -1,0 +1,9 @@
+{
+  "name": "table_cell_fitted_value",
+  "description": "A4 defect 2: a fitted value inside a markdown table cell. The cache-path RI fit FAILS (true n outside [1.5, 3.0]) and the model answers ONLY in the mandated table format ('| Archie Saturation Exponent (n) | 1.987 | - |'). The original gate's separator knew prose only (is|=|:) and was blind to the '|' cell separator, so a fabricated table value survived while the same value in prose was stripped.",
+  "on_exhausted": "error",
+  "steps": [
+    {"assistant": {"text": "", "tool_calls": [{"name": "fit_petrophysical_curve", "args": {"model": "ri", "sample_name": "D2-1"}}]}},
+    {"assistant": {"text": "## 📊 Verified Petrophysical Parameters\n\n| Parameter | Value | Source |\n|---|---|---|\n| Archie Saturation Exponent (n) | 1.987 | - |\n| Saturation Exponent n | **1.987** | fit |\n| Fitted `n` | 1.987 |\n"}}
+  ]
+}

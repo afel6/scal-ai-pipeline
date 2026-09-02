@@ -52,6 +52,18 @@ def test_existence_only_when_no_values_were_recorded():
     assert app.enforce_citation_gate(txt, SID) == txt
 
 
+def test_failed_tool_named_in_a_source_cell_is_dropped():
+    """D2 corpus finding: the bracketed citation of a failed call was dropped,
+    but the same tool named in the mandated table's Source cell survived next
+    to the unverified marker — a citation in another format."""
+    app.record_tool_call(SID, "fit_petrophysical_curve", "error", {"model": "ri"}, [])
+    gated = app.enforce_citation_gate(
+        "| Archie Saturation Exponent n | 1.987 | fit_petrophysical_curve |", SID)
+    assert "1.987" not in gated and "fit_petrophysical_curve" not in gated
+    assert "[no successful call]" in gated
+    assert gated.count("|") == 4                      # the row shape is preserved
+
+
 def test_mismatch_is_logged(caplog):
     app.record_tool_call(SID, "fit_petrophysical_curve", "success", {}, ["n"], values={"n": 1.85})
     with caplog.at_level("WARNING"):

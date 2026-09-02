@@ -1,0 +1,8 @@
+{
+  "name": "unresolved_val_tokens",
+  "description": "B0.1 runs 5/6/9/10 (and 2, 8): the model answered with raw provenance tokens — {{val:Wettability.Amott_Water_Index_Iw}}, {{val:Archie_VariableSw.n_free}} — and they reached the caller unresolved because token resolution ran only in the HTTP routes, not at chat()'s answer assembly. A token for a cached value must resolve to that value; a token for an absent key must become an explicit unverified marker; no `{{val:` may survive.",
+  "on_exhausted": "error",
+  "steps": [
+    {"assistant": {"text": "## Wettability\nAmott water index Iw = {{val:Wettability.Amott_Water_Index_Iw}} and oil index Io = {{val:Wettability.Amott_Oil_Index_Io}}.\nThe free Archie fit gives n = {{val:Archie_VariableSw.n_free}}.\n\n| Parameter | Value | Source |\n|---|---|---|\n| Amott Water Index Iw | {{val:Wettability.Amott_Water_Index_Iw}} | cache |\n| USBM Area A1 | {{val:Wettability.USBM_Area_A1}} | cache |\n| Free-fit n | {{val:Archie_VariableSw.n_free}} | cache |\n"}}
+  ]
+}

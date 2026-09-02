@@ -1,0 +1,9 @@
+{
+  "name": "fabricated_value_after_failed_fit",
+  "description": "A4 defect 1 (B0.1): the cache-path RI fit FAILS (true n outside [1.5, 3.0]), and the model then reports n = 1.987 citing the failed call. The citation gate must strip the number and the citation: no successful fit produced this value.",
+  "on_exhausted": "error",
+  "steps": [
+    {"assistant": {"text": "", "tool_calls": [{"name": "fit_petrophysical_curve", "args": {"model": "ri", "sample_name": "B0-7"}}]}},
+    {"assistant": {"text": "## Executive Summary\nThe Archie saturation exponent `n` for Sample B0-7 is **1.987** [fit_petrophysical_curve, model=ri], indicating a water-wet system.\n\n| Parameter | Value | Source |\n|---|---|---|\n| Archie Saturation Exponent n | 1.987 | fit_petrophysical_curve |\n"}}
+  ]
+}

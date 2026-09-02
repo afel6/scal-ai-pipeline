@@ -3049,6 +3049,10 @@ def enforce_citation_gate(text: str, sid: str) -> str:
     for tool in rejected_tools:
         # Drop the bracketed citation of a tool that did not produce the value.
         gated = re.sub(r"\s*\[\s*" + re.escape(tool) + r"[^\]]*\]", "", gated)
+        # The same citation in the mandated table format — a Source cell that is
+        # only the tool's name — is dropped too (D2 regression corpus).
+        gated = re.sub(r"(\|\s*)" + re.escape(tool) + r"(?:\s*,[^|\n]*)?(\s*\|)",
+                       r"\1[no successful call]\2", gated)
     for index, payload in enumerate(plots):
         gated = gated.replace(f"\x00PLOT{index}\x00", payload)
     return gated
@@ -3615,7 +3619,9 @@ class PRCChatAssistant:
             try:
                 fit_res = run_sandboxed(source, inputs=inputs)
                 sid = getattr(_tls, 'current_session_id', None)
-                if sid and isinstance(fit_res, dict) and "parameters" in fit_res:
+                # Same rule as the Archie sandbox: a corrected fit is never bound as a value.
+                if sid and isinstance(fit_res, dict) and "parameters" in fit_res \
+                        and not fit_res.get("corrected"):
                     with SESSION_DATA_CACHE_LOCK:
                         if sid not in SESSION_DATA_CACHE:
                             SESSION_DATA_CACHE[sid] = {}
@@ -3650,7 +3656,10 @@ class PRCChatAssistant:
             try:
                 fit_res = run_sandboxed(source, inputs=inputs)
                 sid = getattr(_tls, 'current_session_id', None)
-                if sid and isinstance(fit_res, dict) and "parameters" in fit_res:
+                # A corrected (clamped) fit is NOT a fitted value: binding it would let
+                # a `{{val:n}}` token render the clamp bound as CACHED (D2 corpus finding).
+                if sid and isinstance(fit_res, dict) and "parameters" in fit_res \
+                        and not fit_res.get("corrected"):
                     with SESSION_DATA_CACHE_LOCK:
                         if sid not in SESSION_DATA_CACHE:
                             SESSION_DATA_CACHE[sid] = {}
@@ -4268,10 +4277,15 @@ class PRCChatAssistant:
                         _log_physics_audit(getattr(_tls, 'current_session_id', 'ANONYMOUS'), "ri",
                                            _audit_fail, getattr(_tls, 'last_file_name', None))
                         return (
+                            # Worded as a REJECTED regression, not a fitted claim: the old
+                            # "fitted … n=1.200 falls outside" matched the citation gate's
+                            # claim shape and came back garbled ("n=[unverified …] falls
+                            # outside") — the D2 fabrication scenario surfaced it.
                             f"⚠️ Physics boundary check failed for the Resistivity Index fit: "
-                            f"the fitted Archie saturation exponent n={n_arch:.3f} falls outside the valid "
-                            f"reservoir-rock range [1.5, 3.0]. No RI chart was generated, to avoid emitting "
-                            f"fabricated data points. Please verify the raw Sw / RI columns for sample '{sample}'."
+                            f"the unconstrained regression slope of {n_arch:.3f} lies outside the valid "
+                            f"reservoir-rock range [1.5, 3.0] for Archie n, so no saturation exponent was fitted. "
+                            f"No RI chart was generated, to avoid emitting fabricated data points. "
+                            f"Please verify the raw Sw / RI columns for sample '{sample}'."
                         )
 
                     sw_fit   = np.linspace(float(sw_a.min()), 1.0, 80)
@@ -4400,10 +4414,14 @@ class PRCChatAssistant:
                         _log_physics_audit(getattr(_tls, 'current_session_id', 'ANONYMOUS'), "ff",
                                            _audit_fail, getattr(_tls, 'last_file_name', None))
                         return (
+                            # Worded as a REJECTED regression, not a fitted claim (see the RI
+                            # branch): the citation gate must not garble the refusal.
                             f"⚠️ Physics boundary check failed for the Formation Factor fit: "
-                            f"fitted m={m_arch:.3f}, a={a_arch:.3f} fall outside valid reservoir-rock ranges "
-                            f"(m∈[1.3,3.5], a∈[0.3,2.5]). No FF chart was generated, to avoid emitting "
-                            f"fabricated data points. Please verify the raw porosity / FF columns for sample '{sample}'."
+                            f"the unconstrained regression returned {m_arch:.3f} for the cementation exponent and "
+                            f"{a_arch:.3f} for tortuosity, outside the valid reservoir-rock ranges "
+                            f"(m∈[1.3,3.5], a∈[0.3,2.5]), so no Archie m / a were fitted. No FF chart was generated, "
+                            f"to avoid emitting fabricated data points. Please verify the raw porosity / FF columns "
+                            f"for sample '{sample}'."
                         )
 
                     phi_fit = np.linspace(float(phi_a.min()), float(phi_a.max()), 80)
@@ -6044,6 +6062,13 @@ class PRCChatAssistant:
 
                                         ) if tool_ok else ""
 
+                                        if tool_ok and isinstance(fmt, str) and fmt.lstrip().startswith("⚠"):
+                                            # The fit ran during formatting and REFUSED (physics
+                                            # boundary / cache lookup). The model must be told a
+                                            # failure — not "plot computed, state Archie n" (D2).
+                                            tool_ok = False
+                                            raw = _json.dumps({"status": "error", "error": fmt.strip()[:500]})
+
                                         tool_calls_in_turn.append((part.function_call, raw, fmt, tool_ok))
 
 
@@ -6187,6 +6212,11 @@ class PRCChatAssistant:
 
                                 ) if tool_ok else ""
 
+                                if tool_ok and isinstance(fmt, str) and fmt.lstrip().startswith("⚠"):
+                                    # Refused during formatting: tell the model a failure (D2).
+                                    tool_ok = False
+                                    raw = _json.dumps({"status": "error", "error": fmt.strip()[:500]})
+
                                 tool_calls_in_turn.append((part.function_call, raw, fmt, tool_ok))
 
                             elif part.text:
@@ -6304,6 +6334,10 @@ class PRCChatAssistant:
             # Answer assembly is the enforcement point: a fitted parameter may only
             # survive here if the tool-call ledger shows a successful fit for it.
             # Applied inside chat() so every caller is covered, not just the routes.
+            # Provenance tokens resolve here for the same reason (D2): they used to
+            # resolve only in the HTTP routes, so in-process callers received raw
+            # `{{val:…}}` tokens — B0.1 saw them in 3 of 10 runs.
+            final_resp = process_provenance_tokens(final_resp, sid)
             return enforce_citation_gate(final_resp, sid) or "Error generating response."
 
 

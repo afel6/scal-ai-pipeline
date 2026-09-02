@@ -1,0 +1,10 @@
+{
+  "name": "sandbox_after_refusal",
+  "description": "C1 defect (2 of 13 runs): the cache-path RI fit REFUSES (true n = 1.2 is outside [1.5, 3.0]), so the model retries around the guardrail through sandbox_fit_archie with model-supplied arrays. The sandbox clamps the out-of-range free fit to the bound (n = 1.500, corrected = True) and used to render 'RI Archie n=1.500' as if fitted; the model then reports n = 1.500 as 'the fitted exponent'. The plot label must say 'not fitted' with metadata.archie.n = null, and the citation gate must strip the prose 1.500 because the sandbox is not a cache-backed fitter.",
+  "on_exhausted": "error",
+  "steps": [
+    {"assistant": {"text": "", "tool_calls": [{"name": "fit_petrophysical_curve", "args": {"model": "ri", "sample_name": "D2-1"}}]}},
+    {"assistant": {"text": "The cache fit refused; fitting the RI data directly instead.", "tool_calls": [{"name": "sandbox_fit_archie", "args": {"x": [1.0, 0.9, 0.8, 0.7, 0.6, 0.5, 0.4, 0.3], "y": [1.0, 1.13477, 1.30705, 1.5342, 1.84594, 2.2974, 3.00281, 4.24087], "model_type": "RI", "sample_name": "D2-1"}}]}},
+    {"assistant": "The fitted Archie saturation exponent n = 1.500 for sample D2-1 (sandbox fit)"}
+  ]
+}

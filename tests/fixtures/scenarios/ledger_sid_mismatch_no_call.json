@@ -1,0 +1,8 @@
+{
+  "name": "ledger_sid_mismatch_no_call",
+  "description": "C2 item 1.1 (ledger sid binding), the second session: the model restates n = 1.850 WITHOUT calling any tool. Session B has no successful fit of its own; the only matching success lives in session A's ledger (ledger_sid_mismatch). The old shared '' bucket let that foreign success back this value (silent pass-through) — evidence must not cross sessions, so 1.850 is stripped here.",
+  "on_exhausted": "error",
+  "steps": [
+    {"assistant": "The fitted Archie saturation exponent n = 1.850 for sample D2-1."}
+  ]
+}
