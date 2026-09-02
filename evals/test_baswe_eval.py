@@ -397,8 +397,8 @@ def test_aviel_dataset_contract():
 
 from pydantic import ValidationError
 
-from src.rag.router import RagRoute, classify_query
-from src.rakeza.contracts import (
+from hviel.rag.router import RagRoute, classify_query
+from hviel.rakeza.contracts import (
     AGENT_DOMAIN,
     DelegationRequest,
     SupervisorSynthesis,
@@ -506,7 +506,7 @@ def test_hviel_session_kb_ingestion_path_is_live():
 
 
 def test_merge_context_chunks_deduplicates_by_snippet():
-    from src.rag.router import merge_context_chunks
+    from hviel.rag.router import merge_context_chunks
 
     vector_ctx = "Threshold pressure for Sample 1 is 217.5 psi.\n\nArchie m = 2.1 for the carbonate."
     graph_chunks = [
@@ -555,7 +555,7 @@ def test_multiagent_golden_case_contract():
 def test_dispatcher_envelopes_connection_failure(agent, domain):
     """Graceful transparent failure: a dead worker yields ok=False with an
     explicit error envelope — never an exception, never an empty success."""
-    from src.rakeza.dispatcher import dispatch
+    from hviel.rakeza.dispatcher import dispatch
 
     req = DelegationRequest(task_id="t-dead", agent=agent, domain=domain,
                             query="ping")
@@ -571,8 +571,8 @@ def test_dispatcher_envelopes_connection_failure(agent, domain):
 # Layer 0 — Rakeza master RAG routing + Aviel PVT retrieval contracts
 # ══════════════════════════════════════════════════════════════════════════════
 
-from src.rag.router import RagDomain, classify_domain
-from src.rakeza.contracts import (
+from hviel.rag.router import RagDomain, classify_domain
+from hviel.rakeza.contracts import (
     PVT_METADATA_FILTERS,
     RagOptions,
     SCAL_KEYWORDS,
@@ -825,8 +825,8 @@ def test_live_multiagent_joint_case():
     """Full Rakeza trajectory: delegate both sub-tasks to live workers,
     synthesize with the reason-first CoT prompt, then judge delegation
     correctness and cross-agent synthesis groundedness."""
-    from src.rakeza.contracts import SupervisorSynthesis, build_synthesis_prompt
-    from src.rakeza.dispatcher import dispatch_all
+    from hviel.rakeza.contracts import SupervisorSynthesis, build_synthesis_prompt
+    from hviel.rakeza.dispatcher import dispatch_all
 
     case = next(c for c in _GOLDEN["multi_agent_cases"]
                 if c["id"] == "joint-scal-pvt-multiagent")

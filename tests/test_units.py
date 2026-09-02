@@ -4,7 +4,7 @@ from pathlib import Path
 # Add root/src to path just in case
 sys.path.append(str(Path(__file__).parent.parent))
 
-from src.utils.units import (
+from hviel.utils.units import (
     convert_pressure,
     convert_temperature,
     convert_permeability,

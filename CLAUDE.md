@@ -187,6 +187,22 @@ Add new entries at the top of the list with date, CVE class, and patch descripti
 
 ---
 
+### [2026-09-02] D1 — Per-Phase Commits, Secret Scan of History, the `src` Package Collision, Explicit Store Paths & the Bootstrap
+
+**Class:** CWE-540 / CWE-798 (credential material in a pushed history) / CWE-706 incorrect name resolution (two top-level `src` packages) / CWE-427-shaped path resolution (store paths depending on the launch directory) / reproducibility of the move to the air-gapped machine.
+**Discovery:** D1 pass. Phases A → D2 had been working-tree state since 2026-08-26 across three repos; the Ollama-machine move was ahead.
+**Patch:**
+  1. **HISTORY COMMITTED PER PHASE** (scal: A, B, Pre-C1, C1, C2.1, C2.2, D0, D2; hub: B, C1, C2, D0, D2; rakeza: B). Files that several phases touched were split by hunk from the retained snapshots so each commit carries its phase's content (three folds noted in the messages: C1's invariant inversion sits in the Pre-C1 hunk; D2's two bridge edits were split out of C1 hunks; `llm_adapter.py` is committed once at C2 in its final form because no per-phase snapshot of it exists). Every working tree was byte-identical to its pre-commit backup afterwards. **Nothing pushed.**
+  2. **SECRET SCAN OF ALL HISTORY** (patterns only, values never printed): pvt and rakeza clean; **scal carries a Neon password literal (`npg_…`) in `CLAUDE.md` since 64af763 (2026-05-10), and `postgresql://user:password@…` docker/compose placeholders since 65151b3** — all pushed to GitHub. The `npg_` value differs from the current Neon password (it was rotated); the literal is redacted in the working tree from D1 on. **Rewriting the pushed history is the operator's call and is not done here**; the credential itself must be treated as public (rotate if it ever returns). No `.env` file was ever tracked in any repo.
+  3. **`src` COLLISION RESOLVED** — scal's package is `hviel` (`hviel/rag`, `hviel/rakeza`, `hviel/utils`); the hub keeps `src`. Both apps now import in one process without the `sys.modules` eviction hack, and `tests/test_two_app_bridge.py` drives the hub's real bridge (`t_scal_analyze` → `httpx.Client`) into the real scal app in-process: real login, real `/api/chat`, real assembly, byte-for-byte pass-through, and scal's RAG router running under its own name (before the rename it resolved to the hub's `src`, the ImportError was swallowed as "routing failed" — a silent misroute).
+  4. **STORE PATHS ARE EXPLICIT AND REPO-ANCHORED.** `PRCReportEngine()` read a CWD-relative `chat_history.db` while the app wrote `DB_DIR/chat_history.db` — two databases depending on the launch directory; a fresh machine is exactly where that breaks. Now: `config.REPO_ROOT` anchors every relative `DB_DIR` / `CHROMA_DIR` / `GRAPH_DB_PATH`; the report engine defaults to the store the app writes and app.py passes `DB_PATH` explicitly; `rag_database.default_persist_dir()` (runtime `CHROMA_DIR` wins, else settings, repo-anchored) and `logger_setup.default_log_dir()` (both repos) replace `"./…"` defaults. Pinned by `tests/test_repo_layout.py` and hub `tests/test_paths.py` (chdir to a temp dir, paths stay absolute and identical). Still a D5 item: with Postgres active the report engine reads the local SQLite file, not the Postgres transcript.
+  5. **REPO STRUCTURE + BOOTSTRAP** — one meta-repository (`prc-ai-hub`) with the three services as git submodules pinning validated commits; the seed dumps moved to `db/dumps/` (they seed both pipelines); `bootstrap.sh` takes a bare machine to running services (prereq checks, three virtualenvs incl. a hub venv for cross-repo tests, `.env` files from the examples with generated PINs — an existing `.env` is never overwritten, only placeholders filled — Postgres create + restore, optional frontends) and ends in `smoke_test.py`: both APIs on the mock provider, `/health`, scal login + chat, and the hub's `hviel` crossing the real bridge over loopback. `BOOTSTRAP.md` was followed literally by a fresh-eyes agent on a copy with isolated databases; its findings are in the D1 report.
+  6. Finding during D1: the local Chroma store (`chroma_db/`, May 2026, 3 real reports) is **unreadable by the current chromadb** (Rust `PanicException` on query; chat() already guards it as "vector retriever unavailable — graph-only"). Left in place for D4's inventory; tests use their own store.
+**Verification:** see the D1 report (suites after the rename/path changes; the literal bootstrap run).
+**Status:** APPLIED AND COMMITTED LOCALLY 2026-09-02. Not pushed: pushing requires the operator's decision on the historical Neon literal (rotate/accept vs rewrite).
+
+---
+
 ### [2026-09-02] D2 — Scriptable Mock Provider, the Offline Regression Corpus & the Assembly-Path Defects It Surfaced
 
 **Class:** CWE-345 Insufficient Verification of Data Authenticity (numbers, citations and cached values reaching the user without provenance) / CWE-754 Improper Handling of Exceptional Conditions (a refusal reported to the model as success; a timeout reported as an outage) / test-infrastructure hardening.
@@ -694,7 +710,7 @@ A `REM` comment explains the intent.
 **Class:** CWE-312 Cleartext Storage of Sensitive Information  
 **Discovery:** Secrets scan  
 **Risk:** `.env` contains live `GEMINI_API_KEY` values and the Neon PostgreSQL connection
-string (`npg_sHZyj8OBDS1G@...`). `.env.local` contains a Vercel OIDC JWT.  
+string (`npg_********@...` (value redacted in D1; that password was rotated — it appears in pushed history since 64af763)). `.env.local` contains a Vercel OIDC JWT.  
 **Git history note:** Previous `.env` commits (before `.gitignore` was added) exposed
 earlier key rotations in git history. If this repository is or was ever public, those
 historical keys are compromised regardless of current `.gitignore` state.  

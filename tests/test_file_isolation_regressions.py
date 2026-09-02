@@ -41,30 +41,18 @@ def import_scal_app():
         sys.path = original_path
 
 def import_pvt_app():
-    original_path = list(sys.path)
+    """The hub app imports alongside scal in one process now that scal's package
+    is `hviel` (D1): the hub's `src` is the only `src`, so no sys.modules
+    eviction is needed — just the hub root on sys.path."""
     pvt_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), "pvt-ai-pipeline")
-    sys.path = [pvt_dir] + [p for p in original_path if p != pvt_dir]
-    old_app = sys.modules.pop('app', None)
-    old_config = sys.modules.pop('config', None)
-    old_src = {k: v for k, v in sys.modules.items()
-               if k == 'src' or k.startswith('src.')}
+    if pvt_dir not in sys.path:
+        sys.path.append(pvt_dir)
     try:
         from src.api import app as pvt_app
         return pvt_app
     except (ImportError, ModuleNotFoundError) as e:
         print(f"Skipping PVT app import: {e}")
         return None
-    finally:
-        sys.path = original_path
-        # Evict PVT's cached src.* tree, else later scal `from src...` imports
-        # in this pytest process silently resolve to the NEIGHBOR repo.
-        for k in [k for k in sys.modules if k == 'src' or k.startswith('src.')]:
-            del sys.modules[k]
-        sys.modules.update(old_src)
-        if old_app:
-            sys.modules['app'] = old_app
-        if old_config:
-            sys.modules['config'] = old_config
 
 scal_app = import_scal_app()
 pvt_app = import_pvt_app()

@@ -580,7 +580,7 @@ def extract_absolute_file_truth(temp_file_paths: list) -> str:
 
                 for sheet in sheet_names:
                     df = pd.read_excel(xl, sheet_name=sheet, engine=engine)
-                    from src.utils.units import detect_unit, normalize_value
+                    from hviel.utils.units import detect_unit, normalize_value
                     normalized_cols = []
                     for col in df.columns:
                         col_str = str(col)
@@ -612,7 +612,7 @@ def extract_absolute_file_truth(temp_file_paths: list) -> str:
 
             elif ext == '.csv':
                 df = smart_read_csv(file_path)
-                from src.utils.units import detect_unit, normalize_value
+                from hviel.utils.units import detect_unit, normalize_value
                 normalized_cols = []
                 for col in df.columns:
                     col_str = str(col)

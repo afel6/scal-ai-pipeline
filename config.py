@@ -1,8 +1,14 @@
 from pydantic_settings import BaseSettings
-from pydantic import Field
+from pydantic import Field, field_validator
+from pathlib import Path
 from typing import List, Optional
 import secrets
 import os
+
+# Store paths are anchored here, not to the CWD: a relative DB_DIR / CHROMA_DIR /
+# GRAPH_DB_PATH used to mean "wherever you launched from" — two databases
+# depending on the shell you started in (D1).
+REPO_ROOT = Path(__file__).resolve().parent
 
 class Settings(BaseSettings):
     GEMINI_API_KEY: Optional[str] = Field(None, description="Comma-separated API keys")
@@ -42,6 +48,13 @@ class Settings(BaseSettings):
         env_file_encoding = "utf-8"
         extra = "ignore"
 
+    @field_validator("DB_DIR", "CHROMA_DIR", "GRAPH_DB_PATH", mode="after")
+    @classmethod
+    def _anchor_to_repo(cls, v):
+        if v is None or v == "":
+            return v
+        return v if os.path.isabs(v) else str((REPO_ROOT / v).resolve())
+
     @property
     def gemini_keys(self) -> List[str]:
         keys = []
@@ -69,6 +82,6 @@ class Settings(BaseSettings):
         """
         if self.GRAPH_DB_PATH:
             return self.GRAPH_DB_PATH
-        return os.path.join(self.DB_DIR or ".", "geological_graph.sqlite")
+        return os.path.join(self.DB_DIR or str(REPO_ROOT), "geological_graph.sqlite")
 
 settings = Settings()

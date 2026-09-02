@@ -35,7 +35,12 @@ RED_RGB = RGBColor(0xC0, 0x39, 0x2B)
 LIGHT_GRAY_RGB = RGBColor(0x99, 0x99, 0x99)
 
 class PRCReportEngine:
-    def __init__(self, db_path="chat_history.db"):
+    def __init__(self, db_path=None):
+        # Explicit path, or the store the app writes (DB_DIR/chat_history.db) —
+        # never a CWD-relative file (D1: two databases depending on the launch dir).
+        if db_path is None:
+            from config import settings
+            db_path = os.path.join(settings.DB_DIR, "chat_history.db")
         self.db_path = db_path
 
     # --- STYLE HELPERS ---

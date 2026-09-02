@@ -27,7 +27,7 @@ import urllib.parse
 import urllib.request
 from typing import List, Optional
 
-from src.rakeza.contracts import DelegationRequest, WorkerAgent, WorkerResponse
+from hviel.rakeza.contracts import DelegationRequest, WorkerAgent, WorkerResponse
 
 HVIEL_DEFAULT_BASE = "http://localhost:8000"
 AVIEL_DEFAULT_BASE = "http://localhost:8001"

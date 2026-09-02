@@ -20,6 +20,11 @@ class JSONFormatter(logging.Formatter):
             log_data["exception"] = self.formatException(record.exc_info)
         return json.dumps(log_data, ensure_ascii=False)
 
+def default_log_dir() -> str:
+    """LOG_DIR if set, else <repo>/logs — never the CWD (D1)."""
+    return os.getenv("LOG_DIR") or os.path.join(os.path.dirname(os.path.abspath(__file__)), "logs")
+
+
 def setup_logging(debug_mode: bool):
     root_logger = logging.getLogger()
     # Clear existing handlers
@@ -36,7 +41,7 @@ def setup_logging(debug_mode: bool):
     root_logger.setLevel(level)
 
     # Rotating file handler (skip if the log dir can't be created — stdout logging still works)
-    log_dir = os.getenv("LOG_DIR", "./logs")
+    log_dir = default_log_dir()
     try:
         os.makedirs(log_dir, exist_ok=True)
         file_handler = logging.handlers.RotatingFileHandler(

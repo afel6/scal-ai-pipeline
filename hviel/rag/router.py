@@ -141,7 +141,7 @@ def classify_domain(query: str) -> DomainDecision:
     Hviel's SCAL KB, the hub's primary domain.
     """
     # Single source of domain vocabulary: the Rakeza worker-routing keywords.
-    from src.rakeza.contracts import PVT_KEYWORDS, SCAL_KEYWORDS
+    from hviel.rakeza.contracts import PVT_KEYWORDS, SCAL_KEYWORDS
 
     text = (query or "").strip()
     if not text:

@@ -5,6 +5,18 @@ import uuid
 
 _logger = logging.getLogger("prc-rag")
 
+def default_persist_dir() -> str:
+    """The vector store the app owns.
+
+    A CHROMA_DIR set in the environment at call time wins (tests and operators
+    redirect the store that way); otherwise settings.CHROMA_DIR. A relative
+    value is anchored to the repo, never to the CWD (D1).
+    """
+    from config import REPO_ROOT, settings
+    raw = os.environ.get("CHROMA_DIR") or settings.CHROMA_DIR
+    return raw if os.path.isabs(raw) else str((REPO_ROOT / raw).resolve())
+
+
 class RAGDatabase:
     """
     Local Vector Database (ChromaDB) for Storing and Retrieving Historical Well Data.
@@ -15,8 +27,7 @@ class RAGDatabase:
         # on Render is ephemeral, so the old "./chroma_db" default was wiped on
         # every deploy. Falls back to ./chroma_db for local runs.
         if persist_directory is None:
-            base = os.environ.get("CHROMA_DIR") or os.environ.get("DB_DIR")
-            persist_directory = os.path.join(base, "chroma_db") if base else "./chroma_db"
+            persist_directory = default_persist_dir()
         self.client = chromadb.PersistentClient(path=persist_directory)
         
         self.collection = self.client.get_or_create_collection(

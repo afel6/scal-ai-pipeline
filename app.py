@@ -3550,7 +3550,7 @@ class PRCChatAssistant:
 
                     # Use generate() method as defined in report_generator.py
 
-                    filename = PRCReportEngine().generate(session_id=sid, well_name=well, output_dir=str(PRC_VAULT))
+                    filename = PRCReportEngine(db_path=DB_PATH).generate(session_id=sid, well_name=well, output_dir=str(PRC_VAULT))
 
                     result = f"REPORT_READY:{filename}"
 
@@ -5520,7 +5520,7 @@ class PRCChatAssistant:
         # both (de-duplicated by content snippet). Any failure here degrades to
         # the default vector context — routing must never kill a chat turn.
         try:
-            from src.rag.router import RagRoute, classify_query, merge_context_chunks
+            from hviel.rag.router import RagRoute, classify_query, merge_context_chunks
 
             _route = classify_query(msg)
             _logger.info("[RAG-ROUTER] route=%s confidence=%.2f", _route.route.value, _route.confidence)
@@ -10097,7 +10097,7 @@ def sync_document_generation_task(
         TASKS_DB[session_id].update({"progress": 70})
         
         start_time = time.time()
-        filename_report = PRCReportEngine().generate(session_id, well_name, output_dir=str(PRC_VAULT))
+        filename_report = PRCReportEngine(db_path=DB_PATH).generate(session_id, well_name, output_dir=str(PRC_VAULT))
         duration = time.time() - start_time
         with _REPORT_LATENCY_LOCK:
             _REPORT_LATENCY_LIST.append(duration)
@@ -10127,7 +10127,7 @@ def async_report_compile_task(session_id: str, well_name: str):
     try:
         TASKS_DB[session_id]["progress"] = 30
         start_time = time.time()
-        filename = PRCReportEngine().generate(session_id, well_name, output_dir=str(PRC_VAULT))
+        filename = PRCReportEngine(db_path=DB_PATH).generate(session_id, well_name, output_dir=str(PRC_VAULT))
         duration = time.time() - start_time
         with _REPORT_LATENCY_LOCK:
             _REPORT_LATENCY_LIST.append(duration)
