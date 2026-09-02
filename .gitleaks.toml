@@ -1,0 +1,33 @@
+# Secret scanning — gitleaks (CI fails the build on any finding; see the secret-scan job).
+title = "PRC AI Hub secret scanning"
+
+[extend]
+useDefault = true
+
+[[rules]]
+id = "neon-postgres-password"
+description = "Neon Postgres password (npg_…)"
+regex = '''npg_[A-Za-z0-9]{10,}'''
+
+[[rules]]
+id = "nvidia-nim-api-key"
+description = "NVIDIA NIM API key"
+regex = '''nvapi-[A-Za-z0-9_\-]{20,}'''
+
+[[rules]]
+id = "postgres-url-with-password"
+description = "Postgres connection URL carrying a real password"
+regex = '''postgres(?:ql)?://[A-Za-z0-9_.\-]+:[^@\s'"$*<{]+@[A-Za-z0-9.\-]+'''
+[rules.allowlist]
+regexes = ['''://(?:user|USER|postgres|prc_user|neondb_owner):(?:password|PASSWORD|postgres|changeme|change_this[A-Za-z_]*|NEW_PASSWORD|your_[A-Za-z_]*|\*+)@''']
+
+[allowlist]
+description = "Known, rotated, or non-secret material"
+paths = [
+  '''^\.gitleaks\.toml$''',
+  '''^hermes_skills_library/''',
+]
+# The Neon password added by this commit (2026-05-10) was rotated; it has been
+# public since then and is redacted from the working tree (D1). History is not
+# rewritten (D3 0.1): a rewrite recalls nothing and would break submodule pins.
+commits = ["64af763c40ff0e2732ec926d4e030b4d6d52b724"]
