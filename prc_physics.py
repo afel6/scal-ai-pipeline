@@ -204,10 +204,60 @@ def calculate_washburn_radius(pressure_psia: float, contact_angle_deg: float = 1
     return round(radius_microns, 4)
 
 
+class EndpointProvenanceError(ValueError):
+    """A Brooks-Corey endpoint had to be substituted on a path that forbids it.
+
+    Raised by the report path so a substituted Swi/Sor can never reach a .docx
+    or an LLM prompt disguised as a laboratory measurement.
+    """
+
+
+# Placeholders used ONLY when an endpoint cannot be measured or derived. They are
+# always reported with source "substituted"; they are never returned bare.
+_SUBSTITUTED_SWI = 0.1
+_SUBSTITUTED_SOR = 0.1
+
+
+def provenance_notice(fit: dict) -> str:
+    """Human-readable provenance line for a fit, for prompts and documents.
+
+    Returned text is embedded verbatim in the session transcript, so it reaches
+    the LLM context and the generated .docx rather than sitting in a field a
+    reader can miss.
+    """
+    parameters = fit.get("parameters") or {}
+    if not parameters:
+        return "BROOKS-COREY PROVENANCE: no fit was produced."
+    substituted = fit.get("substituted") or []
+    defaulted = fit.get("defaulted") or []
+    lines = ["BROOKS-COREY PARAMETER PROVENANCE:"]
+    for name, entry in parameters.items():
+        lines.append(f"  - {name} = {entry['value']} [{entry['source']}]")
+    if substituted:
+        lines.append(
+            "  WARNING: " + ", ".join(substituted) + " were SUBSTITUTED, not measured "
+            "or fitted. Normalised saturation Se is built from Swi and Sor, so every "
+            "parameter above inherits any substituted endpoint. Treat the recovery "
+            "implications as unverified until the laboratory endpoints are supplied."
+        )
+    if defaulted:
+        lines.append(
+            "  NOTE: " + ", ".join(defaulted) + " fell back to textbook defaults "
+            "because this dataset had fewer than two usable fit points."
+        )
+    return "\n".join(lines)
+
+
 def fit_brooks_corey(json_data: list[dict]) -> dict:
     """
     Fits Brooks-Corey optimization parameters for Pc and Kr data from extracted json data.
     Ensures 100% thread safety by using purely local variables.
+
+    Returns a provenance-carrying structure, never bare floats:
+        {"parameters": {name: {"value": float, "source": str}},
+         "endpoints_used": {"Swi": float, "Sor": float},
+         "substituted": [...], "defaulted": [...]}
+    where source is one of measured / fitted / substituted / default.
     
     Pc = Pd * (Se) ^ (-1/lambda)
     Krw = Krw_max * (Se) ^ nw
@@ -253,28 +303,28 @@ def fit_brooks_corey(json_data: list[dict]) -> dict:
             except ValueError:
                 pass
 
-    # Estimate endpoint Swi and Sor (prioritizing explicit laboratory values)
+    # Endpoint Swi and Sor, each tagged with where the number came from:
+    #   measured    - reported explicitly by the laboratory (Protocol 3 override)
+    #   fitted      - derived from this dataset's own saturation range
+    #   substituted - neither was possible; a placeholder stands in and MUST be
+    #                 declared, because Se and every fitted parameter inherit it
+    sw_vals = [r["Sw"] for r in valid_rows]
+
     if explicit_swi is not None:
-        swi = explicit_swi
+        swi, swi_source = explicit_swi, "measured"
     else:
-        sw_vals = [r["Sw"] for r in valid_rows]
-        swi = min(sw_vals)
-        
-    # Ensure Swi is strictly less than 1.0
-    if swi >= 1.0:
-        swi = 0.1
-        
-    # Estimate Sor (residual oil saturation or non-wetting residual)
+        swi, swi_source = min(sw_vals), "fitted"
+    if not 0.0 <= swi < 1.0:
+        swi, swi_source = _SUBSTITUTED_SWI, "substituted"
+
     if explicit_sor is not None:
-        sor = explicit_sor
+        sor, sor_source = explicit_sor, "measured"
     else:
-        sw_vals = [r["Sw"] for r in valid_rows]
         # Sw_max is usually 1 - Sor
-        sor = max(0.0, 1.0 - max(sw_vals))
-        
+        sor, sor_source = max(0.0, 1.0 - max(sw_vals)), "fitted"
     if swi + sor >= 1.0:
-        sor = 0.1
-        
+        sor, sor_source = _SUBSTITUTED_SOR, "substituted"
+
     # Brooks-Corey Fitting
     pc_points = []
     krw_points = []
@@ -326,10 +376,12 @@ def fit_brooks_corey(json_data: list[dict]) -> dict:
         slope, intercept = least_squares_fit(x_pc, y_pc)
         lambda_val = -1.0 / slope if slope < 0 else 2.0
         pd_psi = math.exp(intercept)
+        pc_source = "fitted"
     else:
         lambda_val = 2.0
         pd_psi = 1.0
-        
+        pc_source = "default"
+
     # 2. Wetting Phase relative perm fit: ln(Krw) = ln(Krw_max) + nw * ln(Se)
     if len(krw_points) >= 2:
         x_krw = [math.log(p[0]) for p in krw_points]
@@ -337,10 +389,12 @@ def fit_brooks_corey(json_data: list[dict]) -> dict:
         nw, intercept = least_squares_fit(x_krw, y_krw)
         krw_max = math.exp(intercept)
         nw = max(0.5, nw)
+        krw_source = "fitted"
     else:
         nw = 3.0
         krw_max = 1.0
-        
+        krw_source = "default"
+
     # 3. Non-wetting Phase relative perm fit: ln(Krnw) = ln(Krnw_max) + no * ln(1 - Se)
     if len(krnw_points) >= 2:
         x_krnw = [math.log(p[0]) for p in krnw_points]
@@ -348,39 +402,63 @@ def fit_brooks_corey(json_data: list[dict]) -> dict:
         no, intercept = least_squares_fit(x_krnw, y_krnw)
         krnw_max = math.exp(intercept)
         no = max(0.5, no)
+        krnw_source = "fitted"
     else:
         no = 3.0
         krnw_max = 1.0
-        
+        krnw_source = "default"
+
+    parameters = {
+        "Swi":      {"value": round(swi, 4),        "source": swi_source},
+        "Sor":      {"value": round(sor, 4),        "source": sor_source},
+        "Pd_psi":   {"value": round(pd_psi, 4),     "source": pc_source},
+        "lambda":   {"value": round(lambda_val, 4), "source": pc_source},
+        "nw":       {"value": round(nw, 4),         "source": krw_source},
+        "krw_max":  {"value": round(krw_max, 4),    "source": krw_source},
+        "no":       {"value": round(no, 4),         "source": krnw_source},
+        "krnw_max": {"value": round(krnw_max, 4),   "source": krnw_source},
+    }
     return {
-        "Swi": round(swi, 4),
-        "Sor": round(sor, 4),
-        "Pd_psi": round(pd_psi, 4),
-        "lambda": round(lambda_val, 4),
-        "nw": round(nw, 4),
-        "no": round(no, 4),
-        "krw_max": round(krw_max, 4),
-        "krnw_max": round(krnw_max, 4)
+        "parameters": parameters,
+        # The endpoints Se was actually built from — every other parameter above
+        # is downstream of these two numbers.
+        "endpoints_used": {"Swi": round(swi, 4), "Sor": round(sor, 4)},
+        "substituted": sorted(n for n, p in parameters.items()
+                              if p["source"] == "substituted"),
+        "defaulted": sorted(n for n, p in parameters.items()
+                            if p["source"] == "default"),
     }
 
-def enrich_json_with_brooks_corey(json_data: list[dict]) -> list[dict]:
+def enrich_json_with_brooks_corey(json_data: list[dict],
+                                  allow_substitution: bool = False) -> list[dict]:
     """
-    Enriches the extracted SCAL JSON list with Brooks-Corey fitted exponents and fits.
+    Enriches the extracted SCAL JSON list with Brooks-Corey fits and their provenance.
+
+    This is the report path (POST /api/v1/analyze-scal -> sync_document_generation_task).
+    It REFUSES by default when an endpoint had to be substituted, because the result
+    would otherwise reach a .docx and an LLM prompt indistinguishable from a
+    laboratory measurement. Pass allow_substitution=True only where the caller
+    surfaces the notice to the reader.
     """
     fit = fit_brooks_corey(json_data)
     if not fit:
         return json_data
-        
-    # Attach to every row for downstream petrophysical consumption
+
+    substituted = fit.get("substituted") or []
+    if substituted and not allow_substitution:
+        raise EndpointProvenanceError(
+            "refusing to enrich: " + ", ".join(substituted) + " could not be measured "
+            "or fitted from this dataset and would have to be substituted. "
+            "Supply explicit laboratory Swi/Sor, or call with allow_substitution=True "
+            "and surface the provenance notice to the reader.\n" + provenance_notice(fit)
+        )
+
+    notice = provenance_notice(fit)
     for row in json_data:
-        row["brooks_corey_Swi"] = fit["Swi"]
-        row["brooks_corey_Sor"] = fit["Sor"]
-        row["brooks_corey_Pd_psi"] = fit["Pd_psi"]
-        row["brooks_corey_lambda"] = fit["lambda"]
-        row["brooks_corey_nw"] = fit["nw"]
-        row["brooks_corey_no"] = fit["no"]
-        row["brooks_corey_krw_max"] = fit["krw_max"]
-        row["brooks_corey_krnw_max"] = fit["krnw_max"]
-        
+        for name, entry in fit["parameters"].items():
+            row[f"brooks_corey_{name}"] = entry["value"]
+            row[f"brooks_corey_{name}_source"] = entry["source"]
+        row["brooks_corey_provenance_notice"] = notice
+
     return json_data
 

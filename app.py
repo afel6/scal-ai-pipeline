@@ -54,7 +54,7 @@ from config import settings
 GLOBAL_EVENT_LOOP = None
 
 from contextlib import asynccontextmanager, contextmanager
-from typing import Optional
+from typing import Dict, List, Optional
 
 import numpy as np
 
@@ -1390,21 +1390,122 @@ def cache_excel_data_vectors(sid: str, filepath: str):
     save_session_cache_to_db(sid)
 
 
-def find_cached_vector(sid: str, aliases: list) -> list:
-    """Fuzzy matches keys in flat_vectors to aliases and returns the first matched list of floats."""
+class VectorLookupError(RuntimeError):
+    """A cached column vector could not be resolved to exactly one column.
+
+    Raised instead of returning a wrong or empty vector, so a mis-resolved
+    column can never reach a regression silently.
+    """
+
+
+# Characters stripped before comparing a cache key to an alias.
+_VECTOR_KEY_NOISE = str.maketrans("", "", " _-.()%#/\\")
+
+# Declared alias table: role -> the exact normalized column names accepted.
+# Matching is exact against this table. Supporting a new column spelling means
+# adding it here deliberately; it never happens by accident through substrings.
+VECTOR_ALIASES: Dict[str, frozenset] = {
+    "sw": frozenset({
+        "sw", "watersaturation", "watersaturationsw", "watersat",
+        "swfrac", "swfraction", "waterssaturationfraction",
+    }),
+    "ri": frozenset({
+        "ri", "resistivityindex", "resistivityindexri", "resistivityratio",
+    }),
+    "porosity": frozenset({
+        "porosity", "phi", "porosityfrac", "porosityfraction",
+        "porositypct", "porositypercent",
+    }),
+    "ff": frozenset({
+        "ff", "formationfactor", "formationresistivityfactor",
+        "formationfactorff",
+    }),
+}
+
+
+def _normalize_vector_key(name: str) -> str:
+    """Case-fold a cache key or alias and strip every separator character."""
+    return name.lower().translate(_VECTOR_KEY_NOISE)
+
+
+def _vector_key_forms(key: str) -> set:
+    """Normalized forms a cache key may be matched on.
+
+    `cache_excel_data_vectors` stores each column twice — sheet-qualified and
+    bare (app.py:1386-1387) — so both the whole key and its column part are
+    valid match targets.
+    """
+    forms = {_normalize_vector_key(key)}
+    _, separator, column = key.rpartition(".")
+    if separator and column.strip():
+        forms.add(_normalize_vector_key(column))
+    return forms
+
+
+def find_cached_vector(sid: str, role: str) -> List[float]:
+    """Resolve one cached column vector by declared role.
+
+    Exact-matches the normalized column name against VECTOR_ALIASES. Raises
+    VectorLookupError when the role is undeclared, when nothing matches, or
+    when two genuinely different columns match — never first-match-wins.
+    """
+    accepted = VECTOR_ALIASES.get(role)
+    if accepted is None:
+        raise VectorLookupError(
+            f"unknown vector role {role!r}; declared roles: {sorted(VECTOR_ALIASES)}"
+        )
     if not sid:
-        return []
+        raise VectorLookupError(f"no session id supplied for the {role!r} lookup")
+
     fhash = resolve_cache_key(sid)
     load_session_cache_from_db(fhash)
     with SESSION_DATA_CACHE_LOCK:
-        flat = SESSION_DATA_CACHE.get(fhash, {}).get("flat_vectors", {})
-        for alias in aliases:
-            a_clean = alias.lower().replace(" ", "").replace("_", "")
-            for k, vals in flat.items():
-                k_clean = k.lower().replace(" ", "").replace("_", "")
-                if a_clean == k_clean or a_clean in k_clean or k_clean in a_clean:
-                    return vals
-    return []
+        flat = dict(SESSION_DATA_CACHE.get(fhash, {}).get("flat_vectors", {}))
+
+    matches = {key: vals for key, vals in flat.items()
+               if _vector_key_forms(key) & accepted}
+    if not matches:
+        raise VectorLookupError(
+            f"no cached column matches role {role!r} "
+            f"(accepted names: {sorted(accepted)}); "
+            f"available columns: {sorted(flat)}"
+        )
+
+    distinct = {tuple(vals) for vals in matches.values()}
+    if len(distinct) > 1:
+        raise VectorLookupError(
+            f"role {role!r} is ambiguous: it matched {len(matches)} columns "
+            f"holding different data ({sorted(matches)}). Rename the columns or "
+            f"narrow VECTOR_ALIASES — refusing to guess which one was meant."
+        )
+    return next(iter(matches.values()))
+
+
+def assert_independent_vectors(x: "np.ndarray", y: "np.ndarray",
+                               x_label: str, y_label: str) -> None:
+    """Refuse to regress a vector on itself.
+
+    Element-wise equality, or a correlation of exactly +/-1.0 on the raw
+    vectors, means the same column was resolved for both axes. That is the
+    failure that produced Archie n = -1.000 on every run. A genuine Sw/RI pair
+    is monotonic but not linearly dependent (|r| ~ 0.89), so it passes.
+    """
+    if x.shape == y.shape and np.array_equal(x, y):
+        raise VectorLookupError(
+            f"{x_label} and {y_label} resolved to the same column vector — "
+            f"refusing to regress a vector on itself"
+        )
+    if x.shape != y.shape or x.size < 2:
+        return None
+    if float(np.std(x)) == 0.0 or float(np.std(y)) == 0.0:
+        return None
+    r = float(np.corrcoef(x, y)[0, 1])
+    if abs(abs(r) - 1.0) < 1e-12:
+        raise VectorLookupError(
+            f"{x_label} and {y_label} correlate at r={r:+.6f} (exactly +/-1) — "
+            f"the two axes are the same measurement, not an independent pair"
+        )
+    return None
 
 
 def find_aligned_bca_columns(sid: str):
@@ -2329,9 +2430,6 @@ _PETRO_KEYS = frozenset({
 
 import contextvars
 from pydantic import BaseModel, Field
-from genkit.ai import Genkit
-from genkit.plugins.google_genai import GoogleAI
-from genkit.ai._server import ServerSpec
 
 class TLSContext:
     def __init__(self):
@@ -2362,11 +2460,12 @@ class TLSContext:
 
 _tls = TLSContext()
 
-# Initialize Google Genkit Plugin and Client
-google_ai_plugin = GoogleAI(api_key=GEMINI_KEY_POOL[0])
-ai = Genkit(plugins=[google_ai_plugin], reflection_server_spec=ServerSpec(port=3105))
-
-# Define tool schemas for Genkit
+# The tool schemas the model is offered live in `_HVIEL_TOOLS` (sent via
+# `_nvidia_tools()`) and are implemented in `PRCChatAssistant._execute_tool`.
+# The former Genkit registration of the same ten names — a parallel set of
+# placeholder stubs on an `ai = Genkit(...)` object nothing ever called — was
+# removed: it only created a name collision that would have fed the model
+# "Calculated"/"Fitted" success strings the day anyone used `ai.generate`.
 
 class CalculatePetrophysicsInput(BaseModel):
     script: str = Field(description="One of: petrophysics.py, micp_skill.py, centrifuge_skill.py")
@@ -2969,6 +3068,113 @@ from collections import Counter as _Counter
 
 # Per-tool failure counts for trajectory analysis; append-only within a process.
 TOOL_FAILURE_COUNTS: "_Counter[str]" = _Counter()
+
+
+# -- TOOL-CALL LEDGER & CITATION GATE ---------------------------------------- #
+# A fitted parameter may only be shown to the user if it maps to a tool call that
+# actually succeeded. The system prompt already forbids estimating a failed fit
+# ("If the tool fails, report the failure - do not estimate"); a model reported
+# n = 1.987 citing a fit that had errored, so the rule needs enforcement in code.
+
+TOOL_CALL_LEDGER: Dict[str, List[Dict[str, object]]] = {}
+_TOOL_CALL_LEDGER_LOCK = threading.Lock()
+
+# Fitted parameter -> the tools that establish provenance for it.
+#
+# Only `fit_petrophysical_curve` qualifies. It is strict cache-only: it fits the
+# verified cached column vectors and refuses model-supplied values (see the RI
+# and FF branches of _format_tool_response). The sandbox fitters are deliberately
+# NOT here — they accept x/y arrays supplied by the model, so a successful
+# sandbox call proves the arithmetic ran, not that the numbers came from the lab.
+_CACHE_BACKED_FITTERS = frozenset({"fit_petrophysical_curve"})
+_GATED_PARAMETERS: Dict[str, frozenset] = {
+    "n": _CACHE_BACKED_FITTERS,
+    "m": _CACHE_BACKED_FITTERS,
+    "a": _CACHE_BACKED_FITTERS,
+    "nw": _CACHE_BACKED_FITTERS,
+    "no": _CACHE_BACKED_FITTERS,
+}
+
+# Plot payloads are machine-read JSON; rewriting inside one corrupts the chart.
+_PLOT_BLOCK_RE = re.compile(r"__PRC_PLOT__\s*\{.*?\}\s*(?=\n|$)", re.DOTALL)
+
+# A gated parameter only counts as a claim when a petrophysical cue precedes it,
+# so ordinary prose ("a", "an Amott-Harvey index") is never rewritten.
+_GATE_RE = re.compile(
+    r"(?P<cue>\b(?:fitted|exponent|parameter|coefficient|tortuosity|cementation|archie)\b[^.\n]{0,80}?)"
+    r"(?P<open>[`*]{0,2})(?P<param>nw|no|n|m|a)(?P=open)"
+    # The separator covers prose ("n is 1.98", "n = 1.98") and the markdown table
+    # cells the prompt mandates ("| Saturation Exponent (n) | 1.98 |").
+    r"(?P<mid>[^.\n]{0,60}?(?:is|=|:|\|)\s*)"
+    r"(?P<num>\*{0,2}-?\d+(?:\.\d+)?\*{0,2})",
+    re.IGNORECASE,
+)
+
+
+def record_tool_call(sid: str, tool: str, status: str, args: dict,
+                     parameters: List[str]) -> str:
+    """Append one tool-call record and return its call id."""
+    call_id = f"{tool}-{len(TOOL_CALL_LEDGER.get(sid or '', []))+1}"
+    record: Dict[str, object] = {"call_id": call_id, "tool": tool, "status": status,
+                                 "args": dict(args or {}), "parameters": list(parameters or [])}
+    with _TOOL_CALL_LEDGER_LOCK:
+        TOOL_CALL_LEDGER.setdefault(sid or "", []).append(record)
+    return call_id
+
+
+def get_tool_call_records(sid: str) -> List[Dict[str, object]]:
+    with _TOOL_CALL_LEDGER_LOCK:
+        return list(TOOL_CALL_LEDGER.get(sid or "", []))
+
+
+def reset_tool_call_ledger(sid: str) -> None:
+    with _TOOL_CALL_LEDGER_LOCK:
+        TOOL_CALL_LEDGER.pop(sid or "", None)
+
+
+def enforce_citation_gate(text: str, sid: str) -> str:
+    """Strip fitted parameter values that no successful tool call backs.
+
+    Returns the text with unbacked numbers replaced by an explicit unverified
+    marker, and any citation of the tool that did not succeed removed. Every
+    rejection is logged so the refusal is visible rather than silent.
+    """
+    if not text:
+        return text
+    succeeded = {r["tool"] for r in get_tool_call_records(sid)
+                 if r.get("status") == "success"}
+    rejected_tools: set = set()
+
+    def _replace(match: "re.Match") -> str:
+        allowed = _GATED_PARAMETERS[match.group("param").lower()]
+        if allowed & succeeded:
+            return match.group(0)
+        rejected_tools.update(allowed)
+        _logger.warning(
+            "[citation gate] stripped %s=%s for session %s: no successful call to any of %s",
+            match.group("param"), match.group("num").strip("*"), sid or "-",
+            sorted(allowed))
+        # The tool name stays in the log, not in the user-facing text: naming it
+        # here would read as a citation of the call that did not succeed.
+        return (match.group("cue") + match.group("open") + match.group("param")
+                + match.group("open") + match.group("mid")
+                + "[unverified - no successful fit produced this value]")
+
+    # Mask plot payloads so the gate never rewrites machine-read chart JSON.
+    plots: List[str] = []
+
+    def _mask(match: "re.Match") -> str:
+        plots.append(match.group(0))
+        return f"\x00PLOT{len(plots) - 1}\x00"
+
+    masked = _PLOT_BLOCK_RE.sub(_mask, text)
+    gated = _GATE_RE.sub(_replace, masked)
+    for tool in rejected_tools:
+        # Drop the bracketed citation of a tool that did not produce the value.
+        gated = re.sub(r"\s*\[\s*" + re.escape(tool) + r"[^\]]*\]", "", gated)
+    for index, payload in enumerate(plots):
+        gated = gated.replace(f"\x00PLOT{index}\x00", payload)
+    return gated
 
 
 def _record_tool_failure(name: str, detail) -> None:
@@ -3726,6 +3932,28 @@ class PRCChatAssistant:
 
 
     def _format_tool_response(self, name: str, args: dict, result: str) -> str:
+        """Format a tool result and record the outcome in the tool-call ledger.
+
+        The fit tools report their real outcome here, not in `_execute_tool`:
+        `_execute_tool` only marks the fit "ready", and the regression that can
+        actually fail runs during formatting. Recording here is what makes the
+        citation gate reflect whether a parameter was genuinely produced.
+        """
+        formatted = self._format_tool_response_impl(name, args, result)
+        try:
+            failed = isinstance(formatted, str) and formatted.lstrip().startswith("⚠")
+            record_tool_call(
+                getattr(_tls, "current_session_id", "") or "",
+                name,
+                "error" if failed else "success",
+                args or {},
+                [] if failed else sorted(_GATED_PARAMETERS),
+            )
+        except Exception as ledger_exc:                 # noqa: BLE001 - never break an answer
+            _logger.warning("[citation gate] could not record tool call: %s", ledger_exc)
+        return formatted
+
+    def _format_tool_response_impl(self, name: str, args: dict, result: str) -> str:
 
         try:
 
@@ -4184,15 +4412,14 @@ class PRCChatAssistant:
 
                 # STRICT CACHE-ONLY: fit exclusively on the verified cached column vectors
                 # the report engine uses. NO LLM/inline-arg fallback. No cache -> terminate.
-                sw_raw, ri_raw = [], []
-                if sid:
-                    sw_raw = find_cached_vector(sid, ["sw", "water saturation", "saturation"])
-                    ri_raw = find_cached_vector(sid, ["ri", "resistivity index", "index"])
-                if not sw_raw or not ri_raw:
+                try:
+                    sw_raw = find_cached_vector(sid, "sw")
+                    ri_raw = find_cached_vector(sid, "ri")
+                except VectorLookupError as exc:
+                    _logger.warning("[RI fit] cached vector lookup failed: %s", exc)
                     return (
-                        "⚠️ Resistivity Index fit aborted: no verified Sw / RI vectors are present "
-                        "in the session cache. Upload the SCAL file so the fit runs strictly on "
-                        "cached laboratory data — inline or model-supplied values are not accepted."
+                        "⚠️ Resistivity Index fit aborted: the verified Sw / RI column vectors "
+                        f"could not be resolved from the session cache. {exc}"
                     )
 
                 sample = args.get("sample_name", "Core")
@@ -4206,6 +4433,12 @@ class PRCChatAssistant:
                     idx_sort = np.argsort(sw_a)
                     sw_a = sw_a[idx_sort]
                     ri_a = ri_a[idx_sort]
+
+                    try:
+                        assert_independent_vectors(sw_a, ri_a, "Sw", "RI")
+                    except VectorLookupError as exc:
+                        _logger.error("[RI fit] self-regression guard tripped: %s", exc)
+                        return f"⚠️ Resistivity Index fit aborted: {exc}"
 
                     mask     = (sw_a > 0) & (ri_a > 0)
                     n_arch   = float(-np.polyfit(np.log(sw_a[mask]), np.log(ri_a[mask]), 1)[0])
@@ -4310,15 +4543,14 @@ class PRCChatAssistant:
 
                 # STRICT CACHE-ONLY: fit exclusively on the verified cached column vectors
                 # the report engine uses. NO LLM/inline-arg fallback. No cache -> terminate.
-                phi_raw, ff_raw = [], []
-                if sid:
-                    phi_raw = find_cached_vector(sid, ["porosity", "phi"])
-                    ff_raw  = find_cached_vector(sid, ["ff", "formation factor"])
-                if not phi_raw or not ff_raw:
+                try:
+                    phi_raw = find_cached_vector(sid, "porosity")
+                    ff_raw  = find_cached_vector(sid, "ff")
+                except VectorLookupError as exc:
+                    _logger.warning("[FF fit] cached vector lookup failed: %s", exc)
                     return (
-                        "⚠️ Formation Factor fit aborted: no verified porosity / FF vectors are "
-                        "present in the session cache. Upload the SCAL file so the fit runs strictly "
-                        "on cached laboratory data — inline or model-supplied values are not accepted."
+                        "⚠️ Formation Factor fit aborted: the verified porosity / FF column "
+                        f"vectors could not be resolved from the session cache. {exc}"
                     )
 
                 sample  = args.get("sample_name", "Core")
@@ -4331,6 +4563,12 @@ class PRCChatAssistant:
                     idx_sort = np.argsort(phi_a)
                     phi_a = phi_a[idx_sort]
                     ff_a = ff_a[idx_sort]
+
+                    try:
+                        assert_independent_vectors(phi_a, ff_a, "Porosity", "FF")
+                    except VectorLookupError as exc:
+                        _logger.error("[FF fit] self-regression guard tripped: %s", exc)
+                        return f"⚠️ Formation Factor fit aborted: {exc}"
 
                     mask    = (phi_a > 0) & (ff_a > 0)
                     coeffs  = np.polyfit(np.log(phi_a[mask]), np.log(ff_a[mask]), 1)
@@ -6320,7 +6558,10 @@ class PRCChatAssistant:
 
                     final_resp += str(c)
 
-            return final_resp or "Error generating response."
+            # Answer assembly is the enforcement point: a fitted parameter may only
+            # survive here if the tool-call ledger shows a successful fit for it.
+            # Applied inside chat() so every caller is covered, not just the routes.
+            return enforce_citation_gate(final_resp, sid) or "Error generating response."
 
 
 
@@ -7416,13 +7657,24 @@ def health():
     cooldown = sum(1 for v in snap.values() if (now - v.get("ts", 0)) < v.get("wait", 0))
     keys_degraded = len(GEMINI_KEY_POOL) == 0 or (cooldown >= len(GEMINI_KEY_POOL))
 
-    if not db_ok or keys_degraded:
+    # Chat-LLM liveness from the same success/failure signal the chat path feeds
+    # (alerting.record_llm_success/failure at every provider call). A non-empty
+    # key pool no longer implies a working provider — this catches an outage the
+    # old check could not. Provider logic is NOT reimplemented here (that is what
+    # would break at C2); we only read the signal.
+    llm = alerting.llm_health()
+    llm_degraded = not llm["healthy"]
+
+    if not db_ok or keys_degraded or llm_degraded:
         details = []
         if not db_ok:
             details.append(f"Database connectivity failed: {db_err}")
         if keys_degraded:
             details.append(f"AI API Keys pool is degraded (All {len(GEMINI_KEY_POOL)} keys are in cooldown or pool is empty).")
-        
+        if llm_degraded:
+            details.append(f"Chat LLM degraded: {llm['consecutive_failures']} consecutive provider "
+                           f"failures (last error: {llm['last_error'] or 'n/a'}).")
+
         try:
             alerting.send_alert(
                 subject="Degraded Health Check Alert (SCAL Pipeline)",
@@ -7430,13 +7682,15 @@ def health():
             )
         except Exception as alert_err:
             _logger.error(f"Failed to send alert for degraded health: {alert_err}")
-            
+
         return JSONResponse(
             status_code=503,
-            content={"status": "degraded", "db": "ok" if db_ok else "fail", "api_keys": "degraded" if keys_degraded else "ok"}
+            content={"status": "degraded", "db": "ok" if db_ok else "fail",
+                     "api_keys": "degraded" if keys_degraded else "ok",
+                     "llm": "degraded" if llm_degraded else "ok"}
         )
 
-    return {"status": "ok", "db": "postgres" if _PG_AVAILABLE else "sqlite"}
+    return {"status": "ok", "db": "postgres" if _PG_AVAILABLE else "sqlite", "llm": "ok"}
 
 
 
@@ -8180,6 +8434,7 @@ async def chat_stream(
                             sub_reply = strip_thinking_blocks(sub_reply)
                             sub_reply = strip_placeholder_artifacts(sub_reply)
                             sub_reply = process_provenance_tokens(sub_reply, sid)
+                            sub_reply = enforce_citation_gate(sub_reply, sid)
                             filenames = get_filenames_from_cache(sid)
                             sub_reply = compress_traceability_ledger(sub_reply, filenames)
                             sub_reply = _extract_and_log_corrections(sid, email, sub_reply)
@@ -8234,6 +8489,7 @@ async def chat_stream(
                         full_reply = strip_thinking_blocks(full_reply)
                         full_reply = strip_placeholder_artifacts(full_reply)
                         full_reply = process_provenance_tokens(full_reply, sid)
+                        full_reply = enforce_citation_gate(full_reply, sid)
                         filenames = get_filenames_from_cache(sid)
                         full_reply = compress_traceability_ledger(full_reply, filenames)
                         full_reply = _extract_and_log_corrections(sid, email, full_reply)
@@ -8837,6 +9093,7 @@ async def handle(
                         ans_text = strip_thinking_blocks(ans_text)
                         ans_text = strip_placeholder_artifacts(ans_text)
                         ans_text = process_provenance_tokens(ans_text, sid)
+                        ans_text = enforce_citation_gate(ans_text, sid)
                         filenames = get_filenames_from_cache(sid)
                         ans_text = clean_citation_clutter(ans_text, filenames)
                         ans_text = compress_traceability_ledger(ans_text, filenames)
@@ -9962,10 +10219,25 @@ def sync_document_generation_task(
         
         TASKS_DB[session_id].update({"progress": 40})
         
-        from prc_physics import calculate_compressibility_sweep, enrich_json_with_brooks_corey
+        from prc_physics import (EndpointProvenanceError, calculate_compressibility_sweep,
+                                 enrich_json_with_brooks_corey, fit_brooks_corey,
+                                 provenance_notice)
         try:
             extracted_json = calculate_compressibility_sweep(extracted_json)
-            extracted_json = enrich_json_with_brooks_corey(extracted_json)
+            try:
+                extracted_json = enrich_json_with_brooks_corey(extracted_json)
+                _bc_notice = provenance_notice(fit_brooks_corey(extracted_json))
+            except EndpointProvenanceError as bc_exc:
+                # Endpoints could not be measured or fitted. Refuse to attach numbers,
+                # and record why so the notice reaches the LLM context and the .docx.
+                _logger.error("[BrooksCorey] refusing to substitute endpoints: %s", bc_exc)
+                _bc_notice = (
+                    "BROOKS-COREY PARAMETER PROVENANCE:\n"
+                    "  REFUSED: Brooks-Corey parameters were NOT computed for this upload. "
+                    f"{bc_exc}"
+                )
+            db("INSERT INTO m (sid,role,text,ts,user_email) VALUES (?,?,?,?,?)",
+               (session_id, "model", _bc_notice, time.time() - 1.5, email))
         except Exception as pe:
             _logger.warning(f"Error during deterministic physics calculation in bg: {pe}")
             

@@ -17,6 +17,10 @@ import io
 # ──────────────────────────────────────────────
 NAVY = "1B3A5C"
 BLUE = "2E75B6"
+
+# Transcript messages carrying this marker are rendered into the report's
+# Parameter Provenance subsection (prc_physics.provenance_notice).
+PROVENANCE_MARKER = "BROOKS-COREY PARAMETER PROVENANCE:"
 LIGHT_BLUE = "D5E8F0"
 ZEBRA = "F2F2F2"
 DARK_GRAY = "333333"
@@ -178,6 +182,16 @@ class PRCReportEngine:
                     row[1].text = score
                     row[2].text = status
                 except: pass
+
+        # Parameter provenance. A substituted endpoint must be visible to the
+        # reader of the document, not only present in the JSON payload.
+        for role, text, url in messages:
+            if PROVENANCE_MARKER in text:
+                self._add_heading(doc, "2.1 Parameter Provenance", 2)
+                for line in text.splitlines():
+                    if line.strip():
+                        self._add_body(doc, line.strip(),
+                                       bold="WARNING:" in line)
 
     def _extract_json_payload(self, text: str) -> tuple[dict, str]:
         """
