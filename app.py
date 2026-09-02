@@ -3005,18 +3005,30 @@ _GATE_RE = re.compile(
 
 def record_tool_call(sid: str, tool: str, status: str, args: dict,
                      parameters: List[str]) -> str:
-    """Append one tool-call record and return its call id."""
-    call_id = f"{tool}-{len(TOOL_CALL_LEDGER.get(sid or '', []))+1}"
+    """Append one tool-call record and return its call id.
+
+    A record with no session id is NOT retained: the ledger is per-session
+    evidence, and an unbound row would land in a shared bucket where a stale
+    success by tool name could back a value in an unrelated conversation. It
+    is logged so an unbound execution context is visible, not silent.
+    """
+    call_id = f"{tool}-{len(TOOL_CALL_LEDGER.get(sid, []))+1 if sid else 0}"
+    if not sid:
+        _logger.warning("[citation gate] tool call %s (%s) recorded with no session id — "
+                        "dropped; it can back nothing", tool, status)
+        return call_id
     record: Dict[str, object] = {"call_id": call_id, "tool": tool, "status": status,
                                  "args": dict(args or {}), "parameters": list(parameters or [])}
     with _TOOL_CALL_LEDGER_LOCK:
-        TOOL_CALL_LEDGER.setdefault(sid or "", []).append(record)
+        TOOL_CALL_LEDGER.setdefault(sid, []).append(record)
     return call_id
 
 
 def get_tool_call_records(sid: str) -> List[Dict[str, object]]:
+    if not sid:
+        return []
     with _TOOL_CALL_LEDGER_LOCK:
-        return list(TOOL_CALL_LEDGER.get(sid or "", []))
+        return list(TOOL_CALL_LEDGER.get(sid, []))
 
 
 def reset_tool_call_ledger(sid: str) -> None:
@@ -3033,8 +3045,15 @@ def enforce_citation_gate(text: str, sid: str) -> str:
     """
     if not text:
         return text
-    succeeded = {r["tool"] for r in get_tool_call_records(sid)
-                 if r.get("status") == "success"}
+    # Fail closed: no resolvable session means no resolvable evidence, so
+    # nothing is backed and every result-shaped value is stripped. (Reading a
+    # shared/empty bucket as "nothing to check" would be the fabrication path.)
+    if not sid:
+        _logger.warning("[citation gate] no session id — treating every fitted value as unbacked")
+        succeeded: set = set()
+    else:
+        succeeded = {r["tool"] for r in get_tool_call_records(sid)
+                     if r.get("status") == "success"}
     rejected_tools: set = set()
 
     def _replace(match: "re.Match") -> str:
@@ -5639,6 +5658,12 @@ class PRCChatAssistant:
 
     def chat(self, history: list, msg: str, kb_context: str = "", f_parts: list = [], stream: bool = False, sid: str = None, email: str = None):
 
+        # Bind the session id HERE, not only in the HTTP routes: the tool-call
+        # ledger and the citation gate key on it, and every caller — routes,
+        # the eval harness, in-process scripts — must record and check under
+        # the same sid. Unbound callers used to write a shared "" bucket.
+        if sid:
+            _tls.current_session_id = sid
         _tls.pending_kb = []       # thread-local: safe under 50+ concurrent workers
         _tls.last_well_name = None  # updated when a SCAL file is processed this turn
 
