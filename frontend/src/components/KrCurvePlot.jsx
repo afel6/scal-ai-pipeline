@@ -135,6 +135,24 @@ const ValidationBadge = ({ validation }) => {
 const ParamPanel = ({ fit_params, endpoints, archie, jfunction }) => {
   // Archie params (RI / FF)
   if (archie) {
+    // Corrected (unfitted) fit: the backend sends { n: null, fitted: false,
+    // note } — the panel must declare that state visibly, never vanish into a
+    // blank where a number used to be (A3's report_generator lesson).
+    if (archie.fitted === false) {
+      return (
+        <div className="mt-6">
+          <div className="bg-[#0a0a0f] border border-red-900/40 rounded-2xl p-4 max-w-xs">
+            <p className="text-[9px] font-black text-slate-500 uppercase tracking-[0.3em] mb-2">Archie Parameters</p>
+            <p className="text-[11px] font-mono font-black" style={{ color: 'var(--prc-red, #dc2626)' }}>
+              not fitted — outside physical range
+            </p>
+            {archie.note && (
+              <p className="text-[10px] font-mono text-slate-500 mt-2">{archie.note}</p>
+            )}
+          </div>
+        </div>
+      );
+    }
     const rows = [
       archie.n != null && ['n (saturation exp.)', archie.n?.toFixed(4)],
       archie.m != null && ['m (cementation exp.)', archie.m?.toFixed(4)],
@@ -304,20 +322,26 @@ export default function KrCurvePlot({ plotData }) {
   const [hiddenCurves, setHiddenCurves] = useState(new Set());
   const [isMounted, setIsMounted] = useState(false);
   const [currentData, setCurrentData] = useState(null);
+  const [seededFrom, setSeededFrom] = useState(undefined);
 
   useEffect(() => {
     const id = requestAnimationFrame(() => setIsMounted(true));
     return () => cancelAnimationFrame(id);
   }, []);
 
-  useEffect(() => {
+  // Seed the editable chart state from the plotData prop during render (React's
+  // "adjusting state on a prop change" pattern) instead of in an effect: an
+  // effect here forces an extra commit + re-render and trips
+  // react-hooks/set-state-in-effect. Drag and calibration edits still update
+  // currentData freely below; re-seeding happens only when plotData changes.
+  if (plotData !== seededFrom) {
+    setSeededFrom(plotData);
     try {
-      const parsed = typeof plotData === 'string' ? JSON.parse(plotData) : plotData;
-      setCurrentData(parsed);
+      setCurrentData(typeof plotData === 'string' ? JSON.parse(plotData) : plotData);
     } catch (e) {
       console.error(e);
     }
-  }, [plotData]);
+  }
 
   const data = currentData;
 
@@ -406,32 +430,15 @@ export default function KrCurvePlot({ plotData }) {
     };
   }, [data]);
 
-  if (!data?.curves) {
-    return null;
-  }
+  // Log-scale flags + the domain memos below are hooks, so they must run on
+  // every render — they cannot sit behind the `!data?.curves` early return.
+  // Each memo guards the null case internally (its value is unused when we bail).
+  const xLog      = !!data?.xAxisLog;
+  const yLog      = !!data?.yAxisLog;
+  const yRightLog = !!data?.yAxisRightLog;
 
-  const meta        = data.metadata || {};
-  const validation  = meta.validation  || {};
-  const fit_params  = meta.fit_params  || {};
-  const endpoints   = meta.endpoints   || {};
-  const archie      = meta.archie      || null;
-  const jfunction   = meta.jfunction   || null;
-  const crossover   = validation.crossover || {};
-  const wettConfig  = WETTABILITY_CONFIG[validation.wettability] || WETTABILITY_CONFIG['indeterminate'];
-
-  // Log-scale flags
-  const xLog      = !!data.xAxisLog;
-  const yLog      = !!data.yAxisLog;
-  const yRightLog = !!data.yAxisRightLog;
-
-  const xTickFmt = xLog ? logTickFmt : linTickFmt;
-  const yTickFmt = yLog ? logTickFmt : linTickFmt;
-  const yRTickFmt = yRightLog ? logTickFmt : linTickFmt;
-
-  const xLabel = data.xAxis?.label || 'x';
-
-  // Dynamic log scale bounds clamps
   const computedXDomain = useMemo(() => {
+    if (!data?.curves) return [0, 'auto'];
     const d = data.xAxis?.domain;
     if (d) {
       if (!xLog) return d;
@@ -442,7 +449,7 @@ export default function KrCurvePlot({ plotData }) {
       }
     }
     if (!xLog) return [0, 'auto'];
-    
+
     let minVal = Infinity;
     let maxVal = -Infinity;
     data.curves.forEach(curve => {
@@ -461,6 +468,7 @@ export default function KrCurvePlot({ plotData }) {
   }, [data, xLog]);
 
   const computedYDomain = useMemo(() => {
+    if (!data?.curves) return [0, 'auto'];
     const d = data.yAxis?.domain;
     if (d) {
       if (!yLog) return d;
@@ -490,6 +498,7 @@ export default function KrCurvePlot({ plotData }) {
   }, [data, yLog]);
 
   const computedY2Domain = useMemo(() => {
+    if (!data?.curves) return [0, 'auto'];
     const d = data.yAxis2?.domain;
     if (d) {
       if (!yRightLog) return d;
@@ -517,6 +526,25 @@ export default function KrCurvePlot({ plotData }) {
     if (minVal === Infinity || maxVal === -Infinity) return [0.001, 100];
     return [minVal * 0.9, maxVal * 1.1];
   }, [data, yRightLog]);
+
+  if (!data?.curves) {
+    return null;
+  }
+
+  const meta        = data.metadata || {};
+  const validation  = meta.validation  || {};
+  const fit_params  = meta.fit_params  || {};
+  const endpoints   = meta.endpoints   || {};
+  const archie      = meta.archie      || null;
+  const jfunction   = meta.jfunction   || null;
+  const crossover   = validation.crossover || {};
+  const wettConfig  = WETTABILITY_CONFIG[validation.wettability] || WETTABILITY_CONFIG['indeterminate'];
+
+  const xTickFmt = xLog ? logTickFmt : linTickFmt;
+  const yTickFmt = yLog ? logTickFmt : linTickFmt;
+  const yRTickFmt = yRightLog ? logTickFmt : linTickFmt;
+
+  const xLabel = data.xAxis?.label || 'x';
 
   const toggleCurve = name => {
     setHiddenCurves(prev => {
