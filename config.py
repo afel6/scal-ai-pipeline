@@ -14,7 +14,7 @@ class Settings(BaseSettings):
     GEMINI_API_KEY: Optional[str] = Field(None, description="Comma-separated API keys")
     DATABASE_URL: str = Field("", description="Neon PostgreSQL connection URL")
     DB_DIR: str = Field(".", description="SQLite DB directory path")
-    PRC_AI_VAULT: str = Field("C:/Users/Asus/Downloads/PRC_AI_Vault", description="Shared Vault Export Directory")
+    PRC_AI_VAULT: str = Field(str(REPO_ROOT / "vault"), description="Export directory for reports/decks (repo-anchored when relative)")
     ALLOWED_ORIGINS: str = Field("http://localhost:5173,http://127.0.0.1:5173", description="Comma-separated allowed origins")
     ADMIN_PIN: str = Field(default_factory=lambda: secrets.token_hex(32), description="Admin secure PIN")
     USER_PIN: str = Field(default="", description="User access PIN; falls back to ADMIN_PIN when unset — set a distinct value in production")
@@ -48,7 +48,7 @@ class Settings(BaseSettings):
         env_file_encoding = "utf-8"
         extra = "ignore"
 
-    @field_validator("DB_DIR", "CHROMA_DIR", "GRAPH_DB_PATH", mode="after")
+    @field_validator("DB_DIR", "CHROMA_DIR", "GRAPH_DB_PATH", "PRC_AI_VAULT", mode="after")
     @classmethod
     def _anchor_to_repo(cls, v):
         if v is None or v == "":

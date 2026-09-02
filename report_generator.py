@@ -112,7 +112,10 @@ class PRCReportEngine:
         filename = f"PRC_SCAL_Report_{well_name}_{session_id[:6]}.docx"
         # Destination precedence: explicit output_dir (the app passes the shared
         # PRC vault) -> PRC_AI_VAULT env -> the original local reports/ folder.
-        base = output_dir or os.getenv("PRC_AI_VAULT") or os.path.join(os.getcwd(), "reports")
+        if output_dir is None:
+            from config import settings
+            output_dir = settings.PRC_AI_VAULT
+        base = output_dir
         output_path = os.path.join(base, filename)
         os.makedirs(os.path.dirname(output_path), exist_ok=True)
         doc.save(output_path)

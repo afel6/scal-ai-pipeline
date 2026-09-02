@@ -7379,7 +7379,7 @@ assistant = PRCChatAssistant()
 
 # Central shared PRC vault — all exported decks/spreadsheets/Word/PDF reports
 # from BOTH Hviel (SCAL) and Aviel (PVT) are written here. Overridable via env.
-PRC_VAULT = Path(os.getenv("PRC_AI_VAULT", r"C:/Users/Asus/Downloads/PRC_AI_Vault"))
+PRC_VAULT = Path(settings.PRC_AI_VAULT)          # one source for the vault path: config (repo-anchored), never a developer default
 PRC_VAULT.mkdir(parents=True, exist_ok=True)
 
 try:

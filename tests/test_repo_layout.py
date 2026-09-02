@@ -26,8 +26,10 @@ def test_store_paths_are_absolute_and_repo_anchored():
     import app
     import config
     for p in (app.DB_PATH, config.settings.DB_DIR, config.settings.CHROMA_DIR,
-              config.settings.graph_db_path):
+              config.settings.graph_db_path, config.settings.PRC_AI_VAULT, app.PRC_VAULT):
         assert pathlib.Path(p).is_absolute(), p
+    assert app.PRC_VAULT == pathlib.Path(config.settings.PRC_AI_VAULT)   # one source for the vault
+    assert "Asus" not in str(app.PRC_VAULT) or str(app.PRC_VAULT).startswith(str(ROOT))  # never a developer default
 
 
 def test_report_engine_reads_the_database_the_app_writes(monkeypatch, tmp_path):
