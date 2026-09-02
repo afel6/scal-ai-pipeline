@@ -20,15 +20,16 @@ def _resolve_key():
     return ""
 
 
-_KEY = _resolve_key()
+# D0: a live call is an explicit opt-in (ALLOW_EGRESS=1 disarms the socket
+# guard); a key merely being present never triggers one.
+_KEY = _resolve_key() if os.environ.get("ALLOW_EGRESS") == "1" else ""
 
-# Both tests exercise the live /api/chat LLM pipeline (real Gemini responses),
-# so they are integration tests: skipped on CI (no secret) and run only when a
-# real key is present locally. This lets the file be collected by `pytest tests/`
-# without a dedicated --ignore entry.
+# Both tests exercise the live /api/chat LLM pipeline (real model responses),
+# so they are integration tests: skipped unless explicitly opted in. This lets
+# the file be collected by `pytest tests/` without a dedicated --ignore entry.
 pytestmark = [
     pytest.mark.integration,
-    pytest.mark.skipif(not _KEY, reason="No usable GEMINI_API_KEY available (live API test)"),
+    pytest.mark.skipif(not _KEY, reason="Live API test: needs ALLOW_EGRESS=1 and a usable GEMINI_API_KEY"),
 ]
 
 

@@ -31,11 +31,13 @@ def _resolve_key():
     return ""
 
 
-_KEY = _resolve_key()
+# D0: a live call is an explicit opt-in (ALLOW_EGRESS=1 disarms the socket
+# guard); a key merely being present never triggers one.
+_KEY = _resolve_key() if os.environ.get("ALLOW_EGRESS") == "1" else ""
 
 
 @pytest.mark.integration
-@pytest.mark.skipif(not _KEY, reason="No usable GEMINI_API_KEY available (live API test)")
+@pytest.mark.skipif(not _KEY, reason="Live API test: needs ALLOW_EGRESS=1 and a usable GEMINI_API_KEY")
 def test_gemini_v1beta_lists_models():
     from google import genai
 

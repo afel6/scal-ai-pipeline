@@ -177,6 +177,38 @@ CHAT = llm_adapter.ChatAdapter(
 # already rotates keys inside a single call).
 _CHAT_TURN_RETRIES = 3
 
+
+# ── D0 AIR-GAP INVARIANT ──────────────────────────────────────────────────────
+# "LLM last" is enforced, not remembered: a cloud chat provider, or a real
+# Gemini embedding key, configured while the private database is reachable is a
+# startup hard-fail. Local providers (mock, ollama) coexist with the database;
+# a cloud provider is allowed only with no private database (the quarantined
+# gate runs use a scratch store with DATABASE_URL blank).
+
+def _private_db_reachable() -> bool:
+    """The live Postgres pool, not the env string — DATABASE_URL set but
+    unreachable (SQLite fallback) is not a reachable private database."""
+    return bool(_PG_AVAILABLE)
+
+
+def _real_embedding_key_configured() -> bool:
+    return bool(GEMINI_KEY_POOL) and GEMINI_KEY_POOL[0] not in ("", "DUMMY_KEY")
+
+
+def assert_no_cloud_llm_with_private_db() -> None:
+    cloud = []
+    if llm_adapter.is_cloud(CHAT.config.provider):
+        cloud.append(f"LLM_PROVIDER={CHAT.config.provider}")
+    if _real_embedding_key_configured():
+        cloud.append("GEMINI_API_KEY (embedding provider)")
+    if cloud and _private_db_reachable():
+        raise RuntimeError(
+            "SECURITY: cloud LLM provider configured (" + ", ".join(cloud) + ") while "
+            "the private database (DATABASE_URL) is reachable. Refusing to start: "
+            "private data must not leave the machine. Use LLM_PROVIDER=mock or ollama "
+            "and no cloud embedding key, or run without the private database."
+        )
+
 KB_INGEST_SECRET = settings.KB_INGEST_SECRET
 
 ADMIN_PIN        = settings.ADMIN_PIN
@@ -6666,6 +6698,9 @@ class KnowledgeBase:
 
     def _embed(text: str) -> "np.ndarray | None":
 
+        if not _real_embedding_key_configured():
+            return None            # no key → no embedding and no socket (DUMMY_KEY used to be sent)
+
         try:
 
             result = _get_embed_client().models.embed_content(model=EMBED_MODEL, contents=text)
@@ -7088,13 +7123,20 @@ async def lifespan(app: FastAPI):
     # Enforced invariant: the pytest auth bypass must never be live under a real
     # ASGI server. Fail fast before serving a single request.
     assert_auth_bypass_disabled_in_production()
-    # API key validation on startup with clear error (Crash Issue 6)
+    # D0: cloud provider + reachable private database never coexist.
+    assert_no_cloud_llm_with_private_db()
+    # Embedding key validation on startup with clear error (Crash Issue 6). No
+    # key at all is a legitimate air-gapped configuration: embeddings are off.
     if not is_testing():
-        try:
-            validate_gemini_api_keys()
-        except ValueError as ve:
-            _logger.critical(f"[STARTUP-CRITICAL] {ve}")
-            os._exit(1)
+        if _real_embedding_key_configured():
+            try:
+                validate_gemini_api_keys()
+            except ValueError as ve:
+                _logger.critical(f"[STARTUP-CRITICAL] {ve}")
+                os._exit(1)
+        else:
+            _logger.warning("[STARTUP-VAL] No GEMINI_API_KEY configured — Gemini "
+                            "embeddings disabled; KB vector search returns no hits.")
     init_db()
     try:
         purge_all_historical_assets()
@@ -10545,6 +10587,7 @@ if __name__ == "__main__":
     # `python app.py` is a real server launch (its launcher is app.py, not
     # uvicorn), so force the auth-bypass invariant here too.
     assert_auth_bypass_disabled_in_production(force=True)
+    assert_no_cloud_llm_with_private_db()
 
     init_db()
 

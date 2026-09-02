@@ -187,6 +187,22 @@ Add new entries at the top of the list with date, CVE class, and patch descripti
 
 ---
 
+### [2026-09-02] D0 — Air-Gap: Credential Enumeration, Mock-by-Default Provider, Cloud-LLM/Private-DB Startup Invariant & Socket-Level Egress Guard
+
+**Class:** CWE-200 exposure of private data to a third party (well data sent to cloud providers) / CWE-1188 insecure default (a real provider selected by default or inferred from a URL) / CWE-798 lingering credentials.
+**Discovery:** D0 pass (Phase D replaces C3/C4; nothing is connected to a model until the Ollama machine). Human step outside code, still pending: revoke the keys at the provider consoles — Google AI Studio (`GEMINI_API_KEY`, `GEMINI_API_KEY1`–`4`) and build.nvidia.com (`NVIDIA_API_KEY`). Removing a key from `.env` does not revoke it, and pool rotation means one cancelled key leaves the pool working.
+**Patch:**
+  1. **CREDENTIAL NAMES ENUMERATED** (both repos + rakeza + CI/deploy; the full table is in the D0 report). scal: `GEMINI_API_KEY` and every `GEMINI_API_KEY*` (config.py scans the prefix), `LLM_API_KEYS`/`LLM_API_KEY`, legacy `NVIDIA_API_KEY` and `NVIDIA_API_KEY*` (adapter), `SCAL_LLM_BASE_URL`/`SCAL_LLM_MODEL` (provider-selecting until D0), `DATABASE_URL` (Neon credentials inside), `ADMIN_PIN`, `USER_PIN`, `KB_INGEST_SECRET`, `KB_INGEST_PASSWORD`, `DB_POSTGRES_PASSWORD`, `N8N_ENCRYPTION_KEY`, `ALERT_SMTP_PASSWORD`, `ALERT_WEBHOOK_URL`, `REDIS_URL`, evals `AVIEL_API_TOKEN`. pvt: `LLM_API_KEYS`/`LLM_API_KEY`, `AGENT_LLM_API_KEYS`/`AGENT_LLM_API_KEY`, `NVIDIA_API_KEY*`, `KB_INGEST_PASSWORD`, `SCAL_API_PIN`, `PG_PASSWORD`, `ALERT_SMTP_PASSWORD`, `ALERT_WEBHOOK_URL`, `REDIS_URL`, frontend `VITE_PVT_TOKEN`. rakeza: `DB_PASSWORD`. Off-machine copies: GitHub Actions `secrets.GEMINI_API_KEY`, `secrets.NVIDIA_API_KEY`; Render env `GEMINI_API_KEY`, `DATABASE_URL`, `KB_INGEST_PASSWORD`, `KB_INGEST_SECRET`, `ADMIN_PIN`.
+  2. **MOCK BY DEFAULT** (`llm_adapter.py`, both byte-identical copies). `LLM_PROVIDER` unset → `mock`; only `{prefix}_PROVIDER` selects a provider — URL inference (`_infer_provider_from_url`) deleted, so a legacy `SCAL_LLM_BASE_URL`, a model name or a key on its own never selects Gemini/NVIDIA. `mock` opens no connection (deterministic text derived from the messages, no tool calls, no keys, `keys_degraded()` False); `is_cloud()` names nvidia|gemini|openai. pvt `AGENT_CHAT` default ollama → mock (`AGENT_LLM_PROVIDER=ollama` opts in; URL/model still from `OLLAMA_URL`/`OLLAMA_MODEL`).
+  3. **STARTUP INVARIANT `assert_no_cloud_llm_with_private_db()`** (scal `app.py`: lifespan + `__main__`; pvt `src/api/app.py`: lifespan). A cloud provider on the chat adapter (pvt: on either adapter), or a real `GEMINI_API_KEY` (the embedding provider — the corpus leaves through it too), while the private database is reachable → `RuntimeError`, refuse to start. Reachability is the live pool (`_PG_AVAILABLE`) in scal and a live `SELECT 1` on the hub Postgres in pvt — not the env string. Proven against the real local `.env` outside pytest: scal (Neon reachable + Gemini keys) now refuses to start until the keys are removed — intended. `validate_gemini_api_keys` runs only when a real key is configured (no key = embeddings off, a warning, no startup call), and `KnowledgeBase._embed` returns None without a key instead of sending `DUMMY_KEY` to Google.
+  4. **SOCKET-LEVEL EGRESS GUARD** (`egress_guard.py` at scal root; copy at `pvt-ai-pipeline/tests/egress_guard.py`; armed by `tests/conftest.py`, `evals/conftest.py` and pvt `tests/conftest.py` BEFORE any app import). `socket.socket.connect`/`connect_ex` raise `EgressBlocked` for any non-loopback address (hostnames are never resolved); every attempt is recorded and the autouse fixture fails the responsible test even when the caller swallowed the exception (verified: a test doing `try: connect(192.0.2.1) except Exception: pass` makes the run fail at teardown); `COLLECTION_ATTEMPTS` asserts nothing egressed at import/collection. The same arm pins the process offline — `LLM_PROVIDER`/`AGENT_LLM_PROVIDER=mock`, `DATABASE_URL=""`, `HF_HUB_OFFLINE=1`, `GEMINI_API_KEY=DUMMY_KEY`, every `*API_KEY*` name from `.env` present but empty so `load_dotenv(override=False)` cannot repopulate it. Stated limit: libpq (psycopg2) connects from C, outside Python sockets — Postgres targets are asserted by configuration (`DATABASE_URL == ""` in scal, `PG_HOST` loopback in pvt). Opt-out `ALLOW_EGRESS=1` for the quarantined live protocols only; the integration tests (`test_models.py`, `test_hviel_behavioral.py`) now require it explicitly instead of running whenever a key is present.
+  5. **FINDING — TEST RUNS WERE WRITING TO NEON.** Neon is reachable from this machine and `.env` sets `DATABASE_URL`, so `import app` under pytest opened a live pool: the read-only inventory shows 327 `m` rows for the eval-harness identity `test@prc.local`, `physics_audits`/`kb` rows for the eval fixtures, timestamps up to 2026-09-01. "Production Neon untouched" held for the scratch harnesses (run with `DATABASE_URL=""`) but not for `pytest tests/` / `pytest evals/`. The conftest pin ends this; asserted by `test_app_runs_on_the_mock_provider_with_no_private_db_under_tests`.
+  6. **DISCLOSURE INVENTORY (report only, full detail in the D0 report).** Embedded via Gemini (Neon `kb`): `API-RP 40-Core-Analysis.pdf` (195 chunks), `Mercury Injection Well T1-31.xls` (34), `FFCAL-OBP T1-31.xls` (27); `library_chunks` empty. Chat-side Files-API upload path: never exercised — 0 Files-API URIs in `m.url` across 458 turns, 0 upload lines in `logs/app.log`, and the code (introduced 5fb5c91, 2026-04-18) only ever uploaded image MIME types (spreadsheets/PDF/DOCX/text were always extracted locally). Identifiers in the system prompt before A2: `Well-Y` (Samples Y1–Y12; Y2 wettability; Y4 at 8130 ft, Rt 890 Ω·m, φ 6.8 %, fitted n = 2.14; FWL 8200 ft; MICP 12.4 % @ 50 psia, 21.3 % @ 75 psia; V_DP 0.9150/0.9339, LC 0.6245/0.6344), `Sample X5` (8120 ft, 1.2 mD, smectite 6.3 %); the extraction prompt still names `T1-31`, `Z11-47`, `MICP_TestA` 215 / 218.5 psi. The real well T1-31 lab workbooks and `Draft Final Report (CCA&SCAL) Well # T1-31 (LV.2).docx` were uploaded 35 times and their extracted text sent as chat context to gemini-2.5-pro / gemini-2.5-flash (Genkit and direct) and NVIDIA gpt-oss-120b / nemotron-3-super (`api_metrics`). Chroma `historical_scal_data` holds three real reports (`Well CE03-41 (LV-3)`, `Wells C228, C230, C323, C326-6`) embedded locally (384-dim MiniLM) — never sent for embedding, but returned as analog-well context into chat prompts by `hybrid_search`.
+**Verification:** RED→GREEN per file in the D0 report. Suites under the guard with zero egress attempts: SCAL 439 → 460 (456 passed + 3 live integration tests now skipped unless `ALLOW_EGRESS=1` + 1 collection-phase test run separately, passed); evals 43 passed + 5 skipped (unchanged); PVT 124 → 143, ruff clean under the CI rule set (`--select F`).
+**Status:** APPLIED IN WORKING TREE 2026-09-02. Human step pending: revoke the keys at the consoles, then delete `GEMINI_API_KEY*` and `SCAL_LLM_*` from scal `.env` and `NVIDIA_API_KEY` from pvt `.env`; until then hviel refuses to start locally (by design).
+
+---
+
 ### [2026-09-02] C2 — Ledger `sid` Fail-Closed, Bridge Follow-Ups, Sandbox-Label Pin & the Single Chat-Provider Adapter
 
 **Class:** CWE-345 Insufficient Verification of Data Authenticity (evidence looked up under a shared/empty key) / CWE-706 name-resolution (three-way provider naming lie) / CWE-312 credential-in-log exposure removed / hallucination-channel closure.
@@ -745,17 +761,21 @@ be committed to the repository and exposed publicly on GitHub.
 
 ## 5. Model and API Stability
 
-**Chat provider (C2, 2026-09-02):** every chat call routes through the single
-provider-neutral adapter `llm_adapter.py` (byte-identical copy in
-`pvt-ai-pipeline/src/utils/`, drift-tested). Provider and model are selected by
-environment only — `LLM_PROVIDER` (nvidia | gemini | ollama | openai),
-`LLM_MODEL`, `LLM_BASE_URL`, `LLM_API_KEYS` — and the model reported anywhere
-(`/api/diag`, `api_metrics`, logs) is the model actually sent on the wire. No
-model name is hardcoded in the chat path. The wire format is OpenAI
-chat/completions, which all four providers speak. Gemini remains selectable as a
-chat provider (`LLM_PROVIDER=gemini`) until C3's embedding migration clears the
-model-acceptance gate for a replacement; the **embedding** path
-(`GEMINI_API_KEY`, `gemini-embedding-2`) is untouched by C2.
+**Chat provider (C2, 2026-09-02; D0 air-gap 2026-09-02):** every chat call
+routes through the single provider-neutral adapter `llm_adapter.py`
+(byte-identical copy in `pvt-ai-pipeline/src/utils/`, drift-tested). Provider
+and model are selected by environment only — `LLM_PROVIDER` (mock | ollama |
+nvidia | gemini | openai, **default `mock`**), `LLM_MODEL`, `LLM_BASE_URL`,
+`LLM_API_KEYS` — and the model reported anywhere (`/api/diag`, `api_metrics`,
+logs) is the model actually sent on the wire. No model name is hardcoded in the
+chat path; no URL, model or key selects a provider on its own. The wire format
+is OpenAI chat/completions, which every real provider speaks; `mock` opens no
+connection. A cloud provider (or a real `GEMINI_API_KEY`) while `DATABASE_URL`
+is reachable is a startup hard-fail (`assert_no_cloud_llm_with_private_db`).
+Gemini remains selectable (`LLM_PROVIDER=gemini`, scratch store only) until the
+quarantined model-acceptance gate clears a local replacement on the Ollama
+machine; the **embedding** path (`GEMINI_API_KEY`, `gemini-embedding-2`) is
+disabled when no key is configured and migrates there too.
 
 | Parameter | Value | Reason |
 |---|---|---|
