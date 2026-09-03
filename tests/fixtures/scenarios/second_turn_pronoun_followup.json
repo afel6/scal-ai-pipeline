@@ -1,0 +1,9 @@
+{
+  "name": "second_turn_pronoun_followup",
+  "description": "C2 item 1.2: a second-turn follow-up (\"Explain the wettability part.\") has no referent on its own. The old hub bridge forwarded the bare question, so the model never saw turn one (sample D2-1) and answered about nothing in particular. scal's chat() must carry history into the model's messages, and the hub's forwarded thread envelope (CONVERSATION SO FAR ... CURRENT QUESTION: ...) must reach the model verbatim.",
+  "on_exhausted": "error",
+  "steps": [
+    {"assistant": "## Wettability of sample D2-1 (Well-D2)\nSample D2-1 is water-wet: Amott water index Iw = 0.680, Amott oil index Io = 0.050, USBM areas A1 = 3.200 and A2 = 1.000 (USBM index log(A1/A2) > 0)."},
+    {"assistant": "For sample D2-1 the wettability call rests on two independent measures: the Amott water index (0.680) far exceeds the oil index (0.050), and the USBM area ratio A1/A2 = 3.2 gives a positive USBM index. Both point the same way, so D2-1 is classified water-wet."}
+  ]
+}

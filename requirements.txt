@@ -1,58 +1,39 @@
 # ── Core web framework ────────────────────────────────────────────────────────
 fastapi>=0.115.0
 uvicorn[standard]>=0.32.0
-python-multipart>=0.0.12   # required for FastAPI Form() and File() uploads
+python-multipart>=0.0.12
 
 # ── AI / LLM SDKs ─────────────────────────────────────────────────────────────
-# google-generativeai (legacy SDK) intentionally removed — we use google-genai only
-# anthropic intentionally removed — document generation uses Gemini + local python-docx/openpyxl
-google-genai>=1.16.0
-# Genkit is PINNED: app.py imports `from genkit.ai import Genkit` and
-# `from genkit.plugins.google_genai import GoogleAI`. The genkit.ai module layout
-# is version-specific — genkit>=0.5 moved/removed it, so a bare `genkit` resolves
-# to the latest (0.7.x) on a clean install (CI/Render) and breaks import with
-# `ModuleNotFoundError: No module named 'genkit.ai'`. Pin to the 0.4.0 line and
-# include the GoogleAI plugin package explicitly (it was previously missing).
-genkit==0.4.0
-genkit-plugin-google-genai==0.4.0
-
+google-genai==1.16.0
+# genkit removed 2026-09-01 (Phase B5): the Genkit registration and its 7
+# placeholder tool stubs were deleted — nothing imports genkit any more.
 
 # ── Data & numerics ───────────────────────────────────────────────────────────
-numpy>=1.26.0
+numpy>=1.26.2
 pandas>=2.2.0
 scipy>=1.14.0
 
 # ── Visualisation ─────────────────────────────────────────────────────────────
 matplotlib>=3.9.0
-# streamlit removed — the server never imports or launches it. It only appears as
-# *generated* text: llm_insight_generator.py / dashboard_architect.py / visualizer.py
-# write standalone app_dashboard.py scripts to outputs/ for the user to run separately.
-# Those generated dashboards are never executed by this FastAPI service.
-# seaborn removed — not imported anywhere; matplotlib used directly with PRC palette
 
 # ── Document generation ───────────────────────────────────────────────────────
 python-docx>=1.1.0
-python-pptx>=1.0.0
-openpyxl>=3.1.0
-xlrd>=2.0.1                  # Required for legacy .xls files
-reportlab>=4.2.0
+python-pptx==1.0.0
+openpyxl==3.1.5
+xlrd==2.0.1
+reportlab==4.2.0
 
 # ── PDF & HTML parsing ────────────────────────────────────────────────────────
-pdfplumber>=0.10.0             # PDF text extraction for SCAL file uploads
-# PyPDF2: not a direct dep — file_reader.py uses it as a conditional fallback only if
-# pdfplumber is absent (which never happens on Render since pdfplumber is listed above)
-# beautifulsoup4 removed — no HTML scraping in production paths
-# lxml removed — was only a transitive dep of beautifulsoup4
+pdfplumber>=0.10.0
 
 # ── Database ──────────────────────────────────────────────────────────────────
-psycopg2-binary>=2.9.9     # PostgreSQL driver; SQLite is stdlib (no extra dep)
-chromadb>=0.4.0             # Vector DB only for the legacy/analog-well path (rag_database.py,
-                           # ingest_legacy.py, e2e_test.py) — NOT the live chat flow (app.py)
+psycopg2-binary>=2.9.9
+chromadb>=0.4.0
 
 # ── Utilities ─────────────────────────────────────────────────────────────────
 python-dotenv>=1.0.0
 pydantic>=2.0.0
-aiofiles>=24.1.0
-slowapi>=0.1.9              # Rate limiting middleware (optional import with try/except in app.py)
-defusedxml>=0.7.1           # XML External Entity (XXE) protection
-
+pydantic-settings>=2.2.1
+slowapi>=0.1.9
+redis>=5.0.1
+defusedxml==0.7.1

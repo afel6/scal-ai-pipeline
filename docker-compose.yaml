@@ -5,7 +5,7 @@ services:
     restart: always
     environment:
       POSTGRES_USER: ${DB_POSTGRES_USER:-prc_user}
-      POSTGRES_PASSWORD: ${DB_POSTGRES_PASSWORD:-prc_password_1509}
+      POSTGRES_PASSWORD: ${DB_POSTGRES_PASSWORD:?set DB_POSTGRES_PASSWORD in .env — no default}
       POSTGRES_DB: ${DB_POSTGRES_DATABASE:-prc_hub}
     volumes:
       - prc_db_data:/var/lib/postgresql/data
@@ -24,15 +24,15 @@ services:
     container_name: prc-n8n
     restart: always
     ports:
-      - "5678:5678"
+      - "127.0.0.1:5678:5678"  # loopback-only — reach n8n via SSH tunnel, not the LAN
     environment:
       - DB_TYPE=postgresdb
       - DB_POSTGRESDB_HOST=postgres
       - DB_POSTGRESDB_PORT=5432
       - DB_POSTGRESDB_DATABASE=${DB_POSTGRES_DATABASE:-prc_hub}
       - DB_POSTGRESDB_USER=${DB_POSTGRES_USER:-prc_user}
-      - DB_POSTGRESDB_PASSWORD=${DB_POSTGRES_PASSWORD:-prc_password_1509}
-      - N8N_ENCRYPTION_KEY=${N8N_ENCRYPTION_KEY:-prc_secret_key_1509}
+      - DB_POSTGRESDB_PASSWORD=${DB_POSTGRES_PASSWORD:?set DB_POSTGRES_PASSWORD in .env — no default}
+      - N8N_ENCRYPTION_KEY=${N8N_ENCRYPTION_KEY:?set N8N_ENCRYPTION_KEY in .env — no default}
       - N8N_HOST=localhost
       - N8N_PORT=5678
       - N8N_PROTOCOL=http
@@ -44,15 +44,10 @@ services:
     networks:
       - prc-net
 
-  tunnel:
-    image: cloudflare/cloudflared:latest
-    container_name: prc-tunnel
-    command: tunnel --url http://n8n:5678
-    restart: always
-    depends_on:
-      - n8n
-    networks:
-      - prc-net
+  # Removed: a cloudflared quick-tunnel (`tunnel --url http://n8n:5678`) that
+  # published the unauthenticated n8n workflow engine on a public URL. If
+  # external webhook access is genuinely required, use a NAMED cloudflare
+  # tunnel with an access policy — never an anonymous quick tunnel.
 
   # FastAPI backend — waits for postgres to pass its healthcheck before starting
   app:
@@ -62,7 +57,7 @@ services:
     ports:
       - "8000:8000"
     environment:
-      - DATABASE_URL=postgresql://${DB_POSTGRES_USER:-prc_user}:${DB_POSTGRES_PASSWORD:-prc_password_1509}@postgres:5432/${DB_POSTGRES_DATABASE:-prc_hub}
+      - DATABASE_URL=postgresql://${DB_POSTGRES_USER:-prc_user}:${DB_POSTGRES_PASSWORD:?set DB_POSTGRES_PASSWORD in .env — no default}@postgres:5432/${DB_POSTGRES_DATABASE:-prc_hub}
       - GEMINI_API_KEY=${GEMINI_API_KEY}
       - KB_INGEST_PASSWORD=${KB_INGEST_PASSWORD}
     volumes:

@@ -16,13 +16,13 @@ import {
 import axios from 'axios';
 
 import SidebarTabs       from './SidebarTabs';
-import Mermaid           from './Mermaid';
 import VisualAudit       from './VisualAudit';
 import SimulationHeatmap from './SimulationHeatmap';
 import KrCurvePlot from './components/KrCurvePlot';
 import AdminDashboard    from './AdminDashboard';
 import Login             from './components/Login';
 import PetrophysicalTable from './components/PetrophysicalTable';
+import StudioView         from './components/StudioView';
 import { renderMessageContent } from './components/MessageRenderer';
 import { FeedbackModal, PrivacyModal, TermsModal, CookieConsent, AdminLoginModal,
 trackEvent } from './PrcModals';
@@ -36,6 +36,28 @@ const WELCOME_MSG = {
       + 'with SCAL analysis, petrophysical interpretation, and professional report generation.\n\n'
       + 'Please state your Well Name, paste lab data, or attach Word, Excel, or PDF files to begin.',
 };
+
+// Staged "thinking" messages shown during the 90-160s NVIDIA grounding call so the
+// engineer sees real progress instead of a static "Thinking..." that looks hung.
+const THINKING_STAGES = [
+  { at: 0,   text: 'Reading your request…' },
+  { at: 4,   text: 'Loading verified ground-truth data…' },
+  { at: 12,  text: 'Cross-checking sheets & columns…' },
+  { at: 25,  text: 'Running petrophysical grounding…' },
+  { at: 45,  text: 'Still verifying every cited value…' },
+  { at: 70,  text: 'Large file — this can take up to ~2 min…' },
+  { at: 100, text: 'Almost done — finalizing citations…' },
+];
+function thinkingText(elapsedSecs) {
+  let msg = THINKING_STAGES[0].text;
+  for (const s of THINKING_STAGES) if (elapsedSecs >= s.at) msg = s.text;
+  return msg;
+}
+function formatElapsed(secs) {
+  const m = Math.floor(secs / 60);
+  const s = secs % 60;
+  return m > 0 ? `${m}:${String(s).padStart(2, '0')}` : `${s}s`;
+}
 
 // Regex-based intent detection — avoids routing "what is a chart?" to the 280s POST path
 const _DOC_INTENT = /\b(generate|create|export|download|make|produce)\b.{0,50}\b(report|document|excel|word|docx|xlsx|pdf|powerpoint|pptx)\b/i;
@@ -52,7 +74,13 @@ function timeAgo(ts) {
 
 export default function App() {
   const [user, setUser] = useState(() => {
-    try { return JSON.parse(localStorage.getItem('prc_user')); }
+    try {
+      const u = JSON.parse(localStorage.getItem('prc_user'));
+      // Users persisted before token auth existed have no session token —
+      // every API call would 401, so force a fresh login instead.
+      if (!u?.token) { localStorage.removeItem('prc_user'); return null; }
+      return u;
+    }
     catch { return null; }
   });
 
@@ -85,6 +113,7 @@ export default function App() {
   const [cognitiveMode,  setCognitiveMode]  = useState('');
 
   const [docRetrying,    setDocRetrying]    = useState(false);
+  const [thinkingElapsed,setThinkingElapsed]= useState(0);
 
   const messagesEndRef    = useRef(null);
   const inputRef          = useRef(null);
@@ -95,6 +124,15 @@ export default function App() {
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
   }, [messages]);
+
+  // ── "thinking" elapsed-time ticker — drives the staged status text so a
+  // 90-160s NVIDIA grounding call reads as "working" instead of "hung" ───────
+  useEffect(() => {
+    if (!loading) { setThinkingElapsed(0); return; }
+    setThinkingElapsed(0);
+    const iv = setInterval(() => setThinkingElapsed(s => s + 1), 1000);
+    return () => clearInterval(iv);
+  }, [loading]);
 
   // ── persist session id ─────────────────────────────────────────────────────
   useEffect(() => {
@@ -112,12 +150,18 @@ export default function App() {
     }
   }, [adminToken]);
 
+  // ── auth headers — session token issued by /api/auth on login ─────────────
+  const authHeaders = useMemo(
+    () => (user?.token ? { Authorization: `Bearer ${user.token}` } : {}),
+    [user?.token]
+  );
+
   // ── session loader — includes email for RLS (/api/session/:sid?email=) ────
   const handleLoadSession = useCallback(async (sid) => {
     if (!sid) return;
     const emailParam = user?.email ? `?email=${encodeURIComponent(user.email)}` : '';
     try {
-      const { data } = await axios.get(`${API_URL}/api/session/${sid}${emailParam}`);
+      const { data } = await axios.get(`${API_URL}/api/session/${sid}${emailParam}`, { headers: authHeaders });
       if (data.status === 'ok') {
         startTransition(() => {
           setSessionId(sid);
@@ -140,7 +184,7 @@ export default function App() {
       }
     } catch { /* silently ignore network errors on load */ }
     if (window.innerWidth < 768) setSidebarOpen(false);
-  }, [user?.email]); // recreates only when email changes — provides RLS param
+  }, [user?.email, authHeaders]); // recreates only when auth changes — provides RLS param
 
   // ── server wake — mount only, no session logic here ──────────────────────
   useEffect(() => {
@@ -170,10 +214,10 @@ export default function App() {
   const refreshSessions = useCallback(async () => {
     try {
       const emailParam = user?.email ? `?email=${encodeURIComponent(user.email)}` : '';
-      const { data }   = await axios.get(`${API_URL}/api/sessions${emailParam}`);
+      const { data }   = await axios.get(`${API_URL}/api/sessions${emailParam}`, { headers: authHeaders });
       setSessions(data);
     } catch { /* ignore */ }
-  }, [user]);
+  }, [user, authHeaders]);
 
   // Immediate fetch on login (refreshSessions recreates when user changes),
   // then keep polling every 8 s.
@@ -210,7 +254,7 @@ export default function App() {
     if (user?.email) {
       try {
         const form = new URLSearchParams({ email: user.email });
-        await axios.post(`${API_URL}/api/clear-user-files`, form);
+        await axios.post(`${API_URL}/api/clear-user-files`, form, { headers: authHeaders });
       } catch (err) {
         console.error('Failed to clear user files:', err);
       }
@@ -220,28 +264,28 @@ export default function App() {
     setMessages([WELCOME_MSG]);
     setLastMessage(null);
     if (window.innerWidth < 768) setSidebarOpen(false);
-  }, [user]);
+  }, [user, authHeaders]);
 
 
   // ── delete session ─────────────────────────────────────────────────────────
   const handleDeleteSession = useCallback(async (e, sid) => {
     e.stopPropagation();
-    await axios.delete(`${API_URL}/api/session/${sid}?email=${encodeURIComponent(user?.email || '')}`);
+    await axios.delete(`${API_URL}/api/session/${sid}?email=${encodeURIComponent(user?.email || '')}`, { headers: authHeaders });
     await refreshSessions();
     if (sid === sessionId) {
       setSessionId('');
       localStorage.removeItem('prc_session_id');
       setMessages([WELCOME_MSG]);
     }
-  }, [sessionId, refreshSessions, user]);
+  }, [sessionId, refreshSessions, user, authHeaders]);
 
   // ── rename session ────────────────────────────────────────────────────────
   const handleRenameSession = useCallback(async (sid, newTitle) => {
     if (!sid || !newTitle) return;
     const form = new URLSearchParams({ title: newTitle, email: user?.email || '' });
-    await axios.post(`${API_URL}/api/session/${sid}/title`, form);
+    await axios.post(`${API_URL}/api/session/${sid}/title`, form, { headers: authHeaders });
     await refreshSessions();
-  }, [refreshSessions, user]);
+  }, [refreshSessions, user, authHeaders]);
 
   // ── admin PIN → backend auth ───────────────────────────────────────────────
   const handleAdminAuth = useCallback(async (pin) => {
@@ -261,27 +305,52 @@ export default function App() {
   }, []);
 
   // ── executive report download ──────────────────────────────────────────────
+  // The backend replies 202 + task_url; the report compiles in the background.
+  // Poll the task endpoint until it reports success, then fetch the file.
   const handleDownloadReport = useCallback(async () => {
     if (!sessionId || reportLoading) return;
     setReportLoading(true);
     try {
       const wellName = sessions.find(s => s.id === sessionId)?.title || 'UNKNOWN WELL';
       const form     = new URLSearchParams({ session_id: sessionId, well_name: wellName });
-      const { data } = await axios.post(`${API_URL}/api/report/generate`, form);
-      if (data.download_url) {
-        const a    = document.createElement('a');
-        a.href     = `${API_URL}${data.download_url}`;
-        a.download = data.download_url.split('/').pop();
-        document.body.appendChild(a);
-        a.click();
-        document.body.removeChild(a);
+      const { data } = await axios.post(`${API_URL}/api/report/generate`, form, { headers: authHeaders });
+      const taskUrl  = data.task_url || `/api/v1/tasks/${sessionId}`;
+
+      // poll every 3s for up to 5 minutes
+      for (let i = 0; i < 100; i++) {
+        await new Promise(r => setTimeout(r, 3000));
+        const { data: task } = await axios.get(`${API_URL}${taskUrl}`, { headers: authHeaders });
+        if (task.status === 'success' && task.result) {
+          // browser navigation cannot send headers — pass the token as a query param
+          const sep = task.result.includes('?') ? '&' : '?';
+          const url = `${API_URL}${task.result}${sep}token=${encodeURIComponent(user?.token || '')}`;
+          const a    = document.createElement('a');
+          a.href     = url;
+          a.download = task.result.split('/').pop();
+          document.body.appendChild(a);
+          a.click();
+          document.body.removeChild(a);
+          return;
+        }
+        if (task.status === 'error') {
+          console.error('[Report]', task.error);
+          setMessages(prev => [...prev, {
+            role: 'model', isError: true,
+            text: ` Report generation failed: ${task.error || 'unknown error'}. Please retry.`,
+          }]);
+          return;
+        }
       }
+      setMessages(prev => [...prev, {
+        role: 'model', isError: true,
+        text: ' Report generation timed out after 5 minutes. Please retry.',
+      }]);
     } catch (err) {
       console.error('[Report]', err);
     } finally {
       setReportLoading(false);
     }
-  }, [sessionId, sessions, reportLoading]);
+  }, [sessionId, sessions, reportLoading, authHeaders, user?.token]);
 
   // ── retry cooldown ─────────────────────────────────────────────────────────
   useEffect(() => {
@@ -316,6 +385,8 @@ export default function App() {
         session_id:    sessionId || '',
         engineer_name: user?.name  || 'PRC Engineer',
         user_email:    user?.email || '',
+        // EventSource cannot send headers — the backend accepts ?token=
+        token:         user?.token || '',
       });
 
       const es = new EventSource(`${API_URL}/api/chat/stream?${params}`);
@@ -372,9 +443,13 @@ export default function App() {
           } else if (data.type === 'error') {
             es.close();
             const isDocErr = data.msg?.toLowerCase().includes('document') || data.msg?.toLowerCase().includes('generat');
+            // Surface the upstream reason (already filtered server-side) so the
+            // engineer sees *why* it paused (e.g. "Upstream 503 — Gemini unavailable")
+            // instead of an opaque generic notice.
+            const detail   = data.msg ? ` (${data.msg})` : '';
             const userMsg  = isDocErr
-              ? ' Document generation paused. Please retry or request a different format.'
-              : ' Analysis paused. An error occurred during processing. Please retry your query.';
+              ? ` Document generation paused.${detail} Please retry or request a different format.`
+              : ` Analysis paused. An error occurred during processing.${detail} Please retry your query.`;
             setMessages(prev => [...prev, {
               role: 'model', text: userMsg, isError: true,
               isDocEngineError: isDocErr,
@@ -410,7 +485,7 @@ export default function App() {
         es.close();
         setMessages(prev => [...prev, {
           role: 'model',
-          text: `[!] Cannot connect to the PRC Hub backend. Port 8001 may not be running — start the backend server and retry.`,
+          text: `[!] Connection to the PRC Hub backend failed. If the server is running on port 8000, your session may have expired — log out and log back in.`,
           isError: true,
         }]);
         setLoading(false);
@@ -439,6 +514,7 @@ export default function App() {
     try {
       const response = await axios.post(`${API_URL}/api/chat`, formData, {
         timeout: 280_000,
+        headers: authHeaders,
         onUploadProgress: (e) => { if (e.progress >= 1) setUploadStatus('thinking'); },
       });
 
@@ -466,11 +542,11 @@ export default function App() {
       const msg = err.code === 'ECONNABORTED'
         ? ' Generation timed out. Deep analysis can take up to 4 minutes. Please try again or submit a smaller dataset.'
         : err.response?.status === 503
-        ? ' Gemini is currently unavailable after 5 attempts. Please try again in a few minutes or contact PRC support.'
+        ? ' SCAL AI is currently unavailable after 5 attempts. Please try again in a few minutes or contact PRC support.'
         : err.response?.status === 401
         ? ' Session authentication failed. Please log out and log back in.'
         : isNoBackend
-        ? ' Cannot connect to the PRC Hub backend (port 8001 is not responding). Please start the backend server and retry.'
+        ? ' Cannot connect to the PRC Hub backend (port 8000 is not responding). Please start the backend server and retry.'
         : ' Unable to reach the PRC Hub. Please check your connection and retry.';
       setMessages(prev => [...prev, {
         role: 'model', text: msg, isError: true,
@@ -484,7 +560,7 @@ export default function App() {
       setUploadStatus('');
       if (retryObj) setRetryCooldown(15);
     }
-  }, [input, files, sessionId, user, refreshSessions, simProgress]);
+  }, [input, files, sessionId, user, refreshSessions, simProgress, authHeaders]);
 
   const status = useMemo(() => ({
     online: { icon: <ShieldCheck className="w-3 h-3" />, text: 'Encrypted', color: 'text-emerald-500' },
@@ -542,7 +618,7 @@ export default function App() {
         <div className="p-4 border-b border-slate-800/60 flex items-center justify-between shrink-0">
           <div className="flex items-center gap-2">
             <Database className="w-5 h-5 text-yellow-500 shrink-0" />
-            <span className="text-sm font-black tracking-widest text-yellow-50">PRC STUDIES</span>
+            <span className="glow-amber text-sm font-black tracking-widest">PRC STUDIES</span>
           </div>
           <div className="flex items-center gap-2">
             <button
@@ -584,7 +660,7 @@ export default function App() {
       </aside>
 
       {/* ── Main ───────────────────────────────────────────────────────────── */}
-      <div className="flex-1 flex flex-col min-w-0 h-full">
+      <div className="flex-1 flex flex-col min-w-0 h-full scanlines">
 
         {/* Header */}
         <header className="bg-gloss border-b border-white/5 px-3 md:px-4 py-3 flex items-center justify-between shrink-0 gap-2 z-10 !border-x-0 !border-t-0 !rounded-none">
@@ -595,7 +671,7 @@ export default function App() {
             >
               <Menu className="w-5 h-5" />
             </button>
-            <span className="text-sm font-bold tracking-[0.2em] text-yellow-500 uppercase truncate hidden sm:block">
+            <span className="glow-amber text-sm font-bold tracking-[0.2em] uppercase truncate hidden sm:block">
               PRC PETROPHYSICS ENGINE
             </span>
           </div>
@@ -713,7 +789,7 @@ export default function App() {
                     {/* Download button */}
                     {msg.download_url && (
                       <button
-                        onClick={() => window.open(`${API_URL}${msg.download_url}`, '_self')}
+                        onClick={() => window.open(`${API_URL}${msg.download_url}${msg.download_url.includes('?') ? '&' : '?'}token=${encodeURIComponent(user?.token || '')}`, '_self')}
                         className="mt-4 w-full bg-yellow-600/20 hover:bg-yellow-600/40 border border-yellow-500/50 text-yellow-300 font-bold tracking-widest uppercase px-4 py-3 rounded-xl flex items-center justify-center gap-2 text-xs transition-all active:scale-95"
                       >
                         <Download className="w-4 h-4" />
@@ -796,7 +872,7 @@ export default function App() {
                       <div className="flex flex-col gap-2 py-1">
                         <div className="flex items-center gap-2">
                           <Loader className="w-3.5 h-3.5 text-amber-400 animate-spin shrink-0" />
-                          <span className="text-[10px] text-amber-300 font-mono tracking-widest uppercase font-bold">Gemini Under High Demand — Retrying Automatically...</span>
+                          <span className="text-[10px] text-amber-300 font-mono tracking-widest uppercase font-bold">SCAL AI Under High Demand — Retrying Automatically...</span>
                         </div>
                         <span className="text-[9px] text-slate-400 font-mono italic">Up to 5 attempts. Please do not close this tab.</span>
                       </div>
@@ -808,14 +884,26 @@ export default function App() {
                             <span className="text-[9px] text-yellow-400 font-black uppercase tracking-[0.2em]">{cognitiveMode}</span>
                           </div>
                         )}
-                        <div className="flex items-center gap-2">
-                          <div className="flex items-center gap-1.5">
-                            <span className="w-1.5 h-1.5 bg-yellow-500 rounded-xl animate-bounce" />
-                            <span className="w-1.5 h-1.5 bg-yellow-500 rounded-xl animate-bounce [animation-delay:0.2s]" />
-                            <span className="w-1.5 h-1.5 bg-yellow-500 rounded-xl animate-bounce [animation-delay:0.4s]" />
+                        <div className="flex items-center justify-between gap-4">
+                          <div className="flex items-center gap-2">
+                            <div className="flex items-center gap-1.5">
+                              <span className="w-1.5 h-1.5 bg-yellow-500 rounded-xl animate-bounce" />
+                              <span className="w-1.5 h-1.5 bg-yellow-500 rounded-xl animate-bounce [animation-delay:0.2s]" />
+                              <span className="w-1.5 h-1.5 bg-yellow-500 rounded-xl animate-bounce [animation-delay:0.4s]" />
+                            </div>
+                            {!cognitiveMode && (
+                              <span className="text-[10px] text-slate-500 font-mono uppercase tracking-widest ml-2 italic">
+                                {thinkingText(thinkingElapsed)}
+                              </span>
+                            )}
                           </div>
-                          {!cognitiveMode && <span className="text-[10px] text-slate-500 font-mono uppercase tracking-widest ml-2 italic">Thinking...</span>}
+                          {!cognitiveMode && thinkingElapsed >= 3 && (
+                            <span className="text-[9px] text-slate-600 font-mono shrink-0">{formatElapsed(thinkingElapsed)}</span>
+                          )}
                         </div>
+                        {thinkingElapsed >= 70 && (
+                          <span className="text-[9px] text-slate-500 font-mono italic">Large multi-sheet files take longer to verify — still working.</span>
+                        )}
                       </div>
                     )}
                   </div>
@@ -905,6 +993,17 @@ export default function App() {
               </div>
             </footer>
           </>
+        ) : activeTab === 'studio' ? (
+          <StudioView
+            messages={messages}
+            input={input}
+            setInput={setInput}
+            handleSend={handleSend}
+            loading={loading}
+            files={files}
+            setFiles={setFiles}
+            serverStatus={serverStatus}
+          />
         ) : activeTab === 'audit' ? (
           <VisualAudit />
         ) : (

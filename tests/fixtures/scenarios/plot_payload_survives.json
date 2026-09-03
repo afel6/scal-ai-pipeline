@@ -1,0 +1,9 @@
+{
+  "name": "plot_payload_survives",
+  "description": "A4 defect 3: a __PRC_PLOT__ payload is machine-read chart JSON and the gate used to rewrite inside it (the curve label 'RI Archie  n=1.850' carries cue + parameter + number), corrupting the chart. The cache-path RI fit SUCCEEDS (true n = 1.85) and the model then restates a WRONG value in prose (n = 1.999). The gate must strip the prose value while leaving the tool's plot payload byte-for-byte intact.",
+  "on_exhausted": "error",
+  "steps": [
+    {"assistant": {"text": "", "tool_calls": [{"name": "fit_petrophysical_curve", "args": {"model": "ri", "sample_name": "D2-1"}}]}},
+    {"assistant": {"text": "## Resistivity Index Fit\nThe RI vs Sw plot for Sample D2-1 is shown above (log-log Archie fit). The fitted Archie exponent n = 1.999 for this sample, indicating a water-wet system.\n"}}
+  ]
+}

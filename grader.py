@@ -1,7 +1,5 @@
 import os
-import json
-import pandas as pd
-import numpy as np
+import re
 from file_reader import read_file, to_prompt_string
 
 def grade_ai_response(filepath, ai_response_text):
@@ -117,9 +115,15 @@ def run_checks(ai_text, ground_truth):
                   else "PARTIAL" if any(c["status"] == "PASS" for c in numeric_checks)
                   else "FAIL"
     })
-    hallucinated_names = ["pcy4q", "provisional well", "well a", "well b",
-                          "unknown well", "sample well"]
-    found_hallucination = [n for n in hallucinated_names if n in ai_lower]
+    # word-boundary regexes: a bare substring check for "well a" falsely
+    # matched normal prose like "as well as" / "well above" and forced the
+    # system prompt to ban ordinary English. \b keeps only true name matches
+    # (e.g. "Well A", "Well B") failing the check.
+    hallucinated_name_patterns = [r"\bpcy4q\b", r"\bprovisional well\b",
+                                  r"\bwell a\b", r"\bwell b\b",
+                                  r"\bunknown well\b", r"\bsample well\b"]
+    found_hallucination = [p.replace(r"\b", "") for p in hallucinated_name_patterns
+                           if re.search(p, ai_lower)]
     checks.append({
         "rule": "No hallucinated well name",
         "status": "PASS" if not found_hallucination else "FAIL",

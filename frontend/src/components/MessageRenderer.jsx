@@ -1,9 +1,11 @@
 /* eslint-disable */
-import React from 'react';
+import React, { lazy, Suspense } from 'react';
 import { Database, Activity, CheckCircle2 } from 'lucide-react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
-import Mermaid from '../Mermaid';
+// Lazy — mermaid pulls cytoscape+katex (~800kB); only load it when a message
+// actually contains a diagram.
+const Mermaid = lazy(() => import('../Mermaid'));
 import PetrophysicalTable from './PetrophysicalTable';
 import SimulationHeatmap from '../SimulationHeatmap';
 import KrCurvePlot from './KrCurvePlot';
@@ -26,15 +28,15 @@ const KnowledgeCard = ({ title, content }) => {
           remarkPlugins={[remarkGfm]}
           components={{
             table: ({node, ...props}) => (
-              <div className="my-6 overflow-hidden rounded-2xl border border-yellow-500/10 bg-[#0c0c12]/60 backdrop-blur-md shadow-xl max-w-full overflow-x-auto">
-                <table className="w-full text-left border-collapse text-xs md:text-sm font-mono min-w-[400px]" {...props} />
+              <div className="my-4 overflow-hidden rounded-xl border border-yellow-500/15 bg-[#0a0a0f]/80 backdrop-blur-md shadow-2xl max-w-full overflow-x-auto custom-scrollbar">
+                <table className="w-full table-fixed text-left border-collapse text-xs font-mono" {...props} />
               </div>
             ),
             th: ({node, ...props}) => (
-              <th className="px-5 py-3.5 bg-yellow-950/20 border-b border-white/5 text-[10px] font-black text-yellow-500 uppercase tracking-widest" {...props} />
+              <th className="px-4 py-2.5 bg-yellow-950/30 border-b border-white/5 text-[10px] font-bold text-yellow-500 uppercase tracking-wider whitespace-normal break-words align-bottom" {...props} />
             ),
             td: ({node, ...props}) => (
-              <td className="px-5 py-3.5 border-b border-white/[0.03] text-slate-300 transition-colors" {...props} />
+              <td className="px-4 py-2.5 border-b border-white/[0.03] text-slate-300 transition-colors whitespace-normal break-words align-top" {...props} />
             ),
             a: ({node, ...props}) => <a className="text-yellow-400 hover:text-yellow-300 underline underline-offset-2" {...props} />,
             p: ({node, ...props}) => <p className="mb-4 whitespace-pre-wrap" {...props} />
@@ -369,7 +371,11 @@ export function renderMessageContent(text) {
   // ── RENDER ───────────────────────────────────────────────────────────────────
   return finalParts.map((part, i) => {
     if (part.type === 'img') return <img key={i} src={part.src} alt={part.alt} className="w-full rounded-xl border border-white/10 my-8 shadow-2xl animate-fade-in" />;
-    if (part.type === 'mermaid') return <Mermaid key={i} content={part.content} />;
+    if (part.type === 'mermaid') return (
+      <Suspense key={i} fallback={<div className="text-xs opacity-60 p-4">Rendering diagram…</div>}>
+        <Mermaid content={part.content} />
+      </Suspense>
+    );
     if (part.type === 'plot') return <KrCurvePlot key={i} plotData={part.content} />;
     if (part.type === 'simulation') return <SimulationHeatmap key={i} content={JSON.stringify(part.content)} />;
     if (part.type === 'plot_error') return (
@@ -420,20 +426,20 @@ export function renderMessageContent(text) {
       if (txt.toLowerCase().includes('data certified') || txt.toLowerCase().includes('analysis complete')) return <CertificationSeal key={i} />;
       if (txt.startsWith('###')) return <SectionHeader key={i} text={txt} />;
       return (
-        <div key={i} className="mb-6 font-sans leading-loose text-slate-300 opacity-80 text-[16px] prc-markdown">
+        <div key={i} className="mb-6 font-sans leading-relaxed text-slate-200 text-[15px] prc-markdown">
           <ReactMarkdown
             remarkPlugins={[remarkGfm]}
             components={{
               table: ({node, ...props}) => (
-                <div className="my-6 overflow-hidden rounded-2xl border border-yellow-500/10 bg-[#0c0c12]/60 backdrop-blur-md shadow-xl max-w-full overflow-x-auto">
-                  <table className="w-full text-left border-collapse text-xs md:text-sm font-mono min-w-[400px]" {...props} />
+                <div className="my-4 overflow-hidden rounded-xl border border-yellow-500/15 bg-[#0a0a0f]/80 backdrop-blur-md shadow-2xl max-w-full overflow-x-auto custom-scrollbar">
+                  <table className="w-full text-left border-collapse text-xs font-mono min-w-max" {...props} />
                 </div>
               ),
               th: ({node, ...props}) => (
-                <th className="px-5 py-3.5 bg-yellow-950/20 border-b border-white/5 text-[10px] font-black text-yellow-500 uppercase tracking-widest" {...props} />
+                <th className="px-4 py-2.5 bg-yellow-950/30 border-b border-white/5 text-[10px] font-bold text-yellow-500 uppercase tracking-wider whitespace-nowrap" {...props} />
               ),
               td: ({node, ...props}) => (
-                <td className="px-5 py-3.5 border-b border-white/[0.03] text-slate-300 transition-colors" {...props} />
+                <td className="px-4 py-2.5 border-b border-white/[0.03] text-slate-300 transition-colors whitespace-nowrap" {...props} />
               ),
               a: ({node, ...props}) => <a className="text-yellow-400 hover:text-yellow-300 underline underline-offset-2" {...props} />,
               p: ({node, ...props}) => <p className="mb-4 whitespace-pre-wrap" {...props} />

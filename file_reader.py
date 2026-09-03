@@ -1,12 +1,46 @@
 from pathlib import Path
 import re
-import json
 import numpy as np
+
+
+def _excel_engine(filepath):
+    """Pick the pandas Excel engine by file CONTENT, not extension.
+
+    Many core-lab exports are real .xlsx workbooks saved with a .xls name;
+    xlrd 2.x rejects those (it only reads legacy OLE2 .xls). Sniff the magic
+    bytes so both genuine .xls and mislabeled .xlsx ingest cleanly.
+    """
+    ext = Path(filepath).suffix.lower()
+    if ext in (".xlsx", ".xlsm"):
+        return "openpyxl"
+    if ext == ".xlsb":
+        return "pyxlsb"
+    if ext == ".ods":
+        return "odf"
+    if ext == ".xls":
+        # Detect by HEADER magic bytes, not zipfile.is_zipfile(): the latter scans
+        # the whole file for a ZIP end-of-central-directory signature and gives a
+        # FALSE POSITIVE on genuine OLE2 .xls workbooks (which often contain that
+        # byte sequence), wrongly routing them to openpyxl ("File contains no valid
+        # workbook part"). A real mislabeled .xlsx starts with the ZIP local-file
+        # header "PK\x03\x04"; a real legacy .xls starts with the OLE2 magic
+        # D0 CF 11 E0 A1 B1 1A E1.
+        try:
+            with open(filepath, "rb") as _f:
+                head = _f.read(8)
+            if head[:4] == b"PK\x03\x04":        # ZIP container => actually xlsx
+                return "openpyxl"
+            if head == b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1":  # OLE2 => genuine .xls
+                return "xlrd"
+        except Exception:
+            pass
+        return "xlrd"
+    return "openpyxl"
+
 
 def _read_excel(filepath):
     import pandas as pd
-    ext = Path(filepath).suffix.lower()
-    engine = "xlrd" if ext == ".xls" else "openpyxl"
+    engine = _excel_engine(filepath)
     xl = pd.ExcelFile(filepath, engine=engine)
     result = {"type": "excel", "sheets": {}}
 
@@ -156,8 +190,8 @@ def smart_read_csv(filepath: str, encodings: list = None, **kwargs):
             logger.warning(f"Encoding {encoding} failed to decode {filepath}. Error: {str(e)}")
             if idx == len(encodings) - 1:
                 raise ValueError(
-                    f"Failed to decode CSV file. File encoding is unsupported. "
-                    f"Please save the data using standard UTF-8 or Latin1 format."
+                    "Failed to decode CSV file. File encoding is unsupported. "
+                    "Please save the data using standard UTF-8 or Latin1 format."
                 ) from e
 
 def _read_csv(filepath):
@@ -629,28 +663,9 @@ def _format_column_array(col_name, info):
 # GENERIC SCAL EXTRACTION — 3-LAYER DETECTION SYSTEM
 # ──────────────────────────────────────────────────────────────────────────────
 
-# Layer 1: test-type keyword rules — checked in order, first match wins.
-# Keywords are matched against the combined lowercase string of:
-#   filename + sheet names + all column/label names in the file.
-_TEST_TYPE_RULES = [
-    ("MICP", [
-        "mercury", "micp", "s_hg", "hg sat", "hg injection",
-        "mercury injection", "capillary pressure hg",
-    ]),
-    ("KW_THROUGHPUT", [
-        "throughput", "kw vs", "kw_vs", "formation damage",
-        "sensitivity test", "cum.pv.inj", "fluid sensitivity",
-        "kw throughput",
-    ]),
-    ("IMBIBITION", [
-        "imbibition", "centrifuge", "w-o", "capillary pressure",
-        "porous plate",
-    ]),
-    ("REL_PERM", [
-        "relative perm", "kr data", " kro ", " krw ",
-        "rel perm", "relative permeability",
-    ]),
-]
+# Layer 1: test-type detection — see _detect_test_type(), which scores with
+# SCALFileHandler.KEYWORDS (the shared weighted classifier) and maps the
+# handler's type key onto the file_reader vocabulary.
 
 # Layer 2: semantic column aliases per test type.
 # Each key is the canonical field name; the list is all known column-name variants.
@@ -708,6 +723,19 @@ _COLUMN_ALIASES = {
         "kro": ["Kro", "Kro/Kro_max", "Oil Kr", "K_ro", "kro"],
         "krw": ["Krw", "Krw/Krw_max", "Water Kr", "K_rw", "krw"],
     },
+    "overburden_compaction": {
+        "pressure": [
+            "Pressure_psi", "Pressure", "Net overburden pressure", "Overburden Pressure",
+            "Confining Pressure", "stress", "press", "net overburden", "pressure, Psi", "pressure, psi", "pressure (psi)"
+        ],
+        "porosity": [
+            "Porosity_percent", "Porosity", "porosity (%)", "poro", "phi", "porosity, %", "porosity %"
+        ],
+        "permeability": [
+            "Air_Permeability_md", "Klinkenberg_Permeability_md", "permeability",
+            "air permeability", "klinkenberg", "perm", "k_l", "kl", "ka"
+        ],
+    },
 }
 
 # Sheet names containing these keywords are aggregate/summary sheets — skip them
@@ -740,12 +768,46 @@ def _fuzzy_match(col_name: str, aliases: list) -> bool:
 
 
 def _detect_test_type(filename: str, sheet_names: list, all_text: str) -> str:
-    """Layer 1: detect SCAL test type from filename, sheet names, and header text."""
+    """Layer 1: detect SCAL test type from filename, sheet names, and header text.
+
+    Delegates to the weighted keyword classifier from SCALFileHandler.KEYWORDS
+    (same scoring rules as SCALFileHandler.identify) so the two ingestion paths
+    cannot drift apart, then maps the handler's type key onto the file_reader
+    vocabulary.
+    """
+    # Imported locally to avoid a circular import between the two modules.
+    from scal_file_handler import SCALFileHandler
+
     combined = (filename + " " + " ".join(sheet_names) + " " + all_text).lower()
-    for ttype, keywords in _TEST_TYPE_RULES:
-        if any(k in combined for k in keywords):
-            return ttype
-    return "UNKNOWN"
+
+    scores = {k: 0 for k in SCALFileHandler.KEYWORDS}
+    for data_type, keywords in SCALFileHandler.KEYWORDS.items():
+        for kw in keywords:
+            kw_clean = kw.strip()
+            # Enforce word boundary for short/abbreviated keywords
+            if len(kw_clean) <= 4:
+                found = bool(re.search(rf"\b{re.escape(kw_clean)}\b", combined))
+            else:
+                found = kw_clean in combined
+
+            if found:
+                weight = (10 if kw_clean in ['rpm', 'centrifuge', 'speed', 'produced volume', 'sensitivity test']
+                          else 5 if kw_clean == 'kl'
+                          else 1)
+                scores[data_type] += weight
+
+    best = max(scores, key=scores.get)
+    if scores[best] == 0:
+        best = "UNKNOWN"
+
+    mapping = {
+        "MICP": "MICP",
+        "KR": "REL_PERM",
+        "PC": "IMBIBITION",
+        "FDAM": "KW_THROUGHPUT",
+        "RCAL": "overburden_compaction",
+    }
+    return mapping.get(best, "UNKNOWN")
 
 
 def _extract_well(filename: str) -> str:
@@ -906,6 +968,22 @@ def _scal_extract_sheet(sheet_data: dict, sample_id: str,
                     unit = "fraction (normalised from %)"
                 result[field] = {"values": vals, "unit": unit, "method": "series"}
 
+    # ── overburden_compaction: pressure, porosity, permeability series ─────
+    elif test_type == "overburden_compaction":
+        aliases = _COLUMN_ALIASES["overburden_compaction"]
+        for field, field_aliases in aliases.items():
+            match = _find_col(col_dict, field_aliases)
+            if match:
+                vals = match[1].get("values", [])
+                unit = "fraction" if field == "porosity" and vals and max(vals) <= 1.0 else "units"
+                if field == "porosity" and vals and max(vals) > 1.0:
+                    unit = "%"
+                elif field == "pressure":
+                    unit = "psi"
+                elif field == "permeability":
+                    unit = "mD"
+                result[field] = {"values": vals, "unit": unit, "method": "series"}
+
     return result
 
 
@@ -1022,7 +1100,6 @@ def _format_scal_for_prompt(scal: dict) -> str:
                 vals = info["values"]
                 unit = info.get("unit", "")
                 note = info.get("note", "")
-                note_str = f"  NOTE: {note}" if note else ""
                 n    = len(vals)
                 frst = vals[0]  if vals else "n/a"
                 lst  = vals[-1] if vals else "n/a"
@@ -1062,6 +1139,119 @@ def _format_scal_for_prompt(scal: dict) -> str:
 # MAIN ENTRY POINTS (public API — signatures unchanged)
 # ──────────────────────────────────────────────────────────────────────────────
 
+def _df_columns_stats(df):
+    """Summarize a DataFrame into the same column dict shape _read_csv produces:
+    numeric columns -> {count,first,last,min,max,values}; text columns -> {type,sample}.
+    Strings that look numeric are coerced (tolerating thousands separators)."""
+    import pandas as pd
+    cols = {}
+    for col in df.columns:
+        series = df[col]
+        coerced = pd.to_numeric(
+            series.astype(str).str.replace(",", "", regex=False).str.strip(),
+            errors="coerce",
+        )
+        frac_num = float(coerced.notna().mean()) if len(coerced) else 0.0
+        if frac_num > 0.6:
+            vals = [None if pd.isna(x) else round(float(x), 6) for x in coerced]
+            clean = [v for v in vals if v is not None]
+            if clean:
+                cols[str(col)] = {
+                    "count": len(vals), "first": clean[0], "last": clean[-1],
+                    "min": round(min(clean), 6), "max": round(max(clean), 6),
+                    "values": vals,
+                }
+        else:
+            cols[str(col)] = {
+                "type": "text",
+                "sample": series.dropna().astype(str).head(5).tolist(),
+            }
+    return cols
+
+
+def _read_xml(filepath):
+    """Parse PRC_Reservoir_Model / Petrel-KAPPA style XML exports.
+
+    The petrophysical data is carried in a CDATA payload (markdown tables,
+    CSV, or whitespace-delimited text), not as XML row/column elements — so we
+    parse the envelope with ElementTree, pull the text, and route it through the
+    existing tabular parsers. Returns an 'excel'-shaped dict (one sheet per
+    markdown table), a 'csv'-shaped dict (single table), or 'txt' as a fallback,
+    so to_prompt_string() and the SCAL extractor consume it unchanged.
+    """
+    import xml.etree.ElementTree as ET
+    import io
+    import pandas as pd
+
+    try:
+        root = ET.parse(filepath).getroot()
+    except Exception as e:
+        return {"error": f"XML parse failed: {e}"}
+
+    well = ""
+    well_el = root.find(".//Well")
+    if well_el is not None:
+        well = (well_el.get("name") or (well_el.text or "")).strip()
+
+    # The measurement payload lives in <TabularData>; prefer it so Header/title
+    # prose (e.g. "Petrel / KAPPA Compatible") never contaminates the table header.
+    td = root.find(".//TabularData")
+    if td is not None and td.text and td.text.strip():
+        cdata = td.text.strip()
+    else:
+        payloads = [el.text.strip() for el in root.iter()
+                    if el.text and len(el.text.strip()) > 20]
+        cdata = "\n\n".join(payloads).strip()
+    if not cdata:
+        cdata = ET.tostring(root, encoding="unicode")
+
+    # 1) Markdown pipe tables
+    blocks, cur = [], []
+    for ln in cdata.splitlines():
+        if ln.lstrip().startswith("|"):
+            cur.append(ln)
+        elif cur:
+            blocks.append(cur); cur = []
+    if cur:
+        blocks.append(cur)
+
+    sheets = {}
+    for block in blocks:
+        rows = []
+        for ln in block:
+            cells = [c.strip() for c in ln.strip().strip("|").split("|")]
+            if cells and set("".join(cells)) <= set("-: "):
+                continue  # markdown separator row
+            rows.append(cells)
+        if len(rows) < 2:
+            continue
+        width = max(len(r) for r in rows)
+        rows = [r + [""] * (width - len(r)) for r in rows]
+        df = pd.DataFrame(rows[1:], columns=rows[0])
+        sheets[f"Table_{len(sheets) + 1}"] = {
+            "labeled_values": {},
+            "numeric_columns": _df_columns_stats(df),
+            "raw_csv": df.to_csv(index=False),
+        }
+    if sheets:
+        return {"type": "excel", "sheets": sheets,
+                "source_format": "petrel_xml", "well": well}
+
+    # 2) Whitespace- or comma-delimited single table
+    for sep in (r"\s+", ","):
+        try:
+            df = pd.read_csv(io.StringIO(cdata), sep=sep, engine="python",
+                             na_values=["N/A", "NaN", "na", "-", ""], comment="#")
+            if df.shape[1] >= 2 and df.shape[0] >= 1:
+                return {"type": "csv", "columns": _df_columns_stats(df),
+                        "shape": df.shape, "source_format": "petrel_xml", "well": well}
+        except Exception:
+            continue
+
+    # 3) Fallback: hand the raw payload to the model as text
+    return {"type": "txt", "content": cdata, "source_format": "petrel_xml"}
+
+
 def read_file(filepath, target_identifier=None):
     if not Path(filepath).exists():
         return {"error": f"File not found: {filepath}"}
@@ -1069,6 +1259,7 @@ def read_file(filepath, target_identifier=None):
     readers = {
         ".xlsx": _read_excel,
         ".xls":  _read_excel,
+        ".xml":  _read_xml,
         ".csv":  _read_csv,
         ".pdf":  _read_pdf,
         ".docx": lambda fp: _read_docx(fp, target_identifier),

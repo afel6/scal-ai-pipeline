@@ -10,51 +10,20 @@
 
 #          env-var secrets Â· slowapi rate limiting Â· dead code purged
 
-# --- PYDANTIC MONKEYPATCH FOR GENKIT HTTP_OPTIONS SCHEMA RESOLUTION ---
-try:
-    from pydantic.json_schema import GenerateJsonSchema
-    _orig_handle = GenerateJsonSchema.handle_invalid_for_json_schema
-    def _patched_handle(self, schema, error_info):
-        try:
-            return _orig_handle(self, schema, error_info)
-        except Exception:
-            return {"type": "object"}
-    GenerateJsonSchema.handle_invalid_for_json_schema = _patched_handle
-except Exception:
-    pass
-
-# --- PYDANTIC MONKEYPATCH FOR GENKIT TypeAdapter.json_schema PROPERTIES RESOLUTION ---
-try:
-    from pydantic import TypeAdapter
-    _orig_json_schema = TypeAdapter.json_schema
-    def ensure_properties(d):
-        if isinstance(d, dict):
-            if d.get("type") == "object" and "properties" not in d:
-                d["properties"] = {}
-            for v in list(d.values()):
-                ensure_properties(v)
-        elif isinstance(d, list):
-            for item in d:
-                ensure_properties(item)
-
-    def _patched_json_schema(self, *args, **kwargs):
-        schema = _orig_json_schema(self, *args, **kwargs)
-        ensure_properties(schema)
-        return schema
-    TypeAdapter.json_schema = _patched_json_schema
-except Exception:
-    pass
+# (The two Genkit-era pydantic monkeypatches that used to sit here were deleted
+# in D3.1: Genkit is gone since Phase B, and both shims swallowed every
+# schema-generation error into a bare {"type": "object"}.)
 
 from pathlib import Path
-import os, io, uuid, time, re, hmac, hashlib, secrets as _secrets
+import os, uuid, time, re, hmac, hashlib, secrets as _secrets
 import json as _json, logging, threading, asyncio
 import anyio
+from config import settings
 
 GLOBAL_EVENT_LOOP = None
 
 from contextlib import asynccontextmanager, contextmanager
-from typing import Optional
-from concurrent.futures import ThreadPoolExecutor
+from typing import Dict, List, Optional
 
 import numpy as np
 
@@ -84,15 +53,21 @@ from petrophysical_curves import Endpoints, KrCurveFitter
 
 from physics_validator import PhysicsGuard
 
-from scal_file_handler import SCALFileHandler, extract_file_data, _extract_pdf as _sfh_extract_pdf, _extract_docx as _sfh_extract_docx, strip_thinking_blocks, strip_placeholder_artifacts, clean_citation_clutter, validate_extraction_against_inventory, extract_absolute_file_truth, validate_permeability_column_binding, compress_traceability_ledger
-from file_reader import read_file, to_prompt_string, build_gemini_message
+from scal_file_handler import SCALFileHandler, extract_file_data, _extract_pdf as _sfh_extract_pdf, _extract_docx as _sfh_extract_docx, strip_thinking_blocks, strip_placeholder_artifacts, clean_citation_clutter, validate_extraction_against_inventory, extract_absolute_file_truth, validate_permeability_column_binding, compress_traceability_ledger, sanitize_prompt
+from file_reader import read_file, to_prompt_string, smart_read_csv
 
 from report_generator import PRCReportEngine
 from grader import grade_ai_response
 import data_validator
 import visualizer
-from llm_insight_generator import MasterEngineerNode, DashboardArchitectNode
+from llm_insight_generator import MasterEngineerNode
 from dashboard_architect import generate_universal_dashboard, detect_test_type
+from llm_json_utils import (
+    LLMJsonParseError,
+    CORRECTIVE_JSON_PROMPT,
+    parse_llm_json,
+    llm_json_with_retry,
+)
 
 import defusedxml
 defusedxml.defuse_stdlib()
@@ -101,14 +76,8 @@ defusedxml.defuse_stdlib()
 
 
 
-logging.basicConfig(
-
-    level=logging.INFO,
-
-    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
-
-)
-
+from logger_setup import request_id_var, setup_logging
+setup_logging(settings.DEBUG)
 _logger = logging.getLogger("PRC-Hub")
 
 
@@ -127,17 +96,24 @@ except Exception:
 
 
 
-# -- RATE LIMITER (optional dep) -----------------------------------------------
+# -- RATE LIMITER --------------------------------------------------------------
 
 try:
 
-    from slowapi import Limiter, _rate_limit_exceeded_handler
+    import sys
+
+    from slowapi import Limiter
 
     from slowapi.util import get_remote_address
 
     from slowapi.errors import RateLimitExceeded
 
-    _limiter = Limiter(key_func=get_remote_address)
+    _limiter = Limiter(
+        key_func=get_remote_address,
+        default_limits=["60/minute"],
+        storage_uri=settings.REDIS_URL or "memory://",
+        enabled=not (settings.TESTING or "pytest" in sys.modules or "PYTEST_CURRENT_TEST" in os.environ)
+    )
 
     _RATE_LIMIT = True
 
@@ -151,27 +127,66 @@ except ImportError:
 
 # -- SECRETS -------------------------------------------------------------------
 
-_GEMINI_POOL_RAW: list[str] = []
+GEMINI_KEY_POOL: list[str] = settings.gemini_keys
 
-for _k, _v in os.environ.items():
+# --- Chat LLM: the single provider-neutral adapter ------------------------- #
+# Every chat call routes through llm_adapter.ChatAdapter. Provider, model, URL
+# and keys come from the environment (LLM_PROVIDER / LLM_MODEL / LLM_BASE_URL /
+# LLM_API_KEYS; legacy SCAL_LLM_* and NVIDIA_API_KEY* still honoured). The
+# adapter reports success/failure to alerting — the provider-neutral signal
+# /health reads. Embeddings (GEMINI_KEY_POOL above) are NOT on this path.
+import alerting
+import retry_budget
+import tools_registry
+import llm_adapter
+CHAT = llm_adapter.ChatAdapter(
+    llm_adapter.load_config(),
+    on_success=alerting.record_llm_success,
+    on_failure=alerting.record_llm_failure,
+)
+# Retries of a whole chat turn on transient provider errors (the adapter
+# already rotates keys inside a single call).
+_CHAT_TURN_RETRIES = 3
 
-    if _k.startswith("GEMINI_API_KEY"):
 
-        _GEMINI_POOL_RAW.extend(x.strip() for x in _v.split(",") if x.strip())
+# ── D0 AIR-GAP INVARIANT ──────────────────────────────────────────────────────
+# "LLM last" is enforced, not remembered: a cloud chat provider, or a real
+# Gemini embedding key, configured while the private database is reachable is a
+# startup hard-fail. Local providers (mock, ollama) coexist with the database;
+# a cloud provider is allowed only with no private database (the quarantined
+# gate runs use a scratch store with DATABASE_URL blank).
+
+def _private_db_reachable() -> bool:
+    """The live Postgres pool, not the env string — DATABASE_URL set but
+    unreachable (SQLite fallback) is not a reachable private database."""
+    return bool(_PG_AVAILABLE)
 
 
-
-GEMINI_KEY_POOL: list[str] = list(dict.fromkeys(_GEMINI_POOL_RAW)) or [
-
-    os.getenv("GEMINI_API_KEY", "DUMMY_KEY").strip(' \n\r\t"\'')
-
-]
+def _real_embedding_key_configured() -> bool:
+    return bool(GEMINI_KEY_POOL) and GEMINI_KEY_POOL[0] not in ("", "DUMMY_KEY")
 
 
+def assert_no_cloud_llm_with_private_db() -> None:
+    cloud = []
+    if llm_adapter.is_cloud(CHAT.config.provider):
+        cloud.append(f"LLM_PROVIDER={CHAT.config.provider}")
+    if _real_embedding_key_configured():
+        cloud.append("GEMINI_API_KEY (embedding provider)")
+    if cloud and _private_db_reachable():
+        raise RuntimeError(
+            "SECURITY: cloud LLM provider configured (" + ", ".join(cloud) + ") while "
+            "the private database (DATABASE_URL) is reachable. Refusing to start: "
+            "private data must not leave the machine. Use LLM_PROVIDER=mock or ollama "
+            "and no cloud embedding key, or run without the private database."
+        )
 
-KB_INGEST_SECRET = os.getenv("KB_INGEST_SECRET", "").strip()
+KB_INGEST_SECRET = settings.KB_INGEST_SECRET
 
-ADMIN_PIN        = os.getenv("ADMIN_PIN", "").strip()
+ADMIN_PIN        = settings.ADMIN_PIN
+USER_PIN         = settings.USER_PIN or ADMIN_PIN
+if USER_PIN == ADMIN_PIN:
+    _logger.warning("[AUTH] USER_PIN is unset — user login shares the ADMIN_PIN. "
+                    "Set a distinct USER_PIN in the environment before production.")
 
 
 
@@ -183,9 +198,9 @@ _ADMIN_TOKEN_TTL: int              = 900  # 15 min
 
 # -- DATABASE LAYER ------------------------------------------------------------
 
-DATABASE_URL  = os.getenv("DATABASE_URL", "").strip()
+DATABASE_URL  = settings.DATABASE_URL
 
-DB_PATH       = str(Path(os.getenv("DB_DIR", ".")) / "chat_history.db")
+DB_PATH       = str(Path(settings.DB_DIR) / "chat_history.db")
 
 
 
@@ -234,22 +249,48 @@ _USER_TOKEN_TTL: int = 86400  # 24 hours
 _sqlite_executor = ThreadPoolExecutor(max_workers=1)
 
 def is_testing() -> bool:
-    """Returns True if running in a test suite (pytest)."""
-    return "pytest" in sys.modules or "PYTEST_CURRENT_TEST" in os.environ or os.getenv("TESTING") == "true"
+    """True only under a genuine pytest run. The deployable TESTING env flag
+    must never disable auth — verify_user_or_admin short-circuits on this."""
+    return "pytest" in sys.modules or "PYTEST_CURRENT_TEST" in os.environ
 
-def normalize_porosity_array(arr: np.ndarray) -> np.ndarray:
-    """Normalize porosity numpy array: convert percentage format (e.g. > 1.0) into fractional format (Security/Data issue 1)."""
-    if len(arr) == 0:
-        return arr
-    if np.max(arr) > 1.0:
-        return arr / 100.0
-    return arr
 
-def normalize_porosity_val(val: float) -> float:
-    """Normalize single porosity value: convert percentage to fraction if greater than 1.0 (Security/Data issue 1)."""
-    if val > 1.0:
-        return val / 100.0
-    return val
+def _launched_by_asgi_server() -> bool:
+    """True when this process was started by a real ASGI server CLI.
+
+    Keyed on the launcher (sys.argv[0] / SERVER_SOFTWARE), NOT on sys.modules —
+    `import app` pulls uvicorn into sys.modules even under pytest, so that would
+    false-positive. Under pytest argv[0] is the pytest/python launcher, never
+    uvicorn/gunicorn.
+    """
+    argv0 = os.path.basename(sys.argv[0]).lower() if sys.argv else ""
+    if "uvicorn" in argv0 or "gunicorn" in argv0:
+        return True
+    return os.environ.get("SERVER_SOFTWARE", "").lower().startswith("gunicorn")
+
+
+def assert_auth_bypass_disabled_in_production(force: bool = False) -> None:
+    """Hard-fail if the pytest auth bypass could be live outside a pytest run.
+
+    is_testing() short-circuits verify_user_or_admin; it must never be true in a
+    served process. Fail-closed inversion (C1 item 1.3): the PRIMARY trigger is
+    "is_testing() true while pytest is absent from sys.modules" — pytest actually
+    running is the one positive, reliable signal, whereas "is this a server" is a
+    negative signal with unbounded launcher shapes (uvicorn, gunicorn, hypercorn,
+    granian, …). The old enumerated server detection is kept as an additional
+    trigger (it also catches pytest-imported-inside-a-real-server), and force=True
+    covers `python app.py`. Under a genuine pytest run, pytest is in sys.modules,
+    so the suite keeps its bypass.
+    """
+    if not is_testing():
+        return
+    pytest_running = "pytest" in sys.modules
+    if not pytest_running or force or _launched_by_asgi_server():
+        raise RuntimeError(
+            "SECURITY: is_testing() is true outside a genuine pytest run — the "
+            "verify_user_or_admin auth bypass would be active. Refusing to start. "
+            "Unset PYTEST_CURRENT_TEST and ensure pytest is not imported in the "
+            "server process."
+        )
 
 def normalize_email(email: Optional[str]) -> Optional[str]:
     if not email:
@@ -263,17 +304,22 @@ def verify_user_or_admin(
     user_email: Optional[str] = Form(None),
     email_query: Optional[str] = Query(None)
 ):
-    """Enforces token-based or email-based authentication on all user-facing endpoints (Security Issue 1)."""
-    # 1. Allow bypass in pytest/testing environment
+    """Enforces token-based authentication on all user-facing endpoints (Security Issue 1)."""
+
     if is_testing():
         return True
+
+    # NOTE (Phase B1): the former `if not ADMIN_PIN: return True` escape was
+    # removed. It was a deployable backdoor — a deploy that forgot to set
+    # ADMIN_PIN left every user route wide open. Auth is now fail-closed: with no
+    # PIN there is simply no valid token, so every request is rejected. ADMIN_PIN
+    # is set from config (random default) and documented in .env.example; set a
+    # real value in the environment (checklist section 6).
 
     # Safely extract string values from FastAPI defaults
     auth_str = authorization if isinstance(authorization, str) else None
     token_str = token if isinstance(token, str) else None
     token_form_str = token_form if isinstance(token_form, str) else None
-    user_email_str = user_email if isinstance(user_email, str) else None
-    email_query_str = email_query if isinstance(email_query, str) else None
 
     # Normalize token input
     t = None
@@ -288,43 +334,46 @@ def verify_user_or_admin(
     if t:
         if t in _ADMIN_TOKENS and time.time() <= _ADMIN_TOKENS[t]:
             return True
-        if t in _USER_TOKENS and time.time() <= _USER_TOKENS[t]:
-            return True
+        rec = _USER_TOKENS.get(t)
+        if rec is not None:
+            # Legacy float entries (pre-identity-binding) carry no email.
+            exp = rec["exp"] if isinstance(rec, dict) else rec
+            bound = rec.get("email") if isinstance(rec, dict) else None
+            if time.time() <= exp:
+                # Identity binding (IDOR guard): a user token may only act on the
+                # email it was issued for. Admin tokens (above) are exempt.
+                supplied = normalize_email(user_email if isinstance(user_email, str) else None) \
+                    or normalize_email(email_query if isinstance(email_query, str) else None)
+                if supplied:
+                    if not bound:
+                        raise HTTPException(
+                            status_code=403,
+                            detail="Token is not bound to a user identity — log in with your email to access user data")
+                    if supplied != bound:
+                        raise HTTPException(
+                            status_code=403,
+                            detail="Token identity does not match the requested user")
+                return True
         raise HTTPException(status_code=401, detail="Invalid or expired token")
 
-    # 3. Fallback to user email if provided
-    req_email = normalize_email(user_email_str or email_query_str)
-    if not req_email:
-        raise HTTPException(status_code=401, detail="Authentication required: Token or email must be provided.")
+    raise HTTPException(status_code=401, detail="Authentication token required")
 
-    return True
 
-def sanitize_prompt(prompt: str) -> str:
-    """Sanitizes user prompt inputs against prompt injection attacks (Security Issue 3)."""
-    if not prompt:
-        return ""
-    adversarial_patterns = [
-        r"(?i)\bignore\s+(?:all\s+)?previous\s+instructions\b",
-        r"(?i)\bignore\s+(?:the\s+)?above\s+instructions\b",
-        r"(?i)\bignore\s+(?:the\s+)?system\s+prompt\b",
-        r"(?i)\byou\s+are\s+now\s+a\s+different\s+ai\b",
-        r"(?i)\bforget\s+(?:all\s+)?previous\s+instructions\b",
-        r"(?i)\bforget\s+(?:your\s+)?system\s+prompt\b",
-        r"(?i)\bswitch\s+(?:your\s+)?persona\b",
-        r"(?i)\bact\s+as\s+a\b",
-        r"(?i)\bnew\s+rule\b",
-        r"(?i)\bdo\s+not\s+follow\s+any\s+restrictions\b",
-        r"(?i)\breveal\s+(?:your\s+)?system\s+prompt\b",
-        r"(?i)\bshow\s+(?:your\s+)?system\s+prompt\b",
-        r"(?i)\bprint\s+(?:your\s+)?system\s+prompt\b",
-        r"(?i)\bwhat\s+is\s+your\s+system\s+prompt\b",
-        r"(?i)\boutput\s+(?:your\s+)?system\s+prompt\b",
-        r"(?i)\bexport\s+(?:your\s+)?system\s+prompt\b"
-    ]
-    sanitized = prompt
-    for pattern in adversarial_patterns:
-        sanitized = re.sub(pattern, "[PROMPT INJECTION BLOCK]", sanitized)
-    return sanitized
+def verify_user_or_admin_bearer(authorization: Optional[str] = Header(None),
+                                token: Optional[str] = Query(None)):
+    """Header/query-only wrapper of verify_user_or_admin for JSON-body routes.
+
+    verify_user_or_admin also declares `Form(...)` params (token_form,
+    user_email); attaching it to a route with a JSON Pydantic body forces
+    form-encoding and breaks that body. This variant checks the SAME admin/user
+    token stores with no Form param, so a JSON POST authenticates via the
+    Authorization header — no second credential scheme.
+    """
+    return verify_user_or_admin(authorization=authorization, token=token,
+                                token_form=None, user_email=None, email_query=None)
+
+# sanitize_prompt is imported from scal_file_handler (single implementation);
+# the byte-identical local copy that used to live here was removed.
 
 def validate_gemini_api_keys():
     """Validates the configured Gemini API keys on startup by making a small check.
@@ -369,7 +418,23 @@ if DATABASE_URL:
 
     except Exception as _e:
 
-        _logger.warning(f"[DB] PostgreSQL unavailable, using SQLite: {_e}")
+        # DATABASE_URL is set, so Postgres is the intended store. Silently
+        # falling back to a local SQLite file splits production data across two
+        # stores until someone notices a log line. Fail loud unless the operator
+        # explicitly opts in (or we're under pytest).
+        _allow_fallback = (
+            os.environ.get("ALLOW_SQLITE_FALLBACK", "").lower() in ("1", "true", "yes")
+            or "pytest" in sys.modules
+        )
+        if _allow_fallback:
+            _logger.warning(f"[DB] PostgreSQL unavailable, using SQLite fallback: {_e}")
+        else:
+            _logger.error(f"[DB] PostgreSQL unavailable and DATABASE_URL is set: {_e}")
+            raise RuntimeError(
+                "PostgreSQL connection failed while DATABASE_URL is set. Refusing "
+                "to silently fall back to SQLite (data would split across two "
+                "stores). Set ALLOW_SQLITE_FALLBACK=1 to override for local dev."
+            ) from _e
 
 
 
@@ -562,6 +627,8 @@ def _get_conn():
 
             conn.execute("PRAGMA busy_timeout=10000")
 
+            conn.execute("PRAGMA foreign_keys = ON;")
+
             try:
 
                 yield conn, "?"
@@ -641,33 +708,35 @@ async def async_db(query: str, params: tuple = ()) -> list:
 
 
 
-def _log_physics_audit(sid: str, data_type: str, audit_res: dict, file_name: str = None):
+def _log_physics_audit(sid: str, data_type: str, audit_res: dict, file_name: str = None) -> bool:
 
-    """Immutable logging to the Physics Audit Ledger."""
+    """Immutable logging to the Physics Audit Ledger.
 
+    Returns True only when the row was written. A failed INSERT is reported on
+    the request's degradation channel (route JSON / SSE done / answer trailer)
+    and returns False — CLAUDE.md §7 calls the audit mandatory, so its absence
+    must be visible, not a log line. An audit without a score is a programming
+    error: it raises rather than recording 0 ("worst health") in the ledger.
+    """
+    if "score" not in audit_res:
+        raise ValueError(f"physics audit for {data_type!r} carries no score — refusing to record 0")
+    score = audit_res["score"]
+    violations = _json.dumps(audit_res.get("violations", []))
     try:
-
-        score = audit_res.get("score", 0)
-
-        violations = _json.dumps(audit_res.get("violations", []))
-
         db("INSERT INTO physics_audits (session_id, timestamp, data_type, health_score, violations, file_name) "
-
            "VALUES (?, ?, ?, ?, ?, ?)",
-
            (sid, time.time(), data_type, score, violations, file_name))
-
-        _logger.info(f"[AUDIT] Logged {data_type} audit for {sid} (Score: {score}%)")
-
     except Exception as e:
-
-        _logger.error(f"[AUDIT] Failed to log audit: {e}")
+        note_degradation("physics-audit-not-logged", f"{data_type}: {type(e).__name__}: {e}")
+        return False
+    _logger.info(f"[AUDIT] Logged {data_type} audit for {sid} (Score: {score}%)")
+    return True
 
 
 # ── SESSION MEMORY SUMMARY ────────────────────────────────────────────────────
 
 def _extract_petrophysical_summary(response_text: str, file_name: str) -> dict:
-    """Quick non-streaming Gemini call to extract key params from analysis reply."""
+    """Quick non-streaming NVIDIA NIM call to extract key params from analysis reply."""
     prompt = (
         "You are a petrophysical parameter extractor. Given the assistant response below, "
         "extract key values into JSON. Return ONLY valid JSON with these exact keys "
@@ -680,19 +749,16 @@ def _extract_petrophysical_summary(response_text: str, file_name: str) -> dict:
         f"Source file: {file_name}\n\nAssistant response:\n{response_text[:4000]}"
     )
     try:
-        client = genai_new.Client(api_key=GEMINI_KEY_POOL[0])
-        resp = client.models.generate_content(model="gemini-2.5-flash", contents=prompt)
-        raw = ""
-        if resp and resp.candidates and resp.candidates[0].content:
-            raw = "".join(p.text for p in (resp.candidates[0].content.parts or []) if p.text)
-        raw = raw.strip()
-        if raw.startswith("```"):
-            parts = raw.split("```")
-            raw = parts[1] if len(parts) > 1 else raw
-            if raw.startswith("json"):
-                raw = raw[4:]
-        return _json.loads(raw.strip())
+        # NVIDIA NIM (gpt-oss-120b) may fence the JSON or wrap it in prose;
+        # llm_json_with_retry re-prompts once with a corrective instruction.
+        def _gen(corrective):
+            p = prompt if not corrective else f"{prompt}\n\n{corrective}"
+            return chat_text_generate(p, temperature=0.1, max_tokens=1024)
+        parsed = llm_json_with_retry(_gen, logger=_logger)
+        return parsed if isinstance(parsed, dict) else {}
     except Exception as e:
+        import alerting
+        alerting.record_llm_failure(str(e))
         _logger.warning(f"[Summary] Extraction failed for {file_name}: {e}")
         return {}
 
@@ -724,109 +790,324 @@ def _save_summary_background(sid: str, email: str, response_text: str, file_name
             )
         _logger.info(f"[Summary] Saved {dtype} summary for session {sid} (well: {well})")
 
-        # Back-fill key_params into user_files for the file that triggered this analysis
+        # Back-fill key_params into user_files for the file that triggered this analysis.
+        # Background task — no caller to report to; the warning is the only channel.
         try:
-            if _PG_AVAILABLE:
-                db(
-                    "UPDATE user_files SET key_params=? WHERE user_email=? AND filename=?",
-                    (key_params_json, email, file_name),
-                )
-            else:
-                db(
-                    "UPDATE user_files SET key_params=? WHERE user_email=? AND filename=?",
-                    (key_params_json, email, file_name),
-                )
-        except Exception:
-            pass
+            db(
+                "UPDATE user_files SET key_params=? WHERE user_email=? AND filename=?",
+                (key_params_json, email, file_name),
+            )
+        except Exception as e:
+            _logger.warning(f"[Summary] user_files back-fill of key_params failed for {file_name}: {e}")
 
     except Exception as e:
         _logger.error(f"[Summary] DB save failed for {sid}: {e}")
 
 
 def get_session_summary_context(sid: str) -> str:
-    """Return a formatted session memory block to prepend to kb_ctx, or empty string."""
+    """Return a formatted session memory block to prepend to kb_ctx.
+
+    "" means no summary exists. A database failure is NOT "" — it is an
+    explicit unavailable marker (the model is told memory could not be read)
+    plus a `session-memory` degradation the route's caller sees.
+    """
     try:
         rows = db("SELECT well_name, data_type, key_params FROM session_summaries WHERE session_id=?", (sid,))
-        if not rows:
-            return ""
-        well, dtype, params_json = rows[0]
-        params: dict = {}
-        try:
-            params = _json.loads(params_json or "{}")
-        except Exception:
-            pass
-        lines = ["[SESSION MEMORY — previously analysed data for this session]"]
-        if well:
-            lines.append(f"Well: {well}")
-        if dtype:
-            lines.append(f"Data type: {dtype}")
-        for k, v in params.items():
-            if v is not None:
-                lines.append(f"{k}: {v}")
-        lines.append("[END SESSION MEMORY]")
-        return "\n".join(lines)
     except Exception as e:
-        _logger.warning(f"[Summary] Context read failed for {sid}: {e}")
+        note_degradation("session-memory", f"read failed: {type(e).__name__}: {e}")
+        return f"[SESSION MEMORY UNAVAILABLE — database read failed: {type(e).__name__}]"
+    if not rows:
         return ""
+    well, dtype, params_json = rows[0]
+    lines = ["[SESSION MEMORY — previously analysed data for this session]"]
+    if well:
+        lines.append(f"Well: {well}")
+    if dtype:
+        lines.append(f"Data type: {dtype}")
+    try:
+        params = _json.loads(params_json or "{}")
+    except (TypeError, ValueError) as e:
+        note_degradation("session-memory", f"key_params unreadable for {sid}: {e}")
+        lines.append("key_params unreadable (stored JSON is corrupt)")
+        params = {}
+    for k, v in params.items():
+        if v is not None:
+            lines.append(f"{k}: {v}")
+    lines.append("[END SESSION MEMORY]")
+    return "\n".join(lines)
 
 
 # ── USER FILE HISTORY ─────────────────────────────────────────────────────────
 
 def get_user_file_history_context(email: str, sid: str = None) -> str:
     """Return formatted ENGINEER FILE HISTORY block for the user uploads scoped to the session."""
-    if not email:
+    if not email or not sid:
+        # No session id → no files in this session yet (not a failure).
         return ""
     try:
-        if sid:
-            # Only select files that were actually uploaded in this session (by looking at message fname records)
-            fname_rows = db(
-                "SELECT DISTINCT fname FROM (SELECT fname FROM m WHERE sid=? AND user_email=? AND fname IS NOT NULL ORDER BY id DESC) sub",
-                (sid, email),
-            )
-            session_fnames = []
-            seen = set()
-            for r in (fname_rows or []):
-                if r[0]:
-                    for fn in r[0].split(";"):
-                        fn = fn.strip()
-                        if fn and fn not in seen:
-                            session_fnames.append(fn)
-                            seen.add(fn)
-            if not session_fnames:
-                return ""
-            
-            # Query user_files for only these filenames
-            placeholders = ",".join("?" for _ in session_fnames)
-            rows = db(
-                f"SELECT filename, data_type, key_params, created_at FROM user_files "
-                f"WHERE user_email=? AND filename IN ({placeholders}) ORDER BY created_at DESC",
-                (email, *session_fnames),
-            )
-        else:
-            # If no session ID is provided, there are no files in this session yet
+        # Only select files that were actually uploaded in this session (by looking at message fname records)
+        fname_rows = db(
+            "SELECT DISTINCT fname FROM (SELECT fname FROM m WHERE sid=? AND user_email=? AND fname IS NOT NULL ORDER BY id DESC) sub",
+            (sid, email),
+        )
+        session_fnames = []
+        seen = set()
+        for r in (fname_rows or []):
+            if r[0]:
+                for fn in r[0].split(";"):
+                    fn = fn.strip()
+                    if fn and fn not in seen:
+                        session_fnames.append(fn)
+                        seen.add(fn)
+        if not session_fnames:
             return ""
 
-        if not rows:
-            return ""
-        lines = ["ENGINEER FILE HISTORY (your previously uploaded files):"]
-        for i, (fname, dtype, params_json, ts) in enumerate(rows, 1):
-            date_str = time.strftime("%Y-%m-%d", time.localtime(ts)) if ts else "unknown"
-            params: dict = {}
-            try:
-                params = _json.loads(params_json or "{}")
-            except Exception:
-                pass
-            param_str = ", ".join(f"{k}={v}" for k, v in params.items() if v is not None)
-            entry = f"{i}. {fname} ({dtype or 'unknown'}) — uploaded {date_str}"
-            if param_str:
-                entry += f" — {param_str}"
-            lines.append(entry)
-        return "\n".join(lines)
+        # Query user_files for only these filenames
+        placeholders = ",".join("?" for _ in session_fnames)
+        rows = db(
+            f"SELECT filename, data_type, key_params, created_at FROM user_files "
+            f"WHERE user_email=? AND filename IN ({placeholders}) ORDER BY created_at DESC",
+            (email, *session_fnames),
+        )
     except Exception as e:
-        _logger.warning(f"[UserFiles] History read failed for {email}: {e}")
+        # A DB failure must not look like "no files uploaded": marker + degradation.
+        note_degradation("file-history", f"read failed: {type(e).__name__}: {e}")
+        return f"[FILE HISTORY UNAVAILABLE — database read failed: {type(e).__name__}]"
+
+    if not rows:
         return ""
+    lines = ["ENGINEER FILE HISTORY (your previously uploaded files):"]
+    for i, (fname, dtype, params_json, ts) in enumerate(rows, 1):
+        date_str = time.strftime("%Y-%m-%d", time.localtime(ts)) if ts else "unknown"
+        entry = f"{i}. {fname} ({dtype or 'unknown'}) — uploaded {date_str}"
+        try:
+            params = _json.loads(params_json or "{}")
+        except (TypeError, ValueError) as e:
+            note_degradation("file-history", f"key_params unreadable for {fname}: {e}")
+            entry += " — key_params unreadable (stored JSON is corrupt)"
+            params = {}
+        param_str = ", ".join(f"{k}={v}" for k, v in params.items() if v is not None)
+        if param_str:
+            entry += f" — {param_str}"
+        lines.append(entry)
+    return "\n".join(lines)
 
 
+
+def _env_int(name: str, default: int) -> int:
+    """Read a positive integer from the environment; fall back to default on
+    missing or empty values. A set-but-invalid value (non-numeric, non-positive)
+    is a misconfiguration: the default is used AND named on the degradation
+    channel so the request's caller sees which variable was ignored."""
+    raw = os.getenv(name, "")
+    if not raw:
+        return default
+    try:
+        v = int(raw)
+    except ValueError:
+        v = 0
+    if v <= 0:
+        note_degradation("env-default", f"{name}={raw!r} is not a positive integer; using {default}")
+        return default
+    return v
+
+
+def _cap_prompt_block(text: str, max_chars: int, label: str = "BLOCK") -> str:
+    """Hard character cap for any text block injected into an LLM prompt.
+
+    Keeps head + tail and drops the middle with an explicit marker so the model
+    knows data was elided and can ask for a specific sheet/column/row range
+    instead of guessing. Second line of defense behind the structured per-sheet
+    row capping in `_truncate_ground_truth`.
+    """
+    if not text or len(text) <= max_chars:
+        return text
+    marker = (
+        f"\n... [TRUNCATED {label}: {len(text) - max_chars} CHARS ELIDED TO FIT THE MODEL "
+        f"CONTEXT WINDOW — ask for a specific sheet/column/row range for full detail] ...\n"
+    )
+    budget = max(1000, max_chars - len(marker))
+    head_len = int(budget * 0.7)
+    tail_len = budget - head_len
+    return text[:head_len] + marker + text[-tail_len:]
+
+
+def format_sheet_as_markdown(sheet_name, columns, rows, full_shape_str, columns_unparseable=False):
+    import ast
+    parsed_rows = []
+    unparseable = 0
+    for r_str in rows:
+        start_idx = r_str.find('[')
+        if start_idx == -1:
+            unparseable += 1
+            continue
+        try:
+            vals = ast.literal_eval(r_str[start_idx:])
+            parsed_rows.append(vals)
+        except (ValueError, SyntaxError, TypeError):
+            unparseable += 1
+
+    # If columns list is empty, infer length from the first parsed row
+    if not columns and parsed_rows:
+        columns = [f"Col {i}" for i in range(len(parsed_rows[0]))]
+        
+    num_cols = len(columns)
+    col_types = []
+    
+    for col_idx in range(num_cols):
+        is_numeric = True
+        has_val = False
+        for r in parsed_rows:
+            if col_idx < len(r):
+                val = r[col_idx]
+                if val is not None:
+                    has_val = True
+                    # Check if numeric
+                    if not isinstance(val, (int, float)):
+                        is_numeric = False
+                        break
+        if has_val and is_numeric:
+            col_types.append("numeric")
+        else:
+            col_types.append("string")
+            
+    md_lines = []
+    md_lines.append(f"  SHEET: \"{sheet_name}\"")
+    md_lines.append(f"    FULL SHAPE: {full_shape_str}")
+    if unparseable:
+        md_lines.append(f"    [{unparseable} ROWS UNPARSEABLE — omitted from the preview below; "
+                        f"FULL SHAPE still reports the sheet's real row count]")
+    if columns_unparseable:
+        md_lines.append("    [COLUMN HEADERS UNPARSEABLE — the 'Col i' names below are positional, "
+                        "not the sheet's real headers]")
+    md_lines.append("    COLUMNS AND DATA TYPES:")
+    for col, c_type in zip(columns, col_types):
+        md_lines.append(f"      - {col} ({c_type})")
+        
+    md_lines.append("    DATA PREVIEW (MARKDOWN):")
+    
+    if num_cols > 0:
+        header_line = "    | " + " | ".join(columns) + " |"
+        sep_line = "    | " + " | ".join(["---"] * num_cols) + " |"
+        md_lines.append(header_line)
+        md_lines.append(sep_line)
+        
+        total_rows = len(parsed_rows)
+        if total_rows <= 10:
+            for r in parsed_rows:
+                # Ensure length matches num_cols
+                r_extended = r + [None] * (num_cols - len(r))
+                row_str = "    | " + " | ".join(str(val) if val is not None else "" for val in r_extended[:num_cols]) + " |"
+                md_lines.append(row_str)
+        else:
+            for idx in range(5):
+                r = parsed_rows[idx]
+                r_extended = r + [None] * (num_cols - len(r))
+                row_str = "    | " + " | ".join(str(val) if val is not None else "" for val in r_extended[:num_cols]) + " |"
+                md_lines.append(row_str)
+                
+            # Truncation marker row
+            trunc_marker = f"    | ... | [TRUNCATED {total_rows - 10} ROWS FOR BREVITY — ask for a specific row range to see them] | " + " | ".join(["..."] * max(0, num_cols - 2)) + " |"
+            md_lines.append(trunc_marker)
+            
+            for idx in range(total_rows - 5, total_rows):
+                r = parsed_rows[idx]
+                r_extended = r + [None] * (num_cols - len(r))
+                row_str = "    | " + " | ".join(str(val) if val is not None else "" for val in r_extended[:num_cols]) + " |"
+                md_lines.append(row_str)
+    else:
+        md_lines.append("    [No columns available to preview]")
+        
+    return "\n".join(md_lines)
+
+
+def _truncate_ground_truth(gt_text: str, max_rows: int = None, max_chars: int = None) -> str:
+    """Truncate large tabular ground-truth inventory data before LLM prompt injection using a hierarchical capping mechanism.
+
+    Each sheet is represented as:
+      - Sheet metadata (Sheet name, row/column count, column headers, data types).
+      - A sampled preview of the data (first 5 and last 5 rows formatted as Markdown tables, with an indicator like `... [N rows truncated] ...` in between).
+    Ensures that dense numeric tables do not exceed 100,000 characters of total injected prompt text.
+    """
+    if not gt_text:
+        return ""
+        
+    if max_chars is None:
+        max_chars = 100000
+        
+    import ast
+    import re
+    
+    lines = gt_text.splitlines()
+    output_lines = []
+    
+    current_sheet = None
+    sheet_columns = []
+    sheet_columns_bad = False
+    sheet_shape = ""
+    sheet_rows = []
+
+    def flush_sheet():
+        if current_sheet is not None:
+            formatted = format_sheet_as_markdown(current_sheet, sheet_columns, sheet_rows, sheet_shape,
+                                                 columns_unparseable=sheet_columns_bad)
+            output_lines.append(formatted)
+            output_lines.append("")
+            
+    for line in lines:
+        if line.startswith("╔") or line.startswith("║") or line.startswith("╚") or not line.strip():
+            output_lines.append(line)
+        elif line.startswith("═══ FILE:") or line.startswith("TOTAL SHEETS:") or line.startswith("SHEET NAMES:"):
+            flush_sheet()
+            current_sheet = None
+            sheet_rows = []
+            output_lines.append(line)
+        elif line.strip().startswith("SHEET:"):
+            flush_sheet()
+            sheet_rows = []
+            sheet_columns = []
+            sheet_columns_bad = False
+            sheet_shape = ""
+            m = re.match(r'^\s*SHEET:\s*["\']?(.*?)["\']?$', line)
+            if m:
+                current_sheet = m.group(1)
+            else:
+                current_sheet = "Unknown"
+        elif line.strip().startswith("COLUMNS (") or line.strip().startswith("COLUMNS("):
+            idx = line.find(':')
+            if idx != -1:
+                try:
+                    sheet_columns = ast.literal_eval(line[idx+1:].strip())
+                except (ValueError, SyntaxError, TypeError):
+                    sheet_columns = []
+                    sheet_columns_bad = True     # the preview will say so, not fake 'Col i' headers
+        elif line.strip().startswith("FULL SHAPE:"):
+            idx = line.find(':')
+            if idx != -1:
+                sheet_shape = line[idx+1:].strip()
+        elif line.strip().startswith("ROW "):
+            sheet_rows.append(line)
+        else:
+            output_lines.append(line)
+            
+    flush_sheet()
+    
+    out = "\n".join(output_lines)
+    
+    if len(out) > max_chars:
+        structural_prefixes = ("═══ FILE:", "TOTAL SHEETS:", "SHEET NAMES:",
+                               "  SHEET: ", "    COLUMNS AND DATA TYPES:", "    FULL SHAPE:")
+        skeleton = [ln for ln in out.splitlines()
+                    if ln.startswith(structural_prefixes) or "═══ FILE: " in ln]
+        skeleton_text = ""
+        if skeleton:
+            skeleton_text = ("\n[STRUCTURAL SHEET INDEX — all sheets/columns/shapes preserved "
+                             "despite truncation above]:\n" + "\n".join(skeleton) + "\n")
+            skeleton_text = _cap_prompt_block(skeleton_text, max(2000, max_chars // 4), "SHEET INDEX")
+        body_budget = max(1000, max_chars - len(skeleton_text))
+        out = _cap_prompt_block(out, body_budget, "GROUND TRUTH INVENTORY") + skeleton_text
+        
+    return out
 
 
 def populate_cache_from_ground_truth(sid: str, gt_text: str):
@@ -839,7 +1120,9 @@ def populate_cache_from_ground_truth(sid: str, gt_text: str):
             SESSION_DATA_CACHE[sid]["labeled_values"] = {}
             
         import ast
-        
+        canonical_candidates: dict = {}      # canon key -> {"sheet!cell": value}
+        bare_candidates: dict = {}           # bare label -> {"sheet!cell": value}
+
         # Split by SHEET:
         sheets = gt_text.split("  SHEET: ")
         for sheet_part in sheets[1:]:
@@ -851,90 +1134,118 @@ def populate_cache_from_ground_truth(sid: str, gt_text: str):
                 continue
             sheet_name = sheet_name_match.group(1)
             
-            # Find columns line
+            # Find columns line. Headers that do not parse skip the WHOLE sheet:
+            # a comma-split fallback bound values under invented labels that
+            # then rendered as '· CACHED · HIGH'.
             cols = []
             grid = []
+            cols_bad = False
             for line in lines[1:]:
                 if "COLUMNS (" in line:
                     col_str = line.partition("):")[2].strip()
                     try:
                         cols = ast.literal_eval(col_str)
-                    except Exception:
-                        cols = [c.strip().strip("'\"[]") for c in col_str.split(",")]
+                    except (ValueError, SyntaxError, TypeError) as e:
+                        cols_bad = True
+                        note_degradation("cache-columns-unparseable",
+                                         f"sheet {sheet_name!r} skipped: {type(e).__name__}: {e}")
                 elif "    ROW " in line:
                     row_vals_str = line.partition(":")[2].strip()
                     try:
                         row_vals = ast.literal_eval(row_vals_str)
                         grid.append(row_vals)
-                    except Exception:
+                    except (ValueError, SyntaxError, TypeError) as e:
+                        _logger.warning(f"[CacheGT] sheet {sheet_name!r}: row skipped ({e}): {line.strip()[:80]}")
                         continue
-            
-            # Zip columns and values (legacy fallback mapping)
-            for row_vals in grid:
-                for col, val in zip(cols, row_vals):
-                    if val is not None and isinstance(val, (int, float)) and not isinstance(val, bool):
-                        col_clean = col.strip().lower()
-                        SESSION_DATA_CACHE[sid]["labeled_values"][col_clean] = val
-                        sheet_key = f"{sheet_name}.{col}".lower().replace(" ", "_")
-                        SESSION_DATA_CACHE[sid]["labeled_values"][sheet_key] = val
+            if cols_bad:
+                continue
 
-            # Advanced cell-based spatial extraction (horizontal and vertical scan)
+            # Cell-based spatial extraction: a string cell binds the number to
+            # its RIGHT, or the number BELOW it when that number is a scalar
+            # (not the head of a numeric column — a column's rows are never a
+            # labeled value; the old per-row loop bound the LAST row under the
+            # bare header and rendered it CACHED · HIGH).
             full_grid = [cols] + grid
             n_rows_g = len(full_grid)
+
+            def _cell(r, c):
+                return full_grid[r][c] if r < n_rows_g and c < len(full_grid[r]) else None
+
+            def clean_lbl(s):
+                s = re.sub(r'[^a-zA-Z0-9_]', '_', s.lower())
+                s = re.sub(r'_{2,}', '_', s)
+                return s.strip('_')
+
+            sh_tokens = set(re.split(r'[^a-z0-9]+', sheet_name.lower()))
+            sheet_is_ri = bool(sh_tokens & {"ri", "resistivity", "resistivityindex"}) or "resistivity_index" in sheet_name.lower()
+            sheet_is_ff = bool(sh_tokens & {"ff", "formation", "formationfactor"}) or "formation_factor" in sheet_name.lower()
+
             for r in range(n_rows_g):
-                n_cols_g = len(full_grid[r])
-                for c in range(n_cols_g):
+                for c in range(len(full_grid[r])):
                     cell = full_grid[r][c]
-                    if isinstance(cell, str) and cell.strip():
-                        # Extract value to the right
-                        val_r = None
-                        if c + 1 < n_cols_g:
-                            val_r = full_grid[r][c + 1]
-                        # Extract value below
-                        val_d = None
-                        if r + 1 < n_rows_g and c < len(full_grid[r + 1]):
-                            val_d = full_grid[r + 1][c]
-                            
-                        # Standard label clean
-                        def clean_lbl(s):
-                            s = re.sub(r'[^a-zA-Z0-9_]', '_', s.lower())
-                            s = re.sub(r'_{2,}', '_', s)
-                            return s.strip('_')
-                            
-                        for val in [val_r, val_d]:
-                            if val is not None and isinstance(val, (int, float)) and not isinstance(val, bool):
-                                cl = clean_lbl(cell)
-                                if cl:
-                                    SESSION_DATA_CACHE[sid]["labeled_values"][cl] = val
-                                    sheet_key = f"{sheet_name.lower()}.{cl}".replace(" ", "_")
-                                    SESSION_DATA_CACHE[sid]["labeled_values"][sheet_key] = val
-                                    
-                                    # Keyword standardized mappings (excluding mathematical derivatives)
-                                    if any(x in cl for x in ["swi", "swc", "connate", "irreducible_water", "sw_irr", "swir"]):
-                                        if not any(x in cl for x in ["1_", "1-", "1 -"]):
-                                            SESSION_DATA_CACHE[sid]["labeled_values"]["swi"] = val
-                                    if any(x in cl for x in ["sor", "s_or", "residual_oil", "sorw", "sorg"]):
-                                        if not any(x in cl for x in ["1_", "1-", "1 -"]):
-                                            SESSION_DATA_CACHE[sid]["labeled_values"]["sor"] = val
-                                    if any(x in cl for x in ["cementation", "exponent_m", "exponentm", "tortuosity"]):
-                                        SESSION_DATA_CACHE[sid]["labeled_values"]["m"] = val
-                                    if any(x in cl for x in ["saturation_exponent", "exponent_n", "exponentn"]):
-                                        SESSION_DATA_CACHE[sid]["labeled_values"]["n"] = val
-                                    if any(x in cl for x in ["porosity", "phi"]):
-                                        SESSION_DATA_CACHE[sid]["labeled_values"]["porosity"] = val
-                                    if any(x in cl for x in ["permeability", "perm", "klinkenberg"]):
-                                        SESSION_DATA_CACHE[sid]["labeled_values"]["permeability"] = val
-                                    if any(x in cl for x in ["compressibility", "pore_volume_compressibility", "pore_vol_comp"]):
-                                        SESSION_DATA_CACHE[sid]["labeled_values"]["pore_volume_compressibility"] = val
-                                        
-                                    # Generic slope mapping based on sheet context (slope and well_b represent Archie m and n)
-                                    if "slope" in cl or "well_b" in cl:
-                                        sh_lower = sheet_name.lower()
-                                        if "ri" in sh_lower or "resistivity_index" in sh_lower:
-                                            SESSION_DATA_CACHE[sid]["labeled_values"]["n"] = abs(val)
-                                        elif "ff" in sh_lower or "formation_factor" in sh_lower:
-                                            SESSION_DATA_CACHE[sid]["labeled_values"]["m"] = abs(val)
+                    if not (isinstance(cell, str) and cell.strip()):
+                        continue
+                    val_r = _cell(r, c + 1)
+                    val_d = _cell(r + 1, c)
+                    if _is_scalar_num(val_d) and _is_scalar_num(_cell(r + 2, c)):
+                        val_d = None            # head of a numeric column, not a scalar
+                    for val, where in ((val_r, "→"), (val_d, "↓")):
+                        if not _is_scalar_num(val):
+                            continue
+                        cl = clean_lbl(cell)
+                        if not cl:
+                            continue
+                        src = f"{sheet_name}!{cell}{where}"
+                        bare_candidates.setdefault(cl, {})[src] = val
+                        sheet_key = f"{sheet_name.lower()}.{cl}".replace(" ", "_")
+                        SESSION_DATA_CACHE[sid]["labeled_values"][sheet_key] = val
+                        # Canonical keys: exact alias match only (never substring —
+                        # 'absorption' is not 'sor', 'permanent' is not 'perm').
+                        for canon, aliases in _CANONICAL_LABEL_ALIASES.items():
+                            if cl in aliases:
+                                canonical_candidates.setdefault(canon, {})[src] = val
+                        # Slope / well_b of an RI (n) or FF (m) sheet: sheet name by whole token.
+                        if ("slope" in cl.split("_") or "well_b" in cl) and (sheet_is_ri or sheet_is_ff):
+                            canon = "n" if sheet_is_ri else "m"
+                            canonical_candidates.setdefault(canon, {})[src] = abs(val)
+
+        # Bind a bare or canonical key only when every candidate agrees; otherwise
+        # refuse (the key stays absent → '[unverified — absent from cache]') and
+        # say so. Bare keys first, canonical keys override them (a cell literally
+        # labelled 'Sor' on one sheet still conflicts with another sheet's
+        # residual-oil value); the sheet-qualified keys stay, they are unambiguous.
+        for key, cands in list(bare_candidates.items()) + list(canonical_candidates.items()):
+            if len(set(cands.values())) == 1:
+                SESSION_DATA_CACHE[sid]["labeled_values"][key] = next(iter(cands.values()))
+            else:
+                SESSION_DATA_CACHE[sid]["labeled_values"].pop(key, None)
+                note_degradation("cache-alias-ambiguous",
+                                 f"{key!r} not bound: {len(cands)} cells disagree ({cands})")
     save_session_cache_to_db(sid)
+
+
+def _is_scalar_num(v) -> bool:
+    return isinstance(v, (int, float)) and not isinstance(v, bool)
+
+
+# Canonical labeled-value keys and the exact cleaned labels (see clean_lbl in
+# populate_cache_from_ground_truth) that may bind them. A new spelling is added
+# here deliberately; it never binds by substring.
+_CANONICAL_LABEL_ALIASES: Dict[str, frozenset] = {
+    "swi": frozenset({"swi", "swc", "swir", "sw_irr", "sw_irreducible", "swi_frac", "swi_fraction", "swi_pct",
+                      "connate_water", "connate_water_saturation", "irreducible_water", "irreducible_water_saturation"}),
+    "sor": frozenset({"sor", "s_or", "sorw", "sorg", "sor_frac", "sor_fraction", "sor_pct",
+                      "residual_oil", "residual_oil_saturation"}),
+    "m": frozenset({"m", "cementation_exponent", "cementation_exponent_m", "cementation_factor",
+                    "exponent_m", "exponentm", "tortuosity_factor"}),
+    "n": frozenset({"n", "saturation_exponent", "saturation_exponent_n", "exponent_n", "exponentn"}),
+    "porosity": frozenset({"porosity", "phi", "porosity_frac", "porosity_fraction", "porosity_pct",
+                           "porosity_percent", "phi_frac", "phi_fraction", "helium_porosity"}),
+    "permeability": frozenset({"permeability", "perm", "k", "k_air", "kair", "air_permeability",
+                               "permeability_md", "perm_md", "k_md", "klinkenberg", "klinkenberg_permeability"}),
+    "pore_volume_compressibility": frozenset({"compressibility", "pore_volume_compressibility", "pore_vol_comp",
+                                              "pvc", "cpv"}),
+}
 
 
 def _detect_main_table(df):
@@ -989,8 +1300,7 @@ def _detect_main_table(df):
     # 3. Score groups to find the main data table
     best_group = None
     best_score = -1
-    best_numeric_cols = []
-    
+
     for group in groups:
         numeric_cols = []
         for c in range(n_cols):
@@ -1003,8 +1313,7 @@ def _detect_main_table(df):
         if score > best_score:
             best_score = score
             best_group = group
-            best_numeric_cols = numeric_cols
-            
+
     if best_score < 4 or not best_group:
         # Fallback to simple backward-compatible heuristic
         data_start_row = None
@@ -1102,6 +1411,12 @@ def cache_excel_data_vectors(sid: str, filepath: str):
         if "raw_excel_data" not in SESSION_DATA_CACHE[sid]:
             SESSION_DATA_CACHE[sid]["raw_excel_data"] = {}
             
+    # Every sheet that could not be turned into vectors is recorded in
+    # cache["vector_errors"] and on the degradation channel; find_cached_vector
+    # repeats them in its VectorLookupError so a parse failure is never reported
+    # as "no cached column matches". (In-memory only — not persisted with the
+    # cache; ponytail: multi-worker readers see the missing vectors, not the why.)
+    errors: list[str] = []
     sheets_dict = {}
     try:
         if ext in ('.xlsx', '.xlsm', '.xls', '.ods'):
@@ -1110,26 +1425,26 @@ def cache_excel_data_vectors(sid: str, filepath: str):
                 try:
                     df = pd.read_excel(xl, sheet_name=sheet, header=None)
                     sheets_dict[sheet] = df
-                except Exception:
-                    pass
+                except Exception as e:                       # noqa: BLE001 — pandas/openpyxl raise many types; recorded, not dropped
+                    errors.append(f"sheet {sheet!r}: {type(e).__name__}: {e}")
             xl.close()
         elif ext == '.csv':
             try:
-                from file_reader import smart_read_csv
                 df = smart_read_csv(filepath, header=None)
                 sheets_dict["Sheet1"] = df
-            except Exception:
-                pass
-    except Exception as e:
-        _logger.warning(f"[CacheVectors] Failed to read {filepath}: {e}")
-        return
+            except Exception as e:                           # noqa: BLE001
+                errors.append(f"csv {Path(filepath).name}: {type(e).__name__}: {e}")
+    except Exception as e:                                   # noqa: BLE001
+        errors.append(f"file {Path(filepath).name}: {type(e).__name__}: {e}")
 
     # Process each sheet to find numeric columns
     for sheet_name, df in sheets_dict.items():
         if df.empty:
+            errors.append(f"sheet {sheet_name!r}: empty")
             continue
         data_start_row, headers = _detect_main_table(df)
         if data_start_row is None or headers is None:
+            errors.append(f"sheet {sheet_name!r}: no numeric table detected")
             continue
         n_rows, n_cols = df.shape
 
@@ -1170,23 +1485,156 @@ def cache_excel_data_vectors(sid: str, filepath: str):
                     SESSION_DATA_CACHE[sid]["flat_vectors"][h.lower()] = clean_vals
                     
         _logger.info(f"[CacheVectors] Cached {len(valid_cols)} columns from sheet {sheet_name}")
+    with SESSION_DATA_CACHE_LOCK:
+        SESSION_DATA_CACHE[sid]["vector_errors"] = errors
+    for err in errors:
+        note_degradation("cache-vectors", err)
     save_session_cache_to_db(sid)
 
 
-def find_cached_vector(sid: str, aliases: list) -> list:
-    """Fuzzy matches keys in flat_vectors to aliases and returns the first matched list of floats."""
+class VectorLookupError(RuntimeError):
+    """A cached column vector could not be resolved to exactly one column.
+
+    Raised instead of returning a wrong or empty vector, so a mis-resolved
+    column can never reach a regression silently.
+    """
+
+
+# Characters stripped before comparing a cache key to an alias.
+_VECTOR_KEY_NOISE = str.maketrans("", "", " _-.()%#/\\")
+
+# Declared alias table: role -> the exact normalized column names accepted.
+# Matching is exact against this table. Supporting a new column spelling means
+# adding it here deliberately; it never happens by accident through substrings.
+VECTOR_ALIASES: Dict[str, frozenset] = {
+    "sw": frozenset({
+        "sw", "watersaturation", "watersaturationsw", "watersat",
+        "swfrac", "swfraction", "waterssaturationfraction",
+    }),
+    "ri": frozenset({
+        "ri", "resistivityindex", "resistivityindexri", "resistivityratio",
+    }),
+    "porosity": frozenset({
+        "porosity", "phi", "porosityfrac", "porosityfraction",
+        "porositypct", "porositypercent",
+    }),
+    "ff": frozenset({
+        "ff", "formationfactor", "formationresistivityfactor",
+        "formationfactorff",
+    }),
+}
+
+
+def _normalize_vector_key(name: str) -> str:
+    """Case-fold a cache key or alias and strip every separator character."""
+    return name.lower().translate(_VECTOR_KEY_NOISE)
+
+
+def _vector_key_forms(key: str) -> set:
+    """Normalized forms a cache key may be matched on.
+
+    `cache_excel_data_vectors` stores each column twice — sheet-qualified and
+    bare (app.py:1386-1387) — so both the whole key and its column part are
+    valid match targets.
+    """
+    forms = {_normalize_vector_key(key)}
+    _, separator, column = key.rpartition(".")
+    if separator and column.strip():
+        forms.add(_normalize_vector_key(column))
+    return forms
+
+
+def find_cached_vector(sid: str, role: str) -> List[float]:
+    """Resolve one cached column vector by declared role.
+
+    Exact-matches the normalized column name against VECTOR_ALIASES. Raises
+    VectorLookupError when the role is undeclared, when nothing matches, or
+    when two genuinely different columns match — never first-match-wins.
+    """
+    accepted = VECTOR_ALIASES.get(role)
+    if accepted is None:
+        raise VectorLookupError(
+            f"unknown vector role {role!r}; declared roles: {sorted(VECTOR_ALIASES)}"
+        )
     if not sid:
-        return []
-    load_session_cache_from_db(sid)
+        raise VectorLookupError(f"no session id supplied for the {role!r} lookup")
+
+    fhash = resolve_cache_key(sid)
+    load_session_cache_from_db(fhash)
     with SESSION_DATA_CACHE_LOCK:
-        flat = SESSION_DATA_CACHE.get(sid, {}).get("flat_vectors", {})
-        for alias in aliases:
-            a_clean = alias.lower().replace(" ", "").replace("_", "")
-            for k, vals in flat.items():
-                k_clean = k.lower().replace(" ", "").replace("_", "")
-                if a_clean == k_clean or a_clean in k_clean or k_clean in a_clean:
-                    return vals
-    return []
+        flat = dict(SESSION_DATA_CACHE.get(fhash, {}).get("flat_vectors", {}))
+        vector_errors = list(SESSION_DATA_CACHE.get(fhash, {}).get("vector_errors", [])
+                             or SESSION_DATA_CACHE.get(sid, {}).get("vector_errors", []))
+
+    matches = {key: vals for key, vals in flat.items()
+               if _vector_key_forms(key) & accepted}
+    if not matches:
+        raise VectorLookupError(
+            f"no cached column matches role {role!r} "
+            f"(accepted names: {sorted(accepted)}); "
+            f"available columns: {sorted(flat)}"
+            + (f"; sheets that could not be cached: {vector_errors}" if vector_errors else "")
+        )
+
+    distinct = {tuple(vals) for vals in matches.values()}
+    if len(distinct) > 1:
+        raise VectorLookupError(
+            f"role {role!r} is ambiguous: it matched {len(matches)} columns "
+            f"holding different data ({sorted(matches)}). Rename the columns or "
+            f"narrow VECTOR_ALIASES — refusing to guess which one was meant."
+        )
+    return next(iter(matches.values()))
+
+
+def assert_independent_vectors(x: "np.ndarray", y: "np.ndarray",
+                               x_label: str, y_label: str) -> None:
+    """Refuse to regress a vector on itself.
+
+    Element-wise equality, or a correlation of exactly +/-1.0 on the raw
+    vectors, means the same column was resolved for both axes. That is the
+    failure that produced Archie n = -1.000 on every run. A genuine Sw/RI pair
+    is monotonic but not linearly dependent (|r| ~ 0.89), so it passes.
+    """
+    if x.shape == y.shape and np.array_equal(x, y):
+        raise VectorLookupError(
+            f"{x_label} and {y_label} resolved to the same column vector — "
+            f"refusing to regress a vector on itself"
+        )
+    if x.shape != y.shape or x.size < 2:
+        return None
+    if float(np.std(x)) == 0.0 or float(np.std(y)) == 0.0:
+        return None
+    r = float(np.corrcoef(x, y)[0, 1])
+    if abs(abs(r) - 1.0) < 1e-12:
+        raise VectorLookupError(
+            f"{x_label} and {y_label} correlate at r={r:+.6f} (exactly +/-1) — "
+            f"the two axes are the same measurement, not an independent pair"
+        )
+    return None
+
+
+_DEPTH_ALIASES = ["depth", "depth (ft)", "depth (m)", "md", "tvd", "depth ft", "depth m"]
+
+
+def _clean_header(s) -> str:
+    return re.sub(r'[\s\-_\.\(\)/\\%,]+', '', str(s).lower())
+
+
+def _match_aligned_column(aligned: dict, aliases, role: str, sheet_name: str):
+    """The one header whose normalized form is exactly in `aliases`, or None.
+
+    Exact match only — the old substring test let 'K (mD)' satisfy the depth
+    alias 'md' so the permeability column was plotted as depth. Two different
+    columns matching the same role is a refusal (None + a degradation note),
+    never first-match-wins.
+    """
+    accepted = {_clean_header(a) for a in aliases}
+    hits = [h for h in aligned if _clean_header(h) in accepted]
+    if len({tuple(aligned[h]) for h in hits}) > 1:
+        note_degradation("aligned-columns-ambiguous",
+                         f"sheet {sheet_name!r}: role {role!r} matched {hits}; refusing to guess")
+        return None
+    return hits[0] if hits else None
 
 
 def find_aligned_bca_columns(sid: str):
@@ -1200,56 +1648,43 @@ def find_aligned_bca_columns(sid: str):
     if not sid:
         return None, None, None, None, False
         
-    load_session_cache_from_db(sid)
+    fhash = resolve_cache_key(sid)
+    load_session_cache_from_db(fhash)
     
-    porosity_aliases = ["porosity", "por", "phit", "phi", "porosity (%)", "por (%)"]
-    permeability_aliases = ["k air", "kair", "k_air", "perm", "k (md)", "kh", "ka", "permeability", "k horizontal"]
-    depth_aliases = ["depth", "depth (ft)", "depth (m)", "md", "tvd"]
-    
+    porosity_aliases = ["porosity", "por", "phit", "phi", "porosity (%)", "por (%)", "phi (%)",
+                        "porosity (frac)", "porosity fraction", "porosity (fraction)", "helium porosity"]
+    permeability_aliases = ["k air", "kair", "k_air", "perm", "k (md)", "kh", "ka", "permeability", "k horizontal",
+                            "k", "permeability (md)", "perm (md)", "kair (md)", "k air (md)", "klinkenberg"]
+    depth_aliases = _DEPTH_ALIASES
+
     with SESSION_DATA_CACHE_LOCK:
-        raw_excel = SESSION_DATA_CACHE.get(sid, {}).get("raw_excel_data", {})
+        raw_excel = SESSION_DATA_CACHE.get(fhash, {}).get("raw_excel_data", {})
         if not raw_excel:
             return None, None, None, None, False
-            
+
         # Try sheets in order
         for sheet_name, sheet_dict in raw_excel.items():
             aligned = sheet_dict.get("__aligned_vectors__")
             if not aligned:
                 # Fallback to checking other keys in sheet_dict directly if __aligned_vectors__ is not present
                 aligned = {k: v for k, v in sheet_dict.items() if isinstance(v, list) and not k.startswith("__")}
-            
+
             if not aligned:
                 continue
-                
-            phi_col = None
-            perm_col = None
-            depth_col = None
-            
-            for h in aligned.keys():
-                h_clean = re.sub(r'[\s\-_\.\(\)/\\%]+', '', str(h).lower())
-                if not phi_col:
-                    for alias in porosity_aliases:
-                        a_clean = re.sub(r'[\s\-_\.\(\)/\\%]+', '', str(alias).lower())
-                        if h_clean == a_clean or a_clean in h_clean or h_clean in a_clean:
-                            phi_col = h
-                            break
-                if not perm_col:
-                    for alias in permeability_aliases:
-                        a_clean = re.sub(r'[\s\-_\.\(\)/\\%]+', '', str(alias).lower())
-                        if h_clean == a_clean or a_clean in h_clean or h_clean in a_clean:
-                            perm_col = h
-                            break
-                if not depth_col:
-                    for alias in depth_aliases:
-                        a_clean = re.sub(r'[\s\-_\.\(\)/\\%]+', '', str(alias).lower())
-                        if h_clean == a_clean or a_clean in h_clean or h_clean in a_clean:
-                            depth_col = h
-                            break
-                            
+
+            phi_col = _match_aligned_column(aligned, porosity_aliases, "porosity", sheet_name)
+            perm_col = _match_aligned_column(aligned, permeability_aliases, "permeability", sheet_name)
+            depth_col = _match_aligned_column(aligned, depth_aliases, "depth", sheet_name)
+
             if phi_col and perm_col:
                 phi_vals = aligned[phi_col]
                 perm_vals = aligned[perm_col]
-                depth_vals = aligned[depth_col] if depth_col else [float(i+1) for i in range(len(phi_vals))]
+                if depth_col:
+                    depth_vals = aligned[depth_col]
+                else:
+                    depth_vals = [float(i+1) for i in range(len(phi_vals))]
+                    note_degradation("depth-synthesized",
+                                     f"sheet {sheet_name!r}: no depth column; row index 1..N used as depth")
                 
                 # Match lengths to prevent shifts
                 max_len = max(len(phi_vals), len(perm_vals), len(depth_vals))
@@ -1291,10 +1726,11 @@ def find_aligned_columns(sid: str, expected_aliases: dict):
     if not sid:
         return None
         
-    load_session_cache_from_db(sid)
+    fhash = resolve_cache_key(sid)
+    load_session_cache_from_db(fhash)
     
     with SESSION_DATA_CACHE_LOCK:
-        raw_excel = SESSION_DATA_CACHE.get(sid, {}).get("raw_excel_data", {})
+        raw_excel = SESSION_DATA_CACHE.get(fhash, {}).get("raw_excel_data", {})
         if not raw_excel:
             return None
             
@@ -1308,46 +1744,36 @@ def find_aligned_columns(sid: str, expected_aliases: dict):
                 
             matched_cols = {}
             for param, aliases in expected_aliases.items():
-                matched_col = None
-                for h in aligned.keys():
-                    h_clean = re.sub(r'[\s\-_\.\(\)/\\%]+', '', str(h).lower())
-                    for alias in aliases:
-                        a_clean = re.sub(r'[\s\-_\.\(\)/\\%]+', '', str(alias).lower())
-                        if h_clean == a_clean or a_clean in h_clean or h_clean in a_clean:
-                            matched_col = h
-                            break
-                    if matched_col:
-                        break
+                matched_col = _match_aligned_column(aligned, aliases, param, sheet_name)
                 if matched_col:
                     matched_cols[param] = matched_col
-            
-            # If we matched enough required columns
+
+            # If we matched enough required columns (>2 params: one may be absent —
+            # the caller's alternative-input chains rely on it — but WHICH one is
+            # returned under "missing" and noted, never silently)
             required_count = len(expected_aliases) if len(expected_aliases) <= 2 else len(expected_aliases) - 1
             if len(matched_cols) >= required_count:
                 lengths = [len(aligned[col]) for col in matched_cols.values()]
                 max_len = max(lengths) if lengths else 0
-                
+
                 aligned_data = {}
                 for param, col in matched_cols.items():
                     vals = aligned[col]
                     aligned_data[param] = vals + [None] * (max_len - len(vals))
-                    
-                depth_aliases = ["depth", "depth (ft)", "depth (m)", "md", "tvd"]
-                depth_col = None
-                for h in aligned.keys():
-                    h_clean = re.sub(r'[\s\-_\.\(\)/\\%]+', '', str(h).lower())
-                    for alias in depth_aliases:
-                        a_clean = re.sub(r'[\s\-_\.\(\)/\\%]+', '', str(alias).lower())
-                        if h_clean == a_clean or a_clean in h_clean or h_clean in a_clean:
-                            depth_col = h
-                            break
-                    if depth_col:
-                        break
+                aligned_data["missing"] = [p for p in expected_aliases if p not in matched_cols]
+                if aligned_data["missing"]:
+                    note_degradation("aligned-columns-missing",
+                                     f"sheet {sheet_name!r}: no column for {aligned_data['missing']}")
+
+                depth_col = _match_aligned_column(aligned, _DEPTH_ALIASES, "depth", sheet_name)
+                aligned_data["depth_synthetic"] = depth_col is None
                 if depth_col:
                     aligned_data["depth"] = aligned[depth_col] + [None] * (max_len - len(aligned[depth_col]))
                 else:
                     aligned_data["depth"] = [float(i+1) for i in range(max_len)]
-                    
+                    note_degradation("depth-synthesized",
+                                     f"sheet {sheet_name!r}: no depth column; row index 1..N used as depth")
+
                 return aligned_data, sheet_name
                 
     return None
@@ -1358,26 +1784,50 @@ class _MissingParam(Exception):
     active session cache. No generic constant is ever substituted."""
 
 
-def calculate_derived_value(formula_id: str, inputs_str: str, session_id: str):
+def calculate_derived_value(formula_id: str, inputs_str: str, session_id: str, used: dict = None):
+    """Evaluate `formula_id` from the model's inputs, falling back to the session
+    cache per parameter. `used` (optional dict) is filled with
+    {name: (value, "input"|"cache")} so the caller can render the inputs that
+    were ACTUALLY used, not the ones the model claimed.
+
+    An input that does not parse raises ValueError: the old code dropped it
+    and quietly substituted the cached value under the model's stated inputs.
+    """
     # Parse inputs, e.g. "phi=0.15,m=1.85" (NO generic-constant fallbacks)
     inputs = {}
     for part in inputs_str.split(","):
-        if "=" in part:
-            k, v = part.split("=")
-            try:
-                inputs[k.strip().lower()] = float(v.strip())
-            except Exception:
-                pass
-            
+        part = part.strip()
+        if not part:
+            continue
+        k, sep, v = part.partition("=")
+        try:
+            if not sep:
+                raise ValueError("no '='")
+            inputs[k.strip().lower()] = float(v.strip())
+        except ValueError:
+            raise ValueError(f"unparseable input {part!r} for {formula_id}") from None
+    if used is None:
+        used = {}
+
     # STRICT: no `default` parameter at all. A missing parameter ALWAYS raises
     # _MissingParam — never substitutes a constant, never fabricates provenance.
     def get_param(name: str) -> float:
+        val = _lookup_param(name)
+        used[name.lower()] = (val, "input" if name.lower() in inputs else "cache")
+        return val
+
+    def _lookup_param(name: str) -> float:
         name_lower = name.lower()
         if name_lower in inputs:
             return inputs[name_lower]
-        # Fallback strictly to validated cache lookup only
+        # Fallback strictly to validated cache lookup only.
+        # Resolve to the content-hash key and hydrate from DB first so any
+        # worker (multi-process) sees the upload, not just the one that ingested.
+        load_session_cache_from_db(session_id)          # acquires lock itself
+        _fhash = resolve_cache_key(session_id)
         with SESSION_DATA_CACHE_LOCK:
-            cache = SESSION_DATA_CACHE.get(session_id, {})
+            cache = (SESSION_DATA_CACHE.get(_fhash)
+                     or SESSION_DATA_CACHE.get(session_id, {}))
             labeled = cache.get("labeled_values", {})
             if name_lower in labeled:
                 return float(labeled[name_lower])
@@ -1467,36 +1917,37 @@ def process_provenance_tokens(llm_response_text: str, session_id: str) -> str:
             
         cache_key_norm = normalize_key(cache_key)
         val = None
+        grade = ""
+        load_session_cache_from_db(session_id)          # acquires lock itself
+        _fhash = resolve_cache_key(session_id)
         with SESSION_DATA_CACHE_LOCK:
-            cache = SESSION_DATA_CACHE.get(session_id, {})
+            cache = (SESSION_DATA_CACHE.get(_fhash)
+                     or SESSION_DATA_CACHE.get(session_id, {}))
             labeled = cache.get("labeled_values", {})
-            
-            # Direct match
+
+            # Exact key (raw or normalized) → HIGH: the value sits under the key the model named.
             if cache_key_norm in labeled:
-                val = labeled[cache_key_norm]
+                val, grade = labeled[cache_key_norm], "HIGH"
             else:
-                # Direct match on normalized keys
                 for k, v in labeled.items():
                     if normalize_key(k) == cache_key_norm:
-                        val = v
+                        val, grade = v, "HIGH"
                         break
-                        
-            # Token match fallback
+
+            # Token match: a DIFFERENT key sharing a whole token. Graded MEDIUM
+            # and the key is named; two keys with different values is a refusal.
+            # (The old code took the first hit and labelled it HIGH, and then
+            # scraped the raw ground-truth text with a regex — also HIGH. Gone.)
             if val is None:
-                for k, v in labeled.items():
-                    k_norm = normalize_key(k)
-                    if cache_key_norm in k_norm.split('_') or k_norm in cache_key_norm.split('_'):
-                        val = v
-                        break
-                        
-        if val is None:
-            with SESSION_DATA_CACHE_LOCK:
-                gt = cache.get("ground_truth", "")
-            if gt:
-                match_gt = re.search(rf'(?i)\b{re.escape(cache_key)}\b.*?[:=]\s*(\d+(?:\.\d+)?)', gt)
-                if match_gt:
-                    val = match_gt.group(1)
-                    
+                hits = {k: v for k, v in labeled.items()
+                        if cache_key_norm in normalize_key(k).split('_')
+                        or normalize_key(k) in cache_key_norm.split('_')}
+                if len({v for v in hits.values()}) > 1:
+                    return f"[unverified — ambiguous key {cache_key}: matches {sorted(hits)}]"
+                if hits:
+                    k, val = next(iter(hits.items()))
+                    grade = f"MEDIUM (key: {k})"
+
         if val is not None:
             try:
                 val_float = float(val)
@@ -1504,9 +1955,11 @@ def process_provenance_tokens(llm_response_text: str, session_id: str) -> str:
                     val_str = str(int(val_float))
                 else:
                     val_str = f"{val_float:.3f}"
-            except Exception:
+            except (TypeError, ValueError):
                 val_str = str(val)
-            return f"{val_str} | CACHED | HIGH"
+            # '·' separator, NOT '|': a pipe inside a markdown table cell splits
+            # the row into extra columns and corrupts every provenance table.
+            return f"{val_str} · CACHED · {grade}"
         return "[unverified — absent from cache]"
 
     processed = re.sub(r'\{\{val:([^|}]+)\}\}', replace_cache, llm_response_text)
@@ -1515,13 +1968,19 @@ def process_provenance_tokens(llm_response_text: str, session_id: str) -> str:
     def replace_derived(match):
         formula_id = match.group(1).strip()
         inputs_str = match.group(2).strip()
+        used: dict = {}
         try:
-            val = calculate_derived_value(formula_id, inputs_str, session_id)
+            val = calculate_derived_value(formula_id, inputs_str, session_id, used=used)
             if val is not None:
-                return f"{val:.3f} | DERIVED | HIGH {inputs_str}"
+                # Render the inputs ACTUALLY used (and where each came from), not
+                # the model's stated inputs.
+                shown = ", ".join(f"{k}={v:g} ({src})" for k, (v, src) in used.items())
+                return f"{val:.3f} · DERIVED · HIGH {shown}"
         except _MissingParam:
             return "[unverified — absent from cache]"
-        except Exception as e:
+        except ValueError as e:                        # unparseable input / unknown formula
+            return f"[unverified — {e}]"
+        except Exception as e:                         # noqa: BLE001 — arithmetic failure, reported in place
             _logger.warning(f"[Provenance] Formula {formula_id} failed: {e}")
         return f"[unverified — math error on {formula_id}]"
 
@@ -1554,18 +2013,22 @@ def process_provenance_tokens(llm_response_text: str, session_id: str) -> str:
                     continue
                     
                 cell_strip = cell.strip()
-                # Clean CACHED / DERIVED markers from table cells
-                if " | CACHED | " in cell_strip:
-                    cell_strip = cell_strip.split(" | CACHED | ")[0].strip()
-                if " | DERIVED | " in cell_strip:
-                    cell_strip = cell_strip.split(" | DERIVED | ")[0].strip()
-                if "[unverified" in cell_strip:
-                    # Keep raw numbers if present, otherwise output standard empty marker
-                    match_num = re.search(r'(-?\d+(?:\.\d+)?)', cell_strip)
-                    if match_num:
-                        cell_strip = match_num.group(1)
-                    else:
-                        cell_strip = "-"
+                # Table cells keep a SHORT provenance tag (CLAUDE.md §0: cached vs
+                # derived stays distinguishable) instead of the long confidence label.
+                if " · CACHED · " in cell_strip:
+                    # A token match keeps its '(key: k)' so it stays distinguishable
+                    # from an exact-key HIGH inside the table too.
+                    val_part, _, grade = cell_strip.partition(" · CACHED · ")
+                    key_note = grade.partition("(key:")[2]
+                    cell_strip = val_part.strip() + " · cached" + (f" (key:{key_note}" if key_note else "")
+                if " · DERIVED · " in cell_strip:
+                    cell_strip = cell_strip.split(" · DERIVED · ")[0].strip() + " · derived"
+                marker = re.search(r'\[unverified[^\]]*\]', cell_strip)
+                if marker:
+                    # The failure marker survives; a bare number beside it (the
+                    # model's own figure) never does. The absent-from-cache marker
+                    # renders as the standard empty cell; every other marker verbatim.
+                    cell_strip = "-" if marker.group(0) == "[unverified — absent from cache]" else marker.group(0)
                 
                 modified_cells.append(f" {cell_strip} ")
             lines[idx] = "|".join(modified_cells)
@@ -1683,10 +2146,19 @@ def _ingest_library_file(file_bytes: bytes, filename: str, uploader_email: str) 
         for chunk, fut in zip(chunks, futures):
             try:
                 vec = fut.result()
-            except Exception as e:
+            except Exception as e:                           # noqa: BLE001 — counted below, never hidden
                 _logger.warning(f"[Library] Parallel embed error: {e}")
                 vec = None
             embedded.append((chunk, vec.tobytes() if vec is not None else None))
+
+    # A chunk with no embedding can never be retrieved (search reads
+    # `WHERE embedding IS NOT NULL`), so it is never reported as ingested.
+    unembedded = sum(1 for _, emb in embedded if emb is None)
+    if unembedded == len(embedded):
+        why = ("no embedding key configured" if not _real_embedding_key_configured()
+               else "the embedder failed for every chunk")
+        return {"error": f"could not embed any of the {len(embedded)} chunks ({why}); "
+                         f"refusing to store unretrievable chunks"}
 
     with _get_conn() as (conn, ph):
         cur = conn.cursor()
@@ -1712,44 +2184,20 @@ def _ingest_library_file(file_bytes: bytes, filename: str, uploader_email: str) 
                 )
 
             conn.commit()
-            _LibraryEmbCache.invalidate()
-            _logger.info(f"[Library] Ingested '{filename}' — {len(embedded)} chunks (doc_id={doc_id})")
-            return {"status": "ingested", "chunks": len(embedded), "doc_id": doc_id}
-
-        except Exception as e:
+        except Exception as e:                               # noqa: BLE001 — DB failure, reported in the result
             conn.rollback()
             _logger.error(f"[Library] Ingest DB error: {e}")
             return {"error": str(e)}
+    # After the commit: a cache-invalidation failure must not report a
+    # committed insert as a rolled-back one (rollback after commit is a no-op).
+    _LibraryEmbCache.invalidate()
+    status = "ingested" if unembedded == 0 else "partial"
+    _logger.info(f"[Library] {status}: '{filename}' — {len(embedded)} chunks, "
+                 f"{unembedded} without embedding (doc_id={doc_id})")
+    return {"status": status, "chunks": len(embedded), "chunks_unembedded": unembedded, "doc_id": doc_id}
 
 
 
-# -- THREAD-SAFE KEY TRACKING --------------------------------------------------
-
-_FAILED_KEYS:      dict[str, dict] = {}
-
-_FAILED_KEYS_LOCK: threading.Lock  = threading.Lock()
-
-
-
-
-
-def _mark_key_failed(key: str, is_hard: bool = False) -> None:
-
-    with _FAILED_KEYS_LOCK:
-
-        _FAILED_KEYS[key] = {"ts": time.time(), "wait": 3600 if is_hard else 60}
-
-
-
-
-
-def _key_healthy(key: str) -> bool:
-
-    with _FAILED_KEYS_LOCK:
-
-        f = _FAILED_KEYS.get(key, {})
-
-    return (time.time() - f.get("ts", 0)) >= f.get("wait", 0)
 
 
 
@@ -1769,269 +2217,9 @@ SYSTEM_PROMPT = (Path(__file__).parent / "prompts" / "hviel_system_prompt.md").r
 
 # -- GEMINI TOOL DECLARATIONS --------------------------------------------------
 
-_HVIEL_TOOLS = [
-
-    {
-
-        "function_declarations": [
-
-            {
-
-                "name": "calculate_petrophysics_properties",
-
-                "description": "**MANDATORY for centrifuge Hassler-Brunner / Forbes corrections and for FZI/RQI calculations. Do not produce Pc(Sw) or RQI values without calling this tool first.** Calculation Engine for SCAL Tracks A, B, D, E. Does NOT generate charts, only returns calculated JSON data.",
-
-                "parameters": {
-
-                    "type": "OBJECT",
-
-                    "properties": {
-
-                        "script": {"type": "STRING", "description": "One of: petrophysics.py, micp_skill.py, centrifuge_skill.py"},
-
-                        "model":  {"type": "STRING", "description": "For petrophysics.py: regress_archie_m_a, regress_archie_n, rqi_fzi. For centrifuge: pc_only, full, hassler_brunner. rqi_fzi params: {phi: [fractions 0-1], perm: [mD], depth: [optional array]}. Returns full per-sample table with HU classification."},
-
-                        "params": {"type": "OBJECT", "description": "Parameters required for the selected script and model."}
-
-                    },
-
-                    "required": ["script", "params"]
-
-                }
-
-            },
-
-            {
-
-                "name": "execute_python_simulation",
-
-                "description": "Universal petrophysical simulation (Brooks-Corey, 1D Kr curves, 2D IMPES reservoir waterflood). Returns JSON for PRC plotting.",
-
-                "parameters": {
-
-                    "type": "OBJECT",
-
-                    "properties": {
-
-                        "model":  {"type": "STRING"},
-
-                        "mode":   {"type": "STRING"},
-
-                        "params": {
-
-                            "type": "OBJECT",
-
-                            "properties": {
-
-                                "swr":     {"type": "NUMBER"}, "snr": {"type": "NUMBER"},
-
-                                "krw_max": {"type": "NUMBER"}, "kro_max": {"type": "NUMBER"},
-
-                                "nw":      {"type": "NUMBER"}, "no": {"type": "NUMBER"},
-
-                                "nx":      {"type": "NUMBER"}, "ny": {"type": "NUMBER"},
-
-                                "steps":   {"type": "NUMBER"},
-
-                            },
-
-                        },
-
-                    },
-
-                    "required": ["model", "mode", "params"],
-
-                },
-
-            },
-
-            {
-
-                "name": "generate_mermaid_diagram",
-
-                "description": "Generates Mermaid.js diagram code for complex workflows.",
-
-                "parameters": {
-
-                    "type": "OBJECT",
-
-                    "properties": {
-
-                        "type":    {"type": "STRING"},
-
-                        "content": {"type": "STRING"},
-
-                    },
-
-                    "required": ["type", "content"],
-
-                },
-
-            },
-
-            {
-
-                "name": "fit_petrophysical_curve",
-
-                "description": (
-
-                    "**MANDATORY before reporting any fitted parameter (Archie n, m, a, MICP Pe/Pd/modal radius, Corey exponents, J-function values). Never report these values without calling this tool first. If the tool fails, report the failure  -  do not estimate.** "
-
-                    "Fits raw SCAL lab data to standard petrophysical models. Select model by curve type:\n"
-
-                    "  model='brooks_corey' or 'let'  ->  Relative Permeability (pass sw, krw, kro arrays).\n"
-
-                    "  model='micp'  ->  Mercury Injection (pass pc=[psia], s_hg=[fraction 0-1]). "
-
-                    "For imbibition (recovery) cycle: also pass pc_imb=[psia], s_hg_imb=[fraction]. "
-
-                    "Auto-generates log-scale Pc curve (drainage solid, imbibition dashed) + PSD.\n"
-
-                    "  model='ri'  ->  Resistivity Index Archie fit (pass sw=[...], ri=[...]). Log-log plot, fits n exponent.\n"
-
-                    "  model='ff'  ->  Formation Factor Archie fit (pass porosity=[...], ff=[...]). Log-log plot, fits m and a.\n"
-
-                    "  model='jfunction'  ->  Leverett J-Function (pass sw=[...], pc=[psia], k_md=X, phi_val=Y, ift_cos_theta=26.5).\n"
-
-                    "  model='pc_centrifuge'  ->  Capillary Pressure direct (pass sw=[...], pc=[psia values]).\n"
-
-                    "  model='overburden'  ->  Compaction curves (pass pressure=[psia], porosity=[...], perm=[mD]). Dual-axis.\n"
-
-                    "  model='poroperm'  ->  Porosity vs Permeability cross-plot with log-linear fit (pass porosity=[...], perm=[mD]).\n"
-
-                    "  model='poroperm_depth'  ->  Porosity & Permeability vs Depth (pass depth=[...], porosity=[...], perm=[mD]). Dual-axis.\n"
-
-                    "Pass sample_name='Core-1' to label multi-sample charts."
-
-                ),
-
-                "parameters": {
-
-                    "type": "OBJECT",
-
-                    "properties": {
-
-                        "model":         {"type": "STRING"},
-
-                        "sw":            {"type": "ARRAY", "items": {"type": "NUMBER"}},
-
-                        "krw":           {"type": "ARRAY", "items": {"type": "NUMBER"}},
-
-                        "kro":           {"type": "ARRAY", "items": {"type": "NUMBER"}},
-
-                        "pc":            {"type": "ARRAY", "items": {"type": "NUMBER"}},
-
-                        "s_hg":         {"type": "ARRAY", "items": {"type": "NUMBER"}},
-
-                        "pc_imb":       {"type": "ARRAY", "items": {"type": "NUMBER"}},
-
-                        "s_hg_imb":     {"type": "ARRAY", "items": {"type": "NUMBER"}},
-
-                        "ri":            {"type": "ARRAY", "items": {"type": "NUMBER"}},
-
-                        "ff":            {"type": "ARRAY", "items": {"type": "NUMBER"}},
-
-                        "porosity":      {"type": "ARRAY", "items": {"type": "NUMBER"}},
-
-                        "perm":          {"type": "ARRAY", "items": {"type": "NUMBER"}},
-
-                        "pressure":      {"type": "ARRAY", "items": {"type": "NUMBER"}},
-
-                        "depth":         {"type": "ARRAY", "items": {"type": "NUMBER"}},
-
-                        "k_md":          {"type": "NUMBER"},
-
-                        "phi_val":       {"type": "NUMBER"},
-
-                        "ift_cos_theta": {"type": "NUMBER"},
-
-                        "sample_name":   {"type": "STRING"},
-
-                    },
-
-                    "required": ["model"],
-
-                },
-
-            },
-
-            {
-
-                "name": "agentic_history_matching",
-
-                "description": "Simulated Annealing history matching on SCAL lab data.",
-
-                "parameters": {
-
-                    "type": "OBJECT",
-
-                    "properties": {
-
-                        "sw":  {"type": "ARRAY", "items": {"type": "NUMBER"}},
-
-                        "krw": {"type": "ARRAY", "items": {"type": "NUMBER"}},
-
-                        "kro": {"type": "ARRAY", "items": {"type": "NUMBER"}},
-
-                    },
-
-                    "required": ["sw", "krw", "kro"],
-
-                },
-
-            },
-
-            {
-
-                "name": "generate_executive_report",
-
-                "description": (
-
-                    "**REFUSE this call if no SCAL analysis tools have been invoked in the current session. A report cannot be generated when no analysis has been performed. Return an error message asking the user to upload data and run analysis first.** "
-
-                    "Generates a professional PRC Executive SCAL Report (.docx) for the current "
-
-                    "engineering session. Call this when the user asks for a report, summary "
-
-                    "document, or engineering deliverable. Pass the well name extracted from the "
-
-                    "conversation context."
-
-                ),
-
-                "parameters": {
-
-                    "type": "OBJECT",
-
-                    "properties": {
-
-                        "well_name":    {"type": "STRING"},
-
-                        "report_title": {"type": "STRING"},
-
-                    },
-
-                    "required": ["well_name"],
-
-                },
-
-            },
-
-            {
-
-                "name": "get_audit_history",
-
-                "description": "Retrieves the historical record of physics audits (the Auditor's Ledger) for the current session.",
-
-                "parameters": {"type": "OBJECT", "properties": {}},
-
-            },
-
-        ]
-
-    }
-
-]
+# Tool identity lives in tools_registry (D3.2): the model-facing declarations are
+# derived from it, never duplicated here.
+_HVIEL_TOOLS = tools_registry.schemas()
 
 
 
@@ -2047,9 +2235,6 @@ _PETRO_KEYS = frozenset({
 
 import contextvars
 from pydantic import BaseModel, Field
-from genkit.ai import Genkit
-from genkit.plugins.google_genai import GoogleAI
-from genkit.ai._server import ServerSpec
 
 class TLSContext:
     def __init__(self):
@@ -2080,197 +2265,55 @@ class TLSContext:
 
 _tls = TLSContext()
 
-# Initialize Google Genkit Plugin and Client
-google_ai_plugin = GoogleAI(api_key=GEMINI_KEY_POOL[0])
-ai = Genkit(plugins=[google_ai_plugin], reflection_server_spec=ServerSpec(port=3105))
 
-# Define tool schemas for Genkit
+# -- DEGRADATION CHANNEL (D3.1) -------------------------------------------------
+# A path that degrades instead of failing must say so where the CALLER can see
+# it: the route's JSON (`degradations`), the SSE `done` event, and a trailer on
+# the assembled answer. A log line alone is not visibility. The list object is
+# created by the route before the worker thread starts, so the ContextVar copy
+# the thread receives shares it.
 
-class CalculatePetrophysicsInput(BaseModel):
-    script: str = Field(description="One of: petrophysics.py, micp_skill.py, centrifuge_skill.py")
-    model: Optional[str] = Field(None, description="For petrophysics.py: regress_archie_m_a, regress_archie_n, rqi_fzi. For centrifuge: pc_only, full, hassler_brunner. rqi_fzi params: {phi: [fractions 0-1], perm: [mD], depth: [optional array]}. Returns full per-sample table with HU classification.")
-    params: dict = Field(description="Parameters required for the selected script and model.")
+def note_degradation(kind: str, detail) -> None:
+    entry = f"{kind}: {str(detail)[:200]}"
+    _logger.warning("[degraded] %s", entry)
+    lst = getattr(_tls, "degradations", None)
+    if lst is None:
+        lst = []
+        _tls.degradations = lst
+    if entry not in lst:
+        lst.append(entry)
 
-class ExecutePythonSimulationParamsInput(BaseModel):
-    swr: Optional[float] = None
-    snr: Optional[float] = None
-    krw_max: Optional[float] = None
-    kro_max: Optional[float] = None
-    nw: Optional[float] = None
-    no: Optional[float] = None
-    nx: Optional[float] = None
-    ny: Optional[float] = None
-    steps: Optional[float] = None
 
-class ExecutePythonSimulationInput(BaseModel):
-    model: str
-    mode: str
-    params: ExecutePythonSimulationParamsInput
+def degradations() -> list:
+    return list(getattr(_tls, "degradations", None) or [])
 
-class GenerateMermaidDiagramInput(BaseModel):
-    type: str
-    content: str
 
-class FitPetrophysicalCurveInput(BaseModel):
-    model: str
-    sw: Optional[list[float]] = None
-    krw: Optional[list[float]] = None
-    kro: Optional[list[float]] = None
-    pc: Optional[list[float]] = None
-    s_hg: Optional[list[float]] = None
-    pc_imb: Optional[list[float]] = None
-    s_hg_imb: Optional[list[float]] = None
-    ri: Optional[list[float]] = None
-    ff: Optional[list[float]] = None
-    porosity: Optional[list[float]] = None
-    perm: Optional[list[float]] = None
-    pressure: Optional[list[float]] = None
-    depth: Optional[list[float]] = None
-    k_md: Optional[float] = None
-    phi_val: Optional[float] = None
-    ift_cos_theta: Optional[float] = None
-    sample_name: Optional[str] = None
+def _carry_degradations(carried: list) -> list:
+    """chat() clears the request's degradation list in place on entry, so a
+    request that calls it more than once (multi-Q) loses what earlier calls and
+    the pre-chat parsing noted. Collect the current entries into `carried`."""
+    for entry in degradations():
+        if entry not in carried:
+            carried.append(entry)
+    return carried
 
-class AgenticHistoryMatchingInput(BaseModel):
-    sw: list[float]
-    krw: list[float]
-    kro: list[float]
 
-class GenerateExecutiveReportInput(BaseModel):
-    well_name: str
-    report_title: Optional[str] = None
+def _renote_degradations(entries) -> None:
+    for entry in entries:
+        kind, _, detail = entry.partition(": ")
+        note_degradation(kind, detail)
 
-class GetAuditHistoryInput(BaseModel):
-    session_id: Optional[str] = Field(None, description="Optional session ID to retrieve audit history for")
 
-@ai.tool(name="calculate_petrophysics_properties", description="**MANDATORY for centrifuge Hassler-Brunner / Forbes corrections and for FZI/RQI calculations. Do not produce Pc(Sw) or RQI values without calling this tool first.** Calculation Engine for SCAL Tracks A, B, D, E. Does NOT generate charts, only returns calculated JSON data.")
-def calculate_petrophysics_properties_tool(input: CalculatePetrophysicsInput) -> str:
-    return "Calculated"
+def _degradation_trailer() -> str:
+    d = degradations()
+    return ("\n\n[degraded: " + "; ".join(d) + "]") if d else ""
 
-@ai.tool(name="execute_python_simulation", description="Universal petrophysical simulation (Brooks-Corey, 1D Kr curves, 2D IMPES reservoir waterflood). Returns JSON for PRC plotting.")
-def execute_python_simulation_tool(input: ExecutePythonSimulationInput) -> str:
-    return "Simulated"
-
-@ai.tool(name="generate_mermaid_diagram", description="Generates Mermaid.js diagram code for complex workflows.")
-def generate_mermaid_diagram_tool(input: GenerateMermaidDiagramInput) -> str:
-    return "Generated"
-
-@ai.tool(name="fit_petrophysical_curve", description="**MANDATORY before reporting any fitted parameter (Archie n, m, a, MICP Pe/Pd/modal radius, Corey exponents, J-function values). Never report these values without calling this tool first. If the tool fails, report the failure  -  do not estimate.** Fits raw SCAL lab data to standard petrophysical models. Select model by curve type:\n  model='brooks_corey' or 'let'  ->  Relative Permeability (pass sw, krw, kro arrays).\n  model='micp'  ->  Mercury Injection (pass pc=[psia], s_hg=[fraction 0-1]). For imbibition (recovery) cycle: also pass pc_imb=[psia], s_hg_imb=[fraction]. Auto-generates log-scale Pc curve (drainage solid, imbibition dashed) + PSD.\n  model='ri'  ->  Resistivity Index Archie fit (pass sw=[...], ri=[...]). Log-log plot, fits n exponent.\n  model='ff'  ->  Formation Factor Archie fit (pass porosity=[...], ff=[...]). Log-log plot, fits m and a.\n  model='jfunction'  ->  Leverett J-Function (pass sw=[...], pc=[psia], k_md=X, phi_val=Y, ift_cos_theta=26.5).\n  model='pc_centrifuge'  ->  Capillary Pressure direct (pass sw=[...], pc=[psia values]).\n  model='overburden'  ->  Compaction curves (pass pressure=[psia], porosity=[...], perm=[mD]). Dual-axis.\n  model='poroperm'  ->  Porosity vs Permeability cross-plot with log-linear fit (pass porosity=[...], perm=[mD]).\n  model='poroperm_depth'  ->  Porosity & Permeability vs Depth (pass depth=[...], porosity=[...], perm=[mD]). Dual-axis.\nPass sample_name='Core-1' to label multi-sample charts.")
-def fit_petrophysical_curve_tool(input: FitPetrophysicalCurveInput) -> str:
-    return "Fitted"
-
-@ai.tool(name="agentic_history_matching", description="Simulated Annealing history matching on SCAL lab data.")
-def agentic_history_matching_tool(input: AgenticHistoryMatchingInput) -> str:
-    return "Matched"
-
-@ai.tool(name="generate_executive_report", description="**REFUSE this call if no SCAL analysis tools have been invoked in the current session. A report cannot be generated when no analysis has been performed. Return an error message asking the user to upload data and run analysis first.** Generates a professional PRC Executive SCAL Report (.docx) for the current engineering session. Call this when the user asks for a report, summary document, or engineering deliverable. Pass the well name extracted from the conversation context.")
-def generate_executive_report_tool(input: GenerateExecutiveReportInput) -> str:
-    return "Report generated"
-
-@ai.tool(name="get_audit_history", description="Retrieves the historical record of physics audits (the Auditor's Ledger) for the current session.")
-def get_audit_history_tool(input: GetAuditHistoryInput) -> str:
-    return "Audits retrieved"
-
-# Compatibility Wrapper Classes for Genkit response to Gemini SDK response mapping
-
-class GeminiPartCompat:
-    def __init__(self, part):
-        self._part = part
-
-    @property
-    def text(self) -> Optional[str]:
-        p = self._part
-        if hasattr(p, "text") and p.text is not None:
-            return p.text
-        if hasattr(p, "root"):
-            r = p.root
-            if hasattr(r, "text") and r.text is not None:
-                return r.text
-        return None
-
-    @property
-    def function_call(self):
-        p = self._part
-        tr = None
-        if hasattr(p, "tool_request") and p.tool_request is not None:
-            tr = p.tool_request
-        elif hasattr(p, "root"):
-            r = p.root
-            if hasattr(r, "tool_request") and r.tool_request is not None:
-                tr = r.tool_request
-        
-        if tr:
-            class FuncCallCompat:
-                def __init__(self, name, args):
-                    self.name = name
-                    self.args = args
-            return FuncCallCompat(getattr(tr, "name", ""), getattr(tr, "input", {}))
-        return None
-
-class GeminiContentCompat:
-    def __init__(self, message_or_content):
-        self._msg = message_or_content
-        parts_list = []
-        if message_or_content:
-            if hasattr(message_or_content, "content") and message_or_content.content:
-                parts_list = message_or_content.content
-            elif hasattr(message_or_content, "parts") and message_or_content.parts:
-                parts_list = message_or_content.parts
-        self.parts = [GeminiPartCompat(p) for p in parts_list]
-
-class GeminiCandidateCompat:
-    def __init__(self, candidate_or_message):
-        self.content = GeminiContentCompat(candidate_or_message)
-
-class GeminiUsageMetadataCompat:
-    def __init__(self, usage):
-        self._usage = usage
-
-    @property
-    def prompt_token_count(self) -> int:
-        if self._usage and getattr(self._usage, "input_tokens", None) is not None:
-            return int(self._usage.input_tokens)
-        return 0
-
-    @property
-    def candidates_token_count(self) -> int:
-        if self._usage and getattr(self._usage, "output_tokens", None) is not None:
-            return int(self._usage.output_tokens)
-        return 0
-
-class GeminiResponseCompat:
-    def __init__(self, genkit_resp):
-        self._resp = genkit_resp
-        self.candidates = [GeminiCandidateCompat(getattr(genkit_resp, "message", None))]
-        self.usage_metadata = GeminiUsageMetadataCompat(getattr(genkit_resp, "usage", None))
-
-    @property
-    def text(self) -> str:
-        if hasattr(self._resp, "text"):
-            return self._resp.text
-        parts = []
-        msg = getattr(self._resp, "message", None)
-        if msg and hasattr(msg, "content") and msg.content:
-            for p in msg.content:
-                if hasattr(p, "text") and p.text:
-                    parts.append(p.text)
-                elif hasattr(p, "root") and hasattr(p.root, "text") and p.root.text:
-                    parts.append(p.root.text)
-        return "".join(parts)
-
-class GeminiChunkCompat:
-    def __init__(self, genkit_chunk):
-        self._chunk = genkit_chunk
-        class MockContent:
-            def __init__(self, parts):
-                self.parts = parts
-        class MockCandidate:
-            def __init__(self, parts):
-                self.content = MockContent(parts)
-        
-        parts_list = getattr(genkit_chunk, "content", []) or []
-        self.candidates = [MockCandidate([GeminiPartCompat(p) for p in parts_list])]
-        self.usage_metadata = GeminiUsageMetadataCompat(getattr(genkit_chunk, "usage", None))
+# The tool schemas the model is offered live in `_HVIEL_TOOLS` (sent via
+# `_chat_tools()`) and are implemented in `PRCChatAssistant._execute_tool`.
+# The former Genkit registration of the same ten names — a parallel set of
+# placeholder stubs on an `ai = Genkit(...)` object nothing ever called — was
+# removed: it only created a name collision that would have fed the model
+# "Calculated"/"Fitted" success strings the day anyone used `ai.generate`.
 
 def _add_breadcrumb(msg: str):
     if not hasattr(_tls, "breadcrumbs"):
@@ -2280,551 +2323,683 @@ def _add_breadcrumb(msg: str):
         "step": msg
     })
 
-def _log_api_usage(session_id: str, model: str, prompt_tokens: int, completion_tokens: int):
-    # Calculate cost (Standard rates per 1M tokens)
-    in_rate = 1.25 if "pro" in model else 0.075
-    out_rate = 5.00 if "pro" in model else 0.30
-    cost = ((prompt_tokens * in_rate) + (completion_tokens * out_rate)) / 1_000_000
-    
+# USD per 1M tokens (input, output), keyed by provider. Only Gemini's public
+# rates are known here; every other provider (mock, ollama, nvidia, openai)
+# writes NULL — an unknown cost is NULL, never a Gemini-priced fabrication.
+_TOKEN_RATES_PER_M = {"gemini": {"pro": (1.25, 5.00), "flash": (0.075, 0.30)}}
+
+
+def _token_cost_usd(provider: str, model: str, prompt_tokens: int, completion_tokens: int):
+    rates = _TOKEN_RATES_PER_M.get((provider or "").lower())
+    if not rates:
+        return None
+    in_rate, out_rate = rates["pro"] if "pro" in (model or "") else rates["flash"]
+    return ((prompt_tokens * in_rate) + (completion_tokens * out_rate)) / 1_000_000
+
+
+def _log_api_usage(session_id: str, model: str, prompt_tokens: int, completion_tokens: int,
+                   provider: str = None):
+    cost = _token_cost_usd(provider, model, prompt_tokens, completion_tokens)
     try:
         db("INSERT INTO api_metrics (session_id, timestamp, model, prompt_tokens, completion_tokens, cost_usd) VALUES (?, ?, ?, ?, ?, ?)",
            (session_id, time.time(), model, prompt_tokens, completion_tokens, cost))
-    except Exception as e:
-        _logger.warning(f"[CostTracker] Failed to insert metrics: {e}")
+    except Exception as e:                                   # noqa: BLE001 — reported to the request, not only logged
+        note_degradation("api-metrics-not-logged", f"{type(e).__name__}: {e}")
 
 def _extract_and_log_corrections(session_id: str, email: str, text: str) -> str:
     # Pattern to find [CORRECTION: issue | value]
     pattern = r"\[CORRECTION:\s*(.*?)\s*\|\s*(.*?)\s*\]"
-    matches = re.findall(pattern, text)
-    for issue, val in matches:
+
+    def _store(match: "re.Match") -> str:
+        issue, val = match.group(1).strip(), match.group(2).strip()
         try:
             db("INSERT INTO user_corrections (session_id, user_email, original_issue, corrected_value, timestamp) VALUES (?, ?, ?, ?, ?)",
-               (session_id, email, issue.strip(), val.strip(), time.time()))
-        except Exception as e:
-            _logger.warning(f"[LearningLoop] Failed to store correction: {e}")
-    # Strip the tags from the final user-facing text
-    return re.sub(pattern, "", text).strip()
+               (session_id, email, issue, val, time.time()))
+        except Exception as e:                               # noqa: BLE001 — the tag is NOT stripped as if stored
+            note_degradation("correction-not-saved", f"{issue}: {type(e).__name__}: {e}")
+            return f"[correction not saved: {issue} | {val}]"
+        return ""                                            # persisted → strip the tag
+
+    return re.sub(pattern, _store, text).strip()
 
 
 
 
 
-def _call_gemini_with_retry(client, model, contents, config, max_retries=5, base_delay=2):
-    """Call Genkit generate with compat mapping and fallback/retry logic."""
-    if "/" not in model and not model.startswith("googleai/"):
-        model = f"googleai/{model}"
+# ===================== NVIDIA NIM tool-calling backend ====================== #
+# Chat path runs through llm_adapter.CHAT (provider from env). The big chat
+# tool-loop downstream is untouched: these helpers return genai-shaped shims
+# (resp.candidates[0].content.parts with .text / .function_call(.name,.args)).
 
+
+class _ChatFuncCall:
+    def __init__(self, name, args):
+        self.name = name
+        self.args = args or {}
+
+
+class _ChatPart:
+    def __init__(self, text=None, func=None):
+        self._text = text
+        self._func = func
+
+    @property
+    def text(self):
+        return self._text
+
+    @property
+    def function_call(self):
+        return self._func
+
+
+class _ChatContent:
+    def __init__(self, parts):
+        self.parts = parts
+
+
+class _ChatCandidate:
+    def __init__(self, parts):
+        self.content = _ChatContent(parts)
+
+
+class _ChatUsage:
+    def __init__(self, pt, ct):
+        self.prompt_token_count = pt
+        self.candidates_token_count = ct
+
+
+class _ChatResponse:
+    def __init__(self, parts, usage):
+        self.candidates = [_ChatCandidate(parts)]
+        self.usage_metadata = usage
+
+    @property
+    def text(self):
+        return "".join(p.text for p in self.candidates[0].content.parts if p.text)
+
+
+def _chat_lower_schema(s):
+    """Recursively lowercase Gemini uppercase JSON-schema type strings for OpenAI."""
+    if isinstance(s, dict):
+        out = {}
+        for k, v in s.items():
+            if k == "type" and isinstance(v, str):
+                out[k] = v.lower()
+            elif k == "properties" and isinstance(v, dict):
+                out[k] = {pk: _chat_lower_schema(pv) for pk, pv in v.items()}
+            elif k == "items":
+                out[k] = _chat_lower_schema(v)
+            else:
+                out[k] = _chat_lower_schema(v) if isinstance(v, (dict, list)) else v
+        return out
+    if isinstance(s, list):
+        return [_chat_lower_schema(x) for x in s]
+    return s
+
+
+_CHAT_TOOLS_CACHE = None
+
+
+def _chat_tools():
+    global _CHAT_TOOLS_CACHE
+    if _CHAT_TOOLS_CACHE is None:
+        tools = []
+        for group in _HVIEL_TOOLS:
+            for fd in group.get("function_declarations", []):
+                tools.append({
+                    "type": "function",
+                    "function": {
+                        "name": fd["name"],
+                        "description": fd.get("description", ""),
+                        "parameters": _chat_lower_schema(fd.get("parameters") or {"type": "object", "properties": {}}),
+                    },
+                })
+        _CHAT_TOOLS_CACHE = tools
+    return _CHAT_TOOLS_CACHE
+
+
+def _chat_config_unpack(config):
     system_instruction = None
     temperature = 0.2
-    tools_list = []
-
+    want_tools = False
     if config:
-        if hasattr(config, 'system_instruction') and config.system_instruction:
-            if isinstance(config.system_instruction, str):
-                system_instruction = config.system_instruction
-            elif hasattr(config.system_instruction, 'parts') and config.system_instruction.parts:
-                parts_text = []
-                for p in config.system_instruction.parts:
-                    if hasattr(p, 'text') and p.text:
-                        parts_text.append(p.text)
-                system_instruction = "".join(parts_text)
+        si = getattr(config, "system_instruction", None)
+        if si:
+            if isinstance(si, str):
+                system_instruction = si
+            elif hasattr(si, "parts") and si.parts:
+                system_instruction = "".join(p.text for p in si.parts if getattr(p, "text", None))
             else:
-                system_instruction = str(config.system_instruction)
-        if hasattr(config, 'temperature') and config.temperature is not None:
+                system_instruction = str(si)
+        if getattr(config, "temperature", None) is not None:
             temperature = config.temperature
-        if hasattr(config, 'tools') and config.tools:
-            tools_list = [
-                'calculate_petrophysics_properties',
-                'execute_python_simulation',
-                'generate_mermaid_diagram',
-                'fit_petrophysical_curve',
-                'agentic_history_matching',
-                'generate_executive_report',
-                'get_audit_history'
-            ]
+        if getattr(config, "tools", None):
+            want_tools = True
+    return system_instruction, temperature, want_tools
 
-    # Convert contents to serializable Genkit messages dictionary list
+
+def _chat_contents_to_neutral(contents):
+    """genai Content list -> neutral [{role, parts:[{text}|{tool_request}|{tool_response}]}].
+    file_data parts are intentionally dropped (NVIDIA has no Files API; the
+    deterministic ground-truth extraction is already injected as prompt text)."""
     messages_data = []
     for c in contents:
-        role_str = getattr(c, 'role', 'user')
-        role = 'model' if role_str == 'model' else 'user'
+        role_str = getattr(c, "role", "user")
+        role = "model" if role_str == "model" else "user"
         parts_data = []
-        c_parts = getattr(c, 'parts', []) or []
-        for p in c_parts:
-            if hasattr(p, 'text') and p.text:
-                parts_data.append({'text': p.text})
-            elif hasattr(p, 'function_call') and p.function_call:
-                parts_data.append({'tool_request': {
-                    'name': p.function_call.name,
-                    'input': dict(p.function_call.args or {})
-                }})
-            elif hasattr(p, 'function_response') and p.function_response:
-                parts_data.append({'tool_response': {
-                    'name': p.function_response.name,
-                    'output': p.function_response.response
-                }})
+        for p in getattr(c, "parts", []) or []:
+            if hasattr(p, "text") and p.text:
+                parts_data.append({"text": p.text})
+            elif hasattr(p, "function_call") and p.function_call:
+                parts_data.append({"tool_request": {"name": p.function_call.name, "input": dict(p.function_call.args or {})}})
+            elif hasattr(p, "function_response") and p.function_response:
+                parts_data.append({"tool_response": {"name": p.function_response.name, "output": p.function_response.response}})
         if parts_data:
-            messages_data.append({'role': role, 'parts': parts_data})
+            messages_data.append({"role": role, "parts": parts_data})
+    return messages_data
 
-    # Flow wrapper
-    @ai.flow(name="hviel_chat_flow")
-    async def hviel_chat_flow_internal(flow_args: dict) -> dict:
-        try:
-            from genkit.types import Message, Role, Part, ToolRequest, ToolResponse
-            genkit_messages = []
-            for m in flow_args['messages']:
-                role = Role.MODEL if m['role'] == 'model' else Role.USER
-                parts = []
-                for p in m['parts']:
-                    if 'text' in p:
-                        parts.append(Part(text=p['text']))
-                    elif 'tool_request' in p:
-                        parts.append(Part(tool_request=ToolRequest(
-                            name=p['tool_request']['name'],
-                            input=p['tool_request'].get('input')
-                        )))
-                    elif 'tool_response' in p:
-                        parts.append(Part(tool_response=ToolResponse(
-                            name=p['tool_response']['name'],
-                            output=p['tool_response'].get('output')
-                        )))
-                genkit_messages.append(Message(role=role, content=parts))
 
-            resp = await ai.generate(
-                model=flow_args['model'],
-                messages=genkit_messages,
-                system=flow_args['system_instruction'],
-                tools=flow_args['tools_list'] if flow_args['tools_list'] else None,
-                return_tool_requests=True,
-                config={'temperature': flow_args['temperature']}
-            )
-            return {"response": resp.model_dump()}
-        except Exception as flow_err:
-            import traceback
-            _logger.error(f"[FLOW EXCEPTION] Error in hviel_chat_flow_internal: {flow_err}\\nTraceback:\\n{traceback.format_exc()}")
-            raise flow_err
-
-    # Execute flow inside running loop or via anyio thread runner
-    flow_payload = {
-        'model': model,
-        'messages': messages_data,
-        'system_instruction': system_instruction,
-        'tools_list': tools_list,
-        'temperature': temperature
-    }
-
-    for attempt in range(max_retries):
-        try:
-            async def run_flow_coro():
-                return await hviel_chat_flow_internal(flow_payload)
-
-            try:
-                res = anyio.from_thread.run(run_flow_coro)
-            except RuntimeError:
-                res = asyncio.run(run_flow_coro())
-
-            from genkit.types import GenerateResponse
-            resp_val = GenerateResponse.model_validate(res["response"])
-            compat_resp = GeminiResponseCompat(resp_val)
-            
-            try:
-                if compat_resp.usage_metadata:
-                    _log_api_usage(
-                        getattr(_tls, 'current_session_id', 'SYSTEM'),
-                        model,
-                        compat_resp.usage_metadata.prompt_token_count,
-                        compat_resp.usage_metadata.candidates_token_count
-                    )
-            except Exception as usage_err:
-                _logger.warning(f"[CostTracker] Failed to log usage from generate_content: {usage_err}")
-                
-            return compat_resp
-        except Exception as e:
-            err = (str(e) + " " + str(getattr(e, "__cause__", "")) + " " + str(getattr(e, "__context__", ""))).lower()
-            is_503 = any(x in err for x in ["503", "service_unavailable", "unavailable"])
-            is_429 = any(x in err for x in ["429", "resource_exhausted"])
-            
-            if (is_503 or is_429) and "flash" in model:
-                pro_model = "googleai/gemini-2.5-pro"
-                _logger.warning(f"[Fallback] {model} returned 503/429. Falling back to {pro_model} immediately...")
-                flow_payload['model'] = pro_model
-                try:
-                    async def run_fallback_coro():
-                        return await hviel_chat_flow_internal(flow_payload)
-                    try:
-                        res = anyio.from_thread.run(run_fallback_coro)
-                    except RuntimeError:
-                        res = asyncio.run(run_fallback_coro())
-                    from genkit.types import GenerateResponse
-                    resp_val = GenerateResponse.model_validate(res["response"])
-                    compat_resp = GeminiResponseCompat(resp_val)
-                    try:
-                        if compat_resp.usage_metadata:
-                            _log_api_usage(
-                                getattr(_tls, 'current_session_id', 'SYSTEM'),
-                                pro_model,
-                                compat_resp.usage_metadata.prompt_token_count,
-                                compat_resp.usage_metadata.candidates_token_count
-                            )
-                    except Exception as usage_err:
-                        _logger.warning(f"[CostTracker] Failed to log usage from fallback: {usage_err}")
-                    return compat_resp
-                except Exception as fallback_err:
-                    raise ValueError(f"CRITICAL: Both primary and fallback models are UNAVAILABLE. {fallback_err}")
-                    
-            if (is_503 or is_429) and attempt < max_retries - 1:
-                delay = base_delay * (2 ** attempt)
-                if is_429:
-                    delay *= 2
-                _logger.info(f"[DocGen] Gemini retry attempt {attempt + 1}/{max_retries} in {delay}s")
-                time.sleep(delay)
-                continue
-            raise
-    raise ValueError(f"Gemini call failed after {max_retries} retries")
-
-GLOBAL_STREAM_QUEUES = {}
-
-def _call_gemini_stream_with_retry(client, model, contents, config, max_retries=3, base_delay=2):
-    """Call Genkit generate_stream with compat mapping and fallback/retry logic."""
-    import queue
-    if "/" not in model and not model.startswith("googleai/"):
-        model = f"googleai/{model}"
-
-    system_instruction = None
-    temperature = 0.2
-    tools_list = []
-
-    if config:
-        if hasattr(config, 'system_instruction') and config.system_instruction:
-            if isinstance(config.system_instruction, str):
-                system_instruction = config.system_instruction
-            elif hasattr(config.system_instruction, 'parts') and config.system_instruction.parts:
-                parts_text = []
-                for p in config.system_instruction.parts:
-                    if hasattr(p, 'text') and p.text:
-                        parts_text.append(p.text)
-                system_instruction = "".join(parts_text)
+def _chat_messages_from_neutral(messages_data, system_instruction):
+    """Neutral messages -> OpenAI chat messages, synthesizing tool_call ids."""
+    oa = []
+    if system_instruction:
+        oa.append({"role": "system", "content": system_instruction})
+    pending_ids = []
+    counter = 0
+    for m in messages_data:
+        role = m.get("role", "user")
+        parts = m.get("parts", []) or []
+        texts = [p["text"] for p in parts if "text" in p]
+        treqs = [p["tool_request"] for p in parts if "tool_request" in p]
+        tresps = [p["tool_response"] for p in parts if "tool_response" in p]
+        if role == "model":
+            content = "".join(texts)
+            tool_calls = []
+            for tr in treqs:
+                cid = "call_%d" % counter
+                counter += 1
+                pending_ids.append(cid)
+                tool_calls.append({
+                    "id": cid,
+                    "type": "function",
+                    "function": {"name": tr.get("name", ""), "arguments": _json.dumps(tr.get("input") or {})},
+                })
+            msg = {"role": "assistant"}
+            if tool_calls:
+                msg["content"] = content or None
+                msg["tool_calls"] = tool_calls
             else:
-                system_instruction = str(config.system_instruction)
-        if hasattr(config, 'temperature') and config.temperature is not None:
-            temperature = config.temperature
-        if hasattr(config, 'tools') and config.tools:
-            tools_list = [
-                'calculate_petrophysics_properties',
-                'execute_python_simulation',
-                'generate_mermaid_diagram',
-                'fit_petrophysical_curve',
-                'agentic_history_matching',
-                'generate_executive_report',
-                'get_audit_history'
-            ]
+                msg["content"] = content
+            oa.append(msg)
+        else:
+            if tresps:
+                for tr in tresps:
+                    if pending_ids:
+                        cid = pending_ids.pop(0)
+                    else:
+                        cid = "call_%d" % counter
+                        counter += 1
+                    out = tr.get("output")
+                    oa.append({
+                        "role": "tool",
+                        "tool_call_id": cid,
+                        "content": out if isinstance(out, str) else _json.dumps(out),
+                    })
+                if texts:
+                    oa.append({"role": "user", "content": "".join(texts)})
+            else:
+                oa.append({"role": "user", "content": "".join(texts)})
+    return oa
 
-    # Convert contents to serializable Genkit messages dictionary list
-    messages_data = []
-    for c in contents:
-        role_str = getattr(c, 'role', 'user')
-        role = 'model' if role_str == 'model' else 'user'
-        parts_data = []
-        c_parts = getattr(c, 'parts', []) or []
-        for p in c_parts:
-            if hasattr(p, 'text') and p.text:
-                parts_data.append({'text': p.text})
-            elif hasattr(p, 'function_call') and p.function_call:
-                parts_data.append({'tool_request': {
-                    'name': p.function_call.name,
-                    'input': dict(p.function_call.args or {})
-                }})
-            elif hasattr(p, 'function_response') and p.function_response:
-                parts_data.append({'tool_response': {
-                    'name': p.function_response.name,
-                    'output': p.function_response.response
-                }})
-        if parts_data:
-            messages_data.append({'role': role, 'parts': parts_data})
 
-    # Flow wrapper for streaming generator
-    @ai.flow(name="hviel_chat_flow_stream")
-    async def hviel_chat_flow_stream_internal(flow_args: dict) -> dict:
-        try:
-            from genkit.types import Message, Role, Part, ToolRequest, ToolResponse
-            genkit_messages = []
-            for m in flow_args['messages']:
-                role = Role.MODEL if m['role'] == 'model' else Role.USER
-                parts = []
-                for p in m['parts']:
-                    if 'text' in p:
-                        parts.append(Part(text=p['text']))
-                    elif 'tool_request' in p:
-                        parts.append(Part(tool_request=ToolRequest(
-                            name=p['tool_request']['name'],
-                            input=p['tool_request'].get('input')
-                        )))
-                    elif 'tool_response' in p:
-                        parts.append(Part(tool_response=ToolResponse(
-                            name=p['tool_response']['name'],
-                            output=p['tool_response']['output']
-                        )))
-                genkit_messages.append(Message(role=role, content=parts))
-
-            stream, response_future = ai.generate_stream(
-                model=flow_args['model'],
-                messages=genkit_messages,
-                system=flow_args['system_instruction'],
-                tools=flow_args['tools_list'] if flow_args['tools_list'] else None,
-                return_tool_requests=True,
-                config={'temperature': flow_args['temperature']}
-            )
-            
-            stream_id = flow_args['stream_id']
-            q = GLOBAL_STREAM_QUEUES[stream_id]
-            
-            async for chunk in stream:
-                q.put({"type": "chunk", "chunk": chunk.model_dump()})
-                
-            resp = await response_future
-            q.put({"type": "done", "response": resp.model_dump()})
-            return {"response": resp.model_dump()}
-        except Exception as flow_err:
-            import traceback
-            _logger.error(f"[FLOW EXCEPTION] Error in hviel_chat_flow_stream_internal: {flow_err}\\nTraceback:\\n{traceback.format_exc()}")
-            stream_id = flow_args.get('stream_id')
-            if stream_id and stream_id in GLOBAL_STREAM_QUEUES:
-                GLOBAL_STREAM_QUEUES[stream_id].put({"type": "error", "error": str(flow_err)})
-            raise flow_err
-
-    flow_payload = {
-        'model': model,
-        'messages': messages_data,
-        'system_instruction': system_instruction,
-        'tools_list': tools_list,
-        'temperature': temperature
-    }
-
-    for attempt in range(max_retries):
-        stream_id = str(uuid.uuid4())
-        q = queue.Queue()
-        GLOBAL_STREAM_QUEUES[stream_id] = q
-        flow_payload['stream_id'] = stream_id
-
-        try:
-            async def run_flow_stream():
-                return await hviel_chat_flow_stream_internal(flow_payload)
-
-            try:
-                loop = asyncio.get_running_loop()
-            except RuntimeError:
-                loop = GLOBAL_EVENT_LOOP
-            asyncio.run_coroutine_threadsafe(run_flow_stream(), loop)
-
-            prompt_tokens = 0
-            completion_tokens = 0
-            final_res = None
-
-            from genkit.types import GenerateResponse, GenerateResponseChunk
-
-            while True:
-                item = q.get()
-                if item["type"] == "chunk":
-                    chunk = GenerateResponseChunk.model_validate(item["chunk"])
-                    compat_chunk = GeminiChunkCompat(chunk)
-                    if compat_chunk.usage_metadata:
-                        prompt_tokens = compat_chunk.usage_metadata.prompt_token_count or prompt_tokens
-                        completion_tokens = compat_chunk.usage_metadata.candidates_token_count or completion_tokens
-                    yield compat_chunk
-                elif item["type"] == "done":
-                    final_res = GenerateResponse.model_validate(item["response"])
-                    break
-                elif item["type"] == "error":
-                    raise ValueError(item["error"])
-
-            if final_res and final_res.usage:
-                prompt_tokens = final_res.usage.input_tokens or prompt_tokens
-                completion_tokens = final_res.usage.output_tokens or completion_tokens
-
-            try:
-                if prompt_tokens > 0 or completion_tokens > 0:
-                    _log_api_usage(
-                        getattr(_tls, 'current_session_id', 'SYSTEM'),
-                        model,
-                        prompt_tokens,
-                        completion_tokens
+def _chat_generate(messages_data, system_instruction, temperature, want_tools, max_tokens=4096, timeout=None):
+    """One chat completion through the provider adapter (CHAT); returns the
+    genai-shaped shim the tool loop consumes. Key rotation, cooldown and the
+    /health success/failure signal all live in the adapter."""
+    oa_messages = _chat_messages_from_neutral(messages_data, system_instruction)
+    # Context-overflow guard: a large multi-sheet workbook's un-truncated ground-truth
+    # can exceed the model context window (gpt-oss-120b ~131K tokens), making NVIDIA
+    # compute a negative output budget -> 400 "max_tokens must be at least 1". Cap the
+    # combined input by truncating the single largest message so the prompt fits.
+    _MAX_INPUT_CHARS = 170000  # dense numeric tables tokenize heavily; keep well under gpt-oss 131K ctx
+    _total = sum(len(m.get("content") or "") for m in oa_messages)
+    if _total > _MAX_INPUT_CHARS:
+        # The ground-truth is injected into BOTH the system and user messages, so the
+        # bloat is split across multiple large blocks. Shrink EVERY oversized message
+        # proportionally so the combined input lands under the cap (truncating only the
+        # single largest would leave the other(s) and still overflow).
+        # Keep head + tail, drop the middle. Truncating from the tail alone silently
+        # deletes whatever was appended last -- for the system message that's the
+        # refusal/formatting rules and SYSTEM_PROMPT (appended after the ground-truth
+        # dump), and for the user message that's the actual "[USER REQUEST]: ..." line
+        # and the "MANDATORY SYSTEM OVERRIDE" note (appended after extracted_context).
+        # A tail-only cut left the model with a bare data dump and no instructions or
+        # question, so it fell back to generic textbook answers instead of grounding.
+        _ratio = _MAX_INPUT_CHARS / float(_total)
+        for _m in oa_messages:
+            _c = _m.get("content")
+            if isinstance(_c, str) and len(_c) > 2000:
+                _keep = max(2000, int(len(_c) * _ratio))
+                if _keep < len(_c):
+                    _marker = (
+                        "\n\n[... middle content truncated to fit the model context window; "
+                        "ask about a specific sheet/sample for its full detail ...]\n\n"
                     )
-            except Exception as usage_err:
-                _logger.warning(f"[CostTracker] Failed to log usage from stream: {usage_err}")
-            return
-        except Exception as e:
-            err = (str(e) + " " + str(getattr(e, "__cause__", "")) + " " + str(getattr(e, "__context__", ""))).lower()
-            is_503 = any(x in err for x in ["503", "service_unavailable", "unavailable"])
-            is_429 = any(x in err for x in ["429", "resource_exhausted"])
+                    _budget = max(0, _keep - len(_marker))
+                    _head_len = int(_budget * 0.65)
+                    _tail_len = _budget - _head_len
+                    if _tail_len > 0:
+                        _m["content"] = _c[:_head_len] + _marker + _c[-_tail_len:]
+                    else:
+                        _m["content"] = _c[:_keep] + _marker
+        try:
+            _new = sum(len(m.get("content") or "") for m in oa_messages)
+            _logger.warning("[NVIDIA] input %d chars > %d; truncated to ~%d." % (_total, _MAX_INPUT_CHARS, _new))
+        except Exception:
+            pass
+    res = CHAT.complete(
+        oa_messages,
+        tools=_chat_tools() if want_tools else None,
+        temperature=0.2 if temperature is None else float(temperature),
+        max_tokens=max_tokens,
+        timeout=timeout,
+    )
+    parts = []
+    if res.text:
+        parts.append(_ChatPart(text=res.text))
+    for tc in res.tool_calls:
+        parts.append(_ChatPart(func=_ChatFuncCall(tc.name, tc.args)))
+    if not parts:
+        parts.append(_ChatPart(text=""))
+    return _ChatResponse(parts, _ChatUsage(*res.usage))
 
-            if (is_503 or is_429) and "flash" in model:
-                pro_model = "googleai/gemini-2.5-pro"
-                _logger.warning(f"[Fallback] {model} stream returned 503/429. Falling back to {pro_model} immediately...")
-                flow_payload['model'] = pro_model
-                
-                pro_stream_id = str(uuid.uuid4())
-                pro_q = queue.Queue()
-                GLOBAL_STREAM_QUEUES[pro_stream_id] = pro_q
-                flow_payload['stream_id'] = pro_stream_id
 
-                try:
-                    async def run_pro_stream():
-                        return await hviel_chat_flow_stream_internal(flow_payload)
+def _log_chat_usage(resp) -> None:
+    try:
+        if resp.usage_metadata:
+            _log_api_usage(getattr(_tls, "current_session_id", "SYSTEM"), CHAT.config.model,
+                           resp.usage_metadata.prompt_token_count, resp.usage_metadata.candidates_token_count,
+                           provider=CHAT.config.provider)
+    except Exception as ue:
+        _logger.warning("[CostTracker] usage log failed: %s" % ue)
 
-                    try:
-                        loop = asyncio.get_running_loop()
-                    except RuntimeError:
-                        loop = GLOBAL_EVENT_LOOP
-                    asyncio.run_coroutine_threadsafe(run_pro_stream(), loop)
-                    
-                    prompt_tokens = 0
-                    completion_tokens = 0
-                    final_res = None
 
-                    while True:
-                        item = pro_q.get()
-                        if item["type"] == "chunk":
-                            chunk = GenerateResponseChunk.model_validate(item["chunk"])
-                            compat_chunk = GeminiChunkCompat(chunk)
-                            if compat_chunk.usage_metadata:
-                                prompt_tokens = compat_chunk.usage_metadata.prompt_token_count or prompt_tokens
-                                completion_tokens = compat_chunk.usage_metadata.candidates_token_count or completion_tokens
-                            yield compat_chunk
-                        elif item["type"] == "done":
-                            final_res = GenerateResponse.model_validate(item["response"])
-                            break
-                        elif item["type"] == "error":
-                            raise ValueError(item["error"])
+def _budget() -> "retry_budget.RetryBudget":
+    """The request's retry budget while chat() is running; a stray caller (a
+    provider call outside any chat request) gets a fresh budget of its own and
+    never inherits one a previous request left behind - chat() releases its
+    budget when the answer is assembled (`_end_request`), also for streams."""
+    b = getattr(_tls, "retry_budget", None)
+    return b if b is not None else retry_budget.RetryBudget.from_env()
 
-                    if final_res and final_res.usage:
-                        prompt_tokens = final_res.usage.input_tokens or prompt_tokens
-                        completion_tokens = final_res.usage.output_tokens or completion_tokens
 
-                    try:
-                        if prompt_tokens > 0 or completion_tokens > 0:
-                            _log_api_usage(
-                                getattr(_tls, 'current_session_id', 'SYSTEM'),
-                                pro_model,
-                                prompt_tokens,
-                                completion_tokens
-                            )
-                    except Exception as usage_err:
-                        _logger.warning(f"[CostTracker] Failed to log usage from pro stream fallback: {usage_err}")
-                    return
-                except Exception as fallback_err:
-                    raise ValueError(f"CRITICAL: Both primary and fallback models are UNAVAILABLE. {fallback_err}")
-                finally:
-                    GLOBAL_STREAM_QUEUES.pop(pro_stream_id, None)
+def _end_request(answer):
+    """Release the request's retry budget; returns `answer` for the return sites."""
+    _tls.retry_budget = None
+    return answer
 
-            if (is_503 or is_429) and attempt < max_retries - 1:
-                delay = base_delay * (2 ** attempt)
-                if is_429: delay *= 2
-                _logger.info(f"[Chat Stream] Gemini retry attempt {attempt + 1}/{max_retries} in {delay}s")
-                time.sleep(delay)
-                continue
+
+def _finishing(gen):
+    """Stream variant: the budget is released when the generator is exhausted or closed."""
+    try:
+        yield from gen
+    finally:
+        _tls.retry_budget = None
+
+
+def _attempt(call):
+    """Run one provider call under the request's budget (D3.3).
+
+    `call(timeout)` is tried at most LLM_MAX_ATTEMPTS times within
+    LLM_MAX_WALL_SECONDS; the timeout handed to each attempt is what is left of
+    the wall clock. Exhaustion raises BudgetExhausted with a plain statement —
+    the caller reports it; nothing is invented in place of an answer.
+    """
+    b = _budget()
+    while True:
+        b.begin_attempt()                                   # raises BudgetExhausted
+        try:
+            return call(b.attempt_timeout(CHAT.config.timeout))
+        except retry_budget.BudgetExhausted:
             raise
-        finally:
-            GLOBAL_STREAM_QUEUES.pop(stream_id, None)
+        except Exception as e:                              # noqa: BLE001 — recorded, then bounded
+            b.record_failure(str(e))
+            _logger.warning("[LLM] attempt %d/%d failed: %s", b.attempts, b.max_attempts, str(e)[:200])
+            if b.spent:
+                raise retry_budget.BudgetExhausted(b.exhausted_message(str(e))) from e
+            time.sleep(1.0)
 
 
-# â"€â"€ GEMINI HA CLIENT â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€
+def chat_generate_with_retry(contents, config, max_retries=None, base_delay=None, max_tokens=4096):
+    """Non-streaming chat turn under the request's retry budget; returns the
+    genai-shaped shim. (`max_retries`/`base_delay` are accepted for call-site
+    compatibility; the budget, not the caller, bounds attempts.)"""
+    system_instruction, temperature, want_tools = _chat_config_unpack(config)
+    messages_data = _chat_contents_to_neutral(contents)
+    resp = _attempt(lambda t: _chat_generate(messages_data, system_instruction, temperature, want_tools,
+                                             max_tokens=max_tokens, timeout=t))
+    _log_chat_usage(resp)
+    return resp
+
+
+def chat_text_generate(prompt, system_instruction=None, temperature=0.2,
+                       max_retries=None, base_delay=None, max_tokens=4096):
+    """Plain prompt -> text (no tools) under the request's retry budget.
+    Injected into llm_insight_generator as `llm_call` so that module never
+    imports app.py."""
+    if not CHAT.config.api_keys and CHAT.config.provider != "mock":
+        raise RuntimeError(
+            f"No API key configured for chat provider '{CHAT.config.provider}' "
+            "(set LLM_API_KEYS / LLM_API_KEY); the report/extraction pipeline needs one."
+        )
+    messages_data = [{"role": "user", "parts": [{"text": str(prompt)}]}]
+    resp = _attempt(lambda t: _chat_generate(messages_data, system_instruction, temperature, False,
+                                             max_tokens=max_tokens, timeout=t))
+    _log_chat_usage(resp)
+    return resp.text or ""
+
+
+def chat_generate_stream_with_retry(contents, config, max_retries=None, base_delay=None):
+    """'Streaming' chat turn: the adapter is called non-streaming so tool calls
+    parse reliably; the full result is yielded as one genai-shaped chunk and
+    the caller token-streams part.text downstream. Same budget as above."""
+    system_instruction, temperature, want_tools = _chat_config_unpack(config)
+    messages_data = _chat_contents_to_neutral(contents)
+    resp = _attempt(lambda t: _chat_generate(messages_data, system_instruction, temperature, want_tools, timeout=t))
+    _log_chat_usage(resp)
+    yield resp
+
+
+# -- TOOL FAILURE TRACKING --------------------------------------------------- #
+
+from collections import Counter as _Counter
+
+# Per-tool failure counts for trajectory analysis; append-only within a process.
+TOOL_FAILURE_COUNTS: "_Counter[str]" = _Counter()
+
+
+# -- TOOL-CALL LEDGER & CITATION GATE ---------------------------------------- #
+# A fitted parameter may only be shown to the user if it maps to a tool call that
+# actually succeeded. The system prompt already forbids estimating a failed fit
+# ("If the tool fails, report the failure - do not estimate"); a model reported
+# n = 1.987 citing a fit that had errored, so the rule needs enforcement in code.
+
+TOOL_CALL_LEDGER: Dict[str, List[Dict[str, object]]] = {}
+_TOOL_CALL_LEDGER_LOCK = threading.Lock()
+
+# Fitted parameter -> the tools that establish provenance for it.
+#
+# Only `fit_petrophysical_curve` qualifies. It is strict cache-only: it fits the
+# verified cached column vectors and refuses model-supplied values (see the RI
+# and FF branches of _format_tool_response). The sandbox fitters are deliberately
+# NOT here — they accept x/y arrays supplied by the model, so a successful
+# sandbox call proves the arithmetic ran, not that the numbers came from the lab.
+_CACHE_BACKED_FITTERS = frozenset({"fit_petrophysical_curve"})
+_GATED_PARAMETERS: Dict[str, frozenset] = {
+    "n": _CACHE_BACKED_FITTERS,
+    "m": _CACHE_BACKED_FITTERS,
+    "a": _CACHE_BACKED_FITTERS,
+    "nw": _CACHE_BACKED_FITTERS,
+    "no": _CACHE_BACKED_FITTERS,
+}
+
+# Plot payloads are machine-read JSON; rewriting inside one corrupts the chart.
+_PLOT_BLOCK_RE = re.compile(r"__PRC_PLOT__\s*\{.*?\}\s*(?=\n|$)", re.DOTALL)
+
+# A gated parameter only counts as a claim when a petrophysical cue precedes it,
+# so ordinary prose ("a", "an Amott-Harvey index") is never rewritten.
+_GATE_RE = re.compile(
+    r"(?P<cue>\b(?:fitted|exponent|parameter|coefficient|tortuosity|cementation|archie)\b[^.\n]{0,80}?)"
+    # The parameter token is word-bounded: without \b the lazy cue gap let the
+    # group land on a letter inside a word ("s-a-turation" -> param "a"), so
+    # the value check consulted the wrong parameter (C2 gate finding).
+    r"(?P<open>[`*]{0,2})\b(?P<param>nw|no|n|m|a)\b(?P=open)"
+    # The separator covers prose ("n is 1.98", "n = 1.98") and the markdown table
+    # cells the prompt mandates ("| Saturation Exponent (n) | 1.98 |").
+    r"(?P<mid>[^.\n]{0,60}?(?:is|=|:|\|)\s*)"
+    r"(?P<num>\*{0,2}-?\d+(?:\.\d+)?\*{0,2})",
+    re.IGNORECASE,
+)
+
+
+def _graph_context_chunks(graph_res) -> List[str]:
+    """Context chunks from GeologicalGraph.hybrid_search's result: every
+    subgraph that carries an edge, then every vector hit. hybrid_search returns
+    ``{"graph": {"matched_nodes", "subgraphs"}, "vector": [...]}`` - iterating
+    the graph DICT injected the strings '"matched_nodes"' / '"subgraphs"' as
+    knowledge-base context."""
+    if not isinstance(graph_res, dict):
+        return []
+    graph = graph_res.get("graph") or {}
+    subgraphs = (graph.get("subgraphs") or []) if isinstance(graph, dict) else []
+    chunks = [_json.dumps(g) for g in subgraphs if isinstance(g, dict) and g.get("edges")]
+    chunks += [_json.dumps(v) for v in (graph_res.get("vector") or []) if v]
+    return chunks
+
+
+def _plot_metadata(formatted: str):
+    """The `metadata` dict of every __PRC_PLOT__ payload in a rendered result."""
+    if not isinstance(formatted, str) or "__PRC_PLOT__" not in formatted:
+        return
+    for match in _PLOT_BLOCK_RE.finditer(formatted):
+        try:
+            yield _json.loads(match.group(0).split("__PRC_PLOT__", 1)[1].strip()).get("metadata") or {}
+        except (ValueError, AttributeError) as exc:
+            # An unreadable plot payload is a broken tool render, not "no values":
+            # the request sees it, and the ledger row backs nothing (no
+            # parameters, no values) — the gate strips.
+            note_degradation("plot-metadata-unparseable", f"{type(exc).__name__}: {exc}")
+
+
+def _extract_fitted_values(formatted: str) -> Dict[str, float]:
+    """Fitted parameter values a tool's rendered result actually carries, read
+    from its __PRC_PLOT__ metadata (archie n/m/a, fit_params nw/no). These are
+    the numbers a successful call is evidence FOR — nothing else."""
+    values: Dict[str, float] = {}
+    for meta in _plot_metadata(formatted):
+        for src in (meta.get("archie") or {}, meta.get("fit_params") or {}):
+            for key in _GATED_PARAMETERS:
+                val = src.get(key) if isinstance(src, dict) else None
+                if isinstance(val, (int, float)) and not isinstance(val, bool):
+                    values[key] = float(val)
+    return values
+
+
+def _rendered_parameters(formatted: str) -> List[str]:
+    """The gated parameters a rendered result is ABOUT — the keys its plot
+    metadata carries (archie n/m/a, fit_params nw/no), whether or not a number
+    was produced. A MICP or J-function render names none, so a success there
+    backs no Archie exponent; a corrected sandbox fit names `n` with no value."""
+    keys: set = set()
+    for meta in _plot_metadata(formatted):
+        for src in (meta.get("archie") or {}, meta.get("fit_params") or {}):
+            if isinstance(src, dict):
+                keys.update(k for k in _GATED_PARAMETERS if k in src)
+    return sorted(keys)
+
+
+def record_tool_call(sid: str, tool: str, status: str, args: dict,
+                     parameters: List[str],
+                     values: Optional[Dict[str, float]] = None,
+                     sources: Optional[Dict[str, str]] = None) -> str:
+    """Append one tool-call record and return its call id.
+
+    `values` are the fitted parameter values the call produced; the gate uses
+    them to reject a reported number that differs from the fit.
+
+    A record with no session id is NOT retained: the ledger is per-session
+    evidence, and an unbound row would land in a shared bucket where a stale
+    success by tool name could back a value in an unrelated conversation. It
+    is logged so an unbound execution context is visible, not silent.
+    """
+    call_id = f"{tool}-{len(TOOL_CALL_LEDGER.get(sid, []))+1 if sid else 0}"
+    if not sid:
+        _logger.warning("[citation gate] tool call %s (%s) recorded with no session id — "
+                        "dropped; it can back nothing", tool, status)
+        return call_id
+    record: Dict[str, object] = {"call_id": call_id, "tool": tool, "status": status,
+                                 "args": dict(args or {}), "parameters": list(parameters or []),
+                                 "values": dict(values or {}), "sources": dict(sources or {})}
+    with _TOOL_CALL_LEDGER_LOCK:
+        TOOL_CALL_LEDGER.setdefault(sid, []).append(record)
+    return call_id
+
+
+def get_tool_call_records(sid: str) -> List[Dict[str, object]]:
+    if not sid:
+        return []
+    with _TOOL_CALL_LEDGER_LOCK:
+        return list(TOOL_CALL_LEDGER.get(sid, []))
+
+
+def reset_tool_call_ledger(sid: str) -> None:
+    with _TOOL_CALL_LEDGER_LOCK:
+        TOOL_CALL_LEDGER.pop(sid or "", None)
+
+
+def enforce_citation_gate(text: str, sid: str) -> str:
+    """Strip fitted parameter values that no successful tool call backs.
+
+    Returns the text with unbacked numbers replaced by an explicit unverified
+    marker, and any citation of the tool that did not succeed removed. Every
+    rejection is logged so the refusal is visible rather than silent.
+    """
+    if not text:
+        return text
+    # Fail closed: no resolvable session means no resolvable evidence, so
+    # nothing is backed and every result-shaped value is stripped. (Reading a
+    # shared/empty bucket as "nothing to check" would be the fabrication path.)
+    if not sid:
+        _logger.warning("[citation gate] no session id — treating every fitted value as unbacked")
+        successes: List[Dict[str, object]] = []
+    else:
+        successes = [r for r in get_tool_call_records(sid) if r.get("status") == "success"]
+    rejected_tools: set = set()
+
+    def _backed_values(param: str, allowed: set) -> List[float]:
+        return [float(v) for r in successes if r["tool"] in allowed
+                for k, v in (r.get("values") or {}).items() if k == param]
+
+    def _succeeded_for(param: str) -> set:
+        # A success backs a parameter only when the row says the call produced
+        # it (`parameters`); a MICP/J-function success by the same tool NAME is
+        # not evidence for Archie n (D3.1 scal-app-2).
+        return {r["tool"] for r in successes if param in (r.get("parameters") or [])}
+
+    def _replace(match: "re.Match") -> str:
+        param = match.group("param").lower()
+        allowed = _GATED_PARAMETERS[param]
+        shown = match.group("num").strip("*")
+        if allowed & _succeeded_for(param):
+            # A successful call exists — but existence by tool name is not
+            # evidence for a NUMBER. When the call recorded the value it fitted,
+            # the reported number must match it (rounding tolerance); a model
+            # restating 1.999 over a fitted 1.850 is stripped like any
+            # fabrication (C2 gate finding, A2 protocol).
+            backed = _backed_values(param, allowed)
+            try:
+                num = float(shown)
+            except ValueError:
+                return match.group(0)
+            if not backed or any(abs(num - v) <= max(0.006, 0.005 * abs(v)) for v in backed):
+                return match.group(0)
+            _logger.warning(
+                "[citation gate] stripped %s=%s for session %s: fitted value(s) were %s",
+                match.group("param"), shown, sid or "-", sorted(set(backed)))
+            return (match.group("cue") + match.group("open") + match.group("param")
+                    + match.group("open") + match.group("mid")
+                    + "[unverified - value differs from the fitted result]")
+        rejected_tools.update(allowed)
+        _logger.warning(
+            "[citation gate] stripped %s=%s for session %s: no successful call to any of %s",
+            match.group("param"), shown, sid or "-",
+            sorted(allowed))
+        # The tool name stays in the log, not in the user-facing text: naming it
+        # here would read as a citation of the call that did not succeed.
+        return (match.group("cue") + match.group("open") + match.group("param")
+                + match.group("open") + match.group("mid")
+                + "[unverified - no successful fit produced this value]")
+
+    # Mask plot payloads so the gate never rewrites machine-read chart JSON.
+    plots: List[str] = []
+
+    def _mask(match: "re.Match") -> str:
+        plots.append(match.group(0))
+        return f"\x00PLOT{len(plots) - 1}\x00"
+
+    masked = _PLOT_BLOCK_RE.sub(_mask, text)
+    gated = _GATE_RE.sub(_replace, masked)
+    for tool in rejected_tools:
+        # Drop the bracketed citation of a tool that did not produce the value.
+        gated = re.sub(r"\s*\[\s*" + re.escape(tool) + r"[^\]]*\]", "", gated)
+        # The same citation in the mandated table format — a Source cell that is
+        # only the tool's name — is dropped too (D2 regression corpus).
+        gated = re.sub(r"(\|\s*)" + re.escape(tool) + r"(?:\s*,[^|\n]*)?(\s*\|)",
+                       r"\1[no successful call]\2", gated)
+    for index, payload in enumerate(plots):
+        gated = gated.replace(f"\x00PLOT{index}\x00", payload)
+    return gated
+
+
+def _record_tool_failure(name: str, detail) -> None:
+    """Dedicated failure ledger: every failed tool step is counted and logged so
+    trajectory analysis can compute real step success rates."""
+    TOOL_FAILURE_COUNTS[name] += 1
+    _logger.error("[TOOL-FAIL] %s (#%d): %s",
+                  name, TOOL_FAILURE_COUNTS[name], str(detail)[:500])
+
+
+def _tool_result_error(result):
+    """The failure detail a raw tool payload encodes, or None (tools_registry owns the rule)."""
+    return tools_registry.tool_result_error(result)
+
+
+def _complete_rows(aligned: dict, keys: list, model: str) -> dict:
+    """Row-wise filter of the None-padded columns find_aligned_columns returns:
+    row i is kept only when every key AND depth is present. Filtering each
+    column on its own (the old `[v for v in col if v is not None]`) shifted
+    later values against depth/pm whenever one cell was blank."""
+    cols = [aligned[k] for k in keys] + [aligned["depth"]]
+    rows = [r for r in zip(*cols) if all(v is not None for v in r)]
+    dropped = len(cols[0]) - len(rows)
+    if dropped:
+        note_degradation("rows-dropped", f"{model}: {dropped} row(s) with a blank "
+                         f"{'/'.join(keys)}/depth cell skipped (no value substituted)")
+    return {k: [r[i] for r in rows] for i, k in enumerate(keys + ["depth"])}
+
+
+# -- CHAT ASSISTANT ---------------------------------------------------------- #
+
+# simulation_core's own fallbacks (swr/snr 0.2, krw_max 0.5, kro_max 0.8); kept
+# identical so a defaulted run and its Endpoints fit agree.
+_SIM_ENDPOINT_DEFAULTS = {"swr": 0.2, "snr": 0.2, "krw_max": 0.5, "kro_max": 0.8}
+
 
 class PRCChatAssistant:
 
-    def __init__(self, keys: list[str]):
-
-        self.model_name   = "gemini-2.5-pro"
-
-        self._keys        = keys
-
-        self._current_idx = 0
-
-        self._idx_lock    = threading.Lock()
-
-        self._client_lock = threading.Lock()
-
-        self._client      = None
-
-        # _pending_kb lives on _tls (thread-local) — see chat() — NOT on self.
-
-        self._init_client()
-
-
-
-    def _init_client(self) -> None:
-
-        for i in range(len(self._keys)):
-
-            with self._idx_lock:
-
-                idx = (self._current_idx + i) % len(self._keys)
-
-            key = self._keys[idx]
-
-            if not _key_healthy(key):
-
-                continue
-
-            try:
-
-                # Explicitly use 'v1' to avoid 'not found for v1beta' errors
-
-                client = genai_new.Client(api_key=key)
-
-                with self._client_lock:
-
-                    self._client      = client
-
-                    self._current_idx = idx
-
-                    try:
-                        google_ai_plugin._client._api_client.api_key = key
-                        google_ai_plugin._client.aio._api_client.api_key = key
-                    except Exception as p_err:
-                        _logger.warning(f"[HA] Failed to propagate key to Genkit: {p_err}")
-
-                _logger.info(f"[HA] Node {idx+1} active ({key[:8]}...)")
-
-                return
-
-            except Exception as e:
-
-                _logger.warning(f"[HA] Node {idx+1} init failed: {e}")
-
-        try:
-
-            with self._client_lock:
-
-                self._client = genai_new.Client(api_key=self._keys[0])
-                try:
-                    google_ai_plugin._client._api_client.api_key = self._keys[0]
-                    google_ai_plugin._client.aio._api_client.api_key = self._keys[0]
-                except Exception as p_err:
-                    _logger.warning(f"[HA] Failed to propagate fallback key to Genkit: {p_err}")
-
-        except Exception as e:
-
-            _logger.error(f"[HA] Emergency fallback failed: {e}")
-
-
-
-    def rotate_key(self, is_hard_fail: bool = False) -> None:
-
-        with self._idx_lock:
-
-            _mark_key_failed(self._keys[self._current_idx], is_hard_fail)
-
-            self._current_idx = (self._current_idx + 1) % len(self._keys)
-
-        self._init_client()
-
-
+    def __init__(self, keys: list[str] = ()):
+        # `keys` is accepted for call-site/test compatibility only: every chat
+        # completion goes through the provider adapter (CHAT), which owns the
+        # credential pool and its rotation. The model reported here is the
+        # model actually sent on the wire.
+        self.model_name = CHAT.config.model
 
     def _execute_tool(self, call):
 
         """Generator that yields progress strings, then finally the tool result."""
 
         name, args = call.name, call.args
+
+        # Registry-driven validation (D3.2): an unknown tool or a malformed call is a
+        # FAILED step the model is told about — never silently dispatched or ignored.
+        _spec = tools_registry.REGISTRY.get(name)
+        _problems = tools_registry.validate_args(_spec, dict(args or {})) if _spec else [f"Unknown tool: {name}"]
+        if _problems:
+            _record_tool_failure(name, "; ".join(_problems))
+            yield (True, False, _json.dumps({"status": "error",
+                                             "error": _problems[0] if _spec is None
+                                             else f"invalid call to {name}: " + "; ".join(_problems)}))
+            return
 
         if name == "execute_python_simulation":
 
@@ -2840,9 +3015,24 @@ class PRCChatAssistant:
 
             p["mode"]  = args.get("mode", "1d")
 
-            
+            # simulation_core defaults these silently and echoes the INPUT dict as
+            # `params`; the formatter used to re-default swr to 0.15, so the fitted
+            # endpoints disagreed with the simulated curves. Fill the defaults here,
+            # once, and mark them so the echo, the model summary and the request
+            # all say which values were never supplied.
+            _defaulted = [k for k in _SIM_ENDPOINT_DEFAULTS if p.get(k) is None]
+            for k in _defaulted:
+                p[k] = _SIM_ENDPOINT_DEFAULTS[k]
+            if _defaulted:
+                p["defaulted"] = _defaulted
+                note_degradation("simulation-defaults",
+                                 "not supplied, defaulted: " + ", ".join(f"{k}={_SIM_ENDPOINT_DEFAULTS[k]}" for k in _defaulted))
 
-            full_out = []
+            # stdout and stderr are kept strictly separate: a crashed simulation
+            # must never hand its traceback back to the model as "the result".
+            stdout_parts, stderr_parts = [], []
+            spawn_error = None
+            exit_code = None
 
             for chunk in SkillsEngine.run_skill_stream("petroleum", "simulator", "simulation_core.py", [_json.dumps(p)]):
 
@@ -2850,27 +3040,52 @@ class PRCChatAssistant:
 
                     line = chunk["stdout"]
 
-                    full_out.append(line)
+                    stdout_parts.append(line)
 
                     if "PROGRESS:" in line:
 
-                        yield (False, line.strip())
+                        yield (False, True, line.strip())
 
                 elif "stderr" in chunk:
 
-                    full_out.append(chunk["stderr"])
+                    stderr_parts.append(chunk["stderr"])
 
-            
+                elif "exit_code" in chunk:
 
-            out = "".join(full_out)
+                    exit_code = chunk["exit_code"]
 
-            if args.get("mode") == "2d" and "success" in (out or ""):
+                elif "error" in chunk:
 
-                yield (True, f"__SIMULATION_START__\n{out}\n__SIMULATION_END__")
+                    spawn_error = chunk["error"]
+
+            out = "".join(stdout_parts)
+            err = "".join(stderr_parts)
+
+            failed_detail = None
+            if spawn_error:
+                failed_detail = spawn_error
+            elif exit_code not in (0, None):
+                failed_detail = (err.strip() or f"Subprocess exited with code {exit_code}")
+            elif "Traceback (most recent call last)" in err:
+                failed_detail = err.strip()
+            elif not out.strip():
+                failed_detail = err.strip() or "simulation produced no output"
+
+            # Exit code 0 is not success: simulation_core prints {"status":"error",…}
+            # and exits 0 on its own exceptions. Decide from the payload.
+            if not failed_detail:
+                failed_detail = _tool_result_error(out)
+
+            if failed_detail:
+                _record_tool_failure(name, failed_detail)
+                yield (True, False, _json.dumps({"status": "error", "error": str(failed_detail)[:2000]}))
+            elif args.get("mode") == "2d":
+
+                yield (True, True, f"__SIMULATION_START__\n{out}\n__SIMULATION_END__")
 
             else:
 
-                yield (True, out or "")
+                yield (True, True, out)
 
             return
 
@@ -2878,6 +3093,13 @@ class PRCChatAssistant:
             script = args.get("script")
             model = args.get("model")
             p = dict(args.get("params") or {})
+            # Provenance of the arrays the script will run on (cache auto-extract vs
+            # the model's own arguments), whether depth is a synthesized row index,
+            # and a pre-dispatch refusal — all three end up in the result payload
+            # so the formatter renders what actually happened.
+            _auto_extracted = False
+            _depth_synthetic = False
+            _pre_err = None
 
             if model == "rqi_fzi" or script == "petrophysics.py" and model == "rqi_fzi":
                 phi = p.get("phi")
@@ -2898,6 +3120,7 @@ class PRCChatAssistant:
                         p["perm"] = perm
                         p["depth"] = depth
                         p["k_groups"] = k_groups
+                        _auto_extracted = True
                         _logger.info(f"[FZI/RQI AutoExtract] Auto-extracted {len(phi)} aligned samples from sheet '{sheet_name}'. Porosity percent normalized: {is_percent}")
                     else:
                         _logger.warning(f"[FZI/RQI AutoExtract] Could not auto-extract aligned columns for session {sid}.")
@@ -2905,7 +3128,7 @@ class PRCChatAssistant:
                     if phi and max(phi) > 1.0:
                         phi = [v / 100.0 for v in phi]
                         p["phi"] = phi
-                        _logger.info(f"[FZI/RQI AutoExtract] Manually passed porosity was in percent (>1.0), normalized to fraction.")
+                        _logger.info("[FZI/RQI AutoExtract] Manually passed porosity was in percent (>1.0), normalized to fraction.")
                 
                 p["k_groups"] = k_groups
 
@@ -2921,9 +3144,10 @@ class PRCChatAssistant:
                             })
                             if res_aligned:
                                 aligned_data, sheet_name = res_aligned
-                                p["ka"] = [v for v in aligned_data["ka"] if v is not None]
-                                p["pm"] = [v if v is not None else 14.7 for v in aligned_data["pm"]]
-                                p["depth"] = [v for v in aligned_data["depth"] if v is not None]
+                                _auto_extracted, _depth_synthetic = True, bool(aligned_data.get("depth_synthetic"))
+                                # Row-wise: a blank mean-pressure cell drops the row; it is
+                                # never replaced by 14.7 psi and printed as measured.
+                                p.update(_complete_rows(aligned_data, ["ka", "pm"], "klinkenberg"))
                                 _logger.info(f"[Klinkenberg AutoExtract] Extracted from '{sheet_name}'")
                                 
                     elif model == "retort_saturation":
@@ -2938,6 +3162,7 @@ class PRCChatAssistant:
                             })
                             if res_aligned:
                                 aligned_data, sheet_name = res_aligned
+                                _auto_extracted, _depth_synthetic = True, bool(aligned_data.get("depth_synthetic"))
                                 p["v_w_raw"] = []
                                 p["v_o"] = []
                                 p["v_p"] = []
@@ -2967,6 +3192,7 @@ class PRCChatAssistant:
                             })
                             if res_aligned:
                                 aligned_data, sheet_name = res_aligned
+                                _auto_extracted, _depth_synthetic = True, bool(aligned_data.get("depth_synthetic"))
                                 p["v_w"] = []
                                 p["w_pre"] = []
                                 p["w_post"] = []
@@ -2999,6 +3225,7 @@ class PRCChatAssistant:
                             })
                             if res_aligned:
                                 aligned_data, sheet_name = res_aligned
+                                _auto_extracted, _depth_synthetic = True, bool(aligned_data.get("depth_synthetic"))
                                 p["p1"] = []
                                 p["p2"] = []
                                 p["v_b"] = []
@@ -3030,6 +3257,7 @@ class PRCChatAssistant:
                             })
                             if res_aligned:
                                 aligned_data, sheet_name = res_aligned
+                                _auto_extracted, _depth_synthetic = True, bool(aligned_data.get("depth_synthetic"))
                                 p["dsw_s"] = []
                                 p["dsw_d"] = []
                                 p["dso_s"] = []
@@ -3051,9 +3279,10 @@ class PRCChatAssistant:
                     elif model == "xrd_mineralogy":
                         minerals = p.get("minerals")
                         if not minerals:
-                            load_session_cache_from_db(sid)
+                            fhash_xrd = resolve_cache_key(sid)
+                            load_session_cache_from_db(fhash_xrd)
                             with SESSION_DATA_CACHE_LOCK:
-                                raw_excel = SESSION_DATA_CACHE.get(sid, {}).get("raw_excel_data", {})
+                                raw_excel = SESSION_DATA_CACHE.get(fhash_xrd, {}).get("raw_excel_data", {})
                             if raw_excel:
                                 for sheet_name, sheet_dict in raw_excel.items():
                                     aligned = sheet_dict.get("__aligned_vectors__")
@@ -3068,19 +3297,28 @@ class PRCChatAssistant:
                                         h_clean = str(h).lower()
                                         for keyword in mineral_keywords:
                                             if keyword in h_clean:
-                                                matched_minerals[keyword] = [v if v is not None else 0.0 for v in vals]
+                                                matched_minerals[keyword] = list(vals)
                                                 break
                                     if matched_minerals:
-                                        p["minerals"] = matched_minerals
                                         depth_col = None
                                         for h in aligned.keys():
                                             if "depth" in str(h).lower() or "md" in str(h).lower():
                                                 depth_col = h
                                                 break
-                                        if depth_col:
-                                            p["depth"] = [v for v in aligned[depth_col] if v is not None]
-                                        else:
-                                            p["depth"] = [float(i+1) for i in range(len(list(matched_minerals.values())[0]))]
+                                        # A blank mineral cell drops the ROW (never 0.0 into the
+                                        # 100 % sum check); a missing depth column is a row index,
+                                        # marked as such — not rendered as a measured depth.
+                                        n_rows = max(len(v) for v in matched_minerals.values())
+                                        _cols = {k: v + [None] * (n_rows - len(v)) for k, v in matched_minerals.items()}
+                                        _cols["depth"] = (list(aligned[depth_col]) + [None] * n_rows)[:n_rows] if depth_col \
+                                            else [float(i + 1) for i in range(n_rows)]
+                                        _rows = _complete_rows(_cols, list(matched_minerals), "xrd_mineralogy")
+                                        p["depth"] = _rows.pop("depth")
+                                        p["minerals"] = _rows
+                                        _auto_extracted, _depth_synthetic = True, depth_col is None
+                                        if _depth_synthetic:
+                                            note_degradation("depth-synthesized",
+                                                             f"sheet {sheet_name!r}: no depth column; row index 1..N used as depth")
                                         _logger.info(f"[XRD AutoExtract] Extracted {len(matched_minerals)} minerals from '{sheet_name}'")
                                         break
 
@@ -3094,9 +3332,8 @@ class PRCChatAssistant:
                             })
                             if res_aligned:
                                 aligned_data, sheet_name = res_aligned
-                                p["t2_times"] = [v for v in aligned_data["t2_times"] if v is not None]
-                                p["amplitudes"] = [v for v in aligned_data["amplitudes"] if v is not None]
-                                p["depth"] = [v for v in aligned_data["depth"] if v is not None]
+                                _auto_extracted, _depth_synthetic = True, bool(aligned_data.get("depth_synthetic"))
+                                p.update(_complete_rows(aligned_data, ["t2_times", "amplitudes"], "nmr_t2_distribution"))
                                 p["cutoff_ms"] = p.get("cutoff_ms", 33.0)
                                 _logger.info(f"[NMR AutoExtract] Extracted from '{sheet_name}'")
 
@@ -3108,8 +3345,8 @@ class PRCChatAssistant:
                             })
                             if res_aligned:
                                 aligned_data, sheet_name = res_aligned
-                                p["hu_values"] = [v for v in aligned_data["hu_values"] if v is not None]
-                                p["depth"] = [v for v in aligned_data["depth"] if v is not None]
+                                _auto_extracted, _depth_synthetic = True, bool(aligned_data.get("depth_synthetic"))
+                                p.update(_complete_rows(aligned_data, ["hu_values"], "ct_scan"))
                                 _logger.info(f"[CT Scan AutoExtract] Extracted from '{sheet_name}'")
 
                     elif model == "supplementary":
@@ -3123,12 +3360,14 @@ class PRCChatAssistant:
                             })
                             if res_aligned:
                                 aligned_data, sheet_name = res_aligned
-                                p["depth"] = [v for v in aligned_data["depth"] if v is not None]
-                                if "sg" in aligned_data and any(v is not None for v in aligned_data["sg"]):
-                                    p["sg"] = [v for v in aligned_data["sg"] if v is not None]
-                                if "w_init" in aligned_data and "w_acid" in aligned_data:
-                                    p["w_init"] = [v for v in aligned_data["w_init"] if v is not None]
-                                    p["w_acid"] = [v for v in aligned_data["w_acid"] if v is not None]
+                                _auto_extracted, _depth_synthetic = True, bool(aligned_data.get("depth_synthetic"))
+                                # The script walks ONE depth vector over sg and w_init/w_acid
+                                # alike, so the rows must be complete across every present column.
+                                _keys = [k for k in ("sg", "w_init", "w_acid") if k in aligned_data
+                                         and any(v is not None for v in aligned_data[k])]
+                                if "w_init" in _keys and "w_acid" not in _keys:
+                                    _keys.remove("w_init")
+                                p.update(_complete_rows(aligned_data, _keys, "supplementary"))
                                 _logger.info(f"[Supplementary AutoExtract] Extracted from '{sheet_name}'")
 
                 subdir = "scalskills/scripts"
@@ -3138,20 +3377,41 @@ class PRCChatAssistant:
                 p["mode"] = model
                 args_list = [_json.dumps(p)]
 
-                
+            if model == "klinkenberg" and p.get("ka") and p.get("pm") in (None, []):
+                # petrophysics.py defaults pm to 14.7 psi and the table would print it
+                # as measured: refuse before dispatch (cache and model-args paths alike).
+                _pre_err = ("klinkenberg: mean pressure 'pm' not supplied - the script would default it to "
+                            "14.7 psi and report it as measured; pass pm (one value, or one per ka point) "
+                            "or upload a sheet with a mean-pressure column")
 
-            res = SkillsEngine.run_skill("petroleum", subdir, script, args_list)
+            if _auto_extracted and any(isinstance(v, list) and not v for v in p.values()):
+                # Every row was dropped as incomplete: refuse rather than run the
+                # script on empty arrays and record a "success" with no samples.
+                _pre_err = (f"{model}: no complete data rows after aligning the sheet columns "
+                            f"(see the rows-dropped degradation) — nothing was calculated")
 
-            if ("error" in res and res["error"]) or res.get("exit_code", 0) != 0 or res.get("stderr"):
-                err_msg = res.get("error") or res.get("stderr") or f"Subprocess exited with code {res.get('exit_code')}"
-                result = _json.dumps({"status": "error", "error": str(err_msg).strip()})
+            if _pre_err:
+                result = _json.dumps({"status": "error", "error": _pre_err})
             else:
-                result = res.get("stdout", "")
+                res = SkillsEngine.run_skill("petroleum", subdir, script, args_list)
+
+                if ("error" in res and res["error"]) or res.get("exit_code", 0) != 0 or res.get("stderr"):
+                    err_msg = res.get("error") or res.get("stderr") or f"Subprocess exited with code {res.get('exit_code')}"
+                    result = _json.dumps({"status": "error", "error": str(err_msg).strip()})
+                else:
+                    result = res.get("stdout", "")
 
             # If the calculation was successful, bind thresholds/avg values to session cache
             try:
                 calc_res = _json.loads(result)
                 sid = getattr(_tls, 'current_session_id', None)
+                if isinstance(calc_res, dict) and calc_res.get("status") == "success":
+                    # Provenance markers the formatter renders: where the arrays came
+                    # from, and whether "depth" is a synthesized row index.
+                    calc_res["input_source"] = "cache" if _auto_extracted else "model-args"
+                    if _depth_synthetic:
+                        calc_res["depth_synthetic"] = True
+                    result = _json.dumps(calc_res)
                 if calc_res.get("status") == "success" and sid:
                     with SESSION_DATA_CACHE_LOCK:
                         if sid not in SESSION_DATA_CACHE:
@@ -3165,7 +3425,10 @@ class PRCChatAssistant:
             except Exception as cache_err:
                 _logger.warning(f"Failed to auto-bind petrophysics properties to cache: {cache_err}")
 
-            yield (True, result)
+            _petro_err = _tool_result_error(result)
+            if _petro_err:
+                _record_tool_failure(name, _petro_err)
+            yield (True, _petro_err is None, result)
 
             return
 
@@ -3219,7 +3482,14 @@ class PRCChatAssistant:
 
             res  = SkillsEngine.run_skill("petroleum", "simulator", "history_matching_skill.py", [_json.dumps(data)])
 
-            result = res.get("stdout") or res.get("stderr") or res.get("error", "")
+            # Classified exactly like calculate_petrophysics_properties: a spawn
+            # error / timeout, a non-zero exit or any stderr is a FAILED step —
+            # never plain text that the tail check reads as success.
+            if ("error" in res and res["error"]) or res.get("exit_code", 0) != 0 or res.get("stderr"):
+                err_msg = res.get("error") or res.get("stderr") or f"Subprocess exited with code {res.get('exit_code')}"
+                result = _json.dumps({"status": "error", "error": str(err_msg).strip()})
+            else:
+                result = res.get("stdout", "")
 
         elif name == "generate_executive_report":
 
@@ -3240,7 +3510,7 @@ class PRCChatAssistant:
 
                     # Use generate() method as defined in report_generator.py
 
-                    filename = PRCReportEngine().generate(session_id=sid, well_name=well)
+                    filename = PRCReportEngine(db_path=DB_PATH).generate(session_id=sid, well_name=well, output_dir=str(PRC_VAULT))
 
                     result = f"REPORT_READY:{filename}"
 
@@ -3284,50 +3554,420 @@ class PRCChatAssistant:
 
                     result = "\n\n".join(summary)
 
+        elif name == "sandbox_fit_brooks_corey":
+            from physics_sandbox import PhysicsSandbox, run_sandboxed
+            sw = args.get("sw", [])
+            krw = args.get("krw", [])
+            kro = args.get("kro", [])
+            swi = args.get("swi", 0.0)
+            sor = args.get("sor", 0.0)
+            krw_max = args.get("krw_max", 1.0)
+            kro_max = args.get("kro_max", 1.0)
+
+            sandbox = PhysicsSandbox()
+            inputs = {
+                "sandbox": sandbox,
+                "sw": sw,
+                "krw": krw,
+                "kro": kro,
+                "swi": swi,
+                "sor": sor,
+                "krw_max": krw_max,
+                "kro_max": kro_max
+            }
+            source = "result = sandbox.fit_brooks_corey(sw, krw, kro, swi, sor, krw_max, kro_max)"
+            try:
+                fit_res = run_sandboxed(source, inputs=inputs)
+                sid = getattr(_tls, 'current_session_id', None)
+                # Same rule as the Archie sandbox: a corrected fit is never bound as a value.
+                if sid and isinstance(fit_res, dict) and "parameters" in fit_res \
+                        and not fit_res.get("corrected"):
+                    with SESSION_DATA_CACHE_LOCK:
+                        if sid not in SESSION_DATA_CACHE:
+                            SESSION_DATA_CACHE[sid] = {}
+                        if "labeled_values" not in SESSION_DATA_CACHE[sid]:
+                            SESSION_DATA_CACHE[sid]["labeled_values"] = {}
+                        params = fit_res.get("parameters", {})
+                        SESSION_DATA_CACHE[sid]["labeled_values"]["nw"] = params.get("nw")
+                        SESSION_DATA_CACHE[sid]["labeled_values"]["no"] = params.get("no")
+                        SESSION_DATA_CACHE[sid]["labeled_values"]["swr"] = params.get("Swi")
+                        SESSION_DATA_CACHE[sid]["labeled_values"]["sor"] = params.get("Sor")
+                        SESSION_DATA_CACHE[sid]["labeled_values"]["krw_max"] = params.get("Krw_max")
+                        SESSION_DATA_CACHE[sid]["labeled_values"]["kro_max"] = params.get("Kro_max")
+                    _logger.info(f"[Skills Audit] Sandbox Brooks-Corey parameters successfully bound to cache for session {sid}.")
+                result = _json.dumps(fit_res)
+            except Exception as e:
+                result = _json.dumps({"status": "error", "error": str(e)})
+
+        elif name == "sandbox_fit_archie":
+            from physics_sandbox import PhysicsSandbox, run_sandboxed
+            x = args.get("x", [])
+            y = args.get("y", [])
+            model_type = args.get("model_type", "RI")
+
+            sandbox = PhysicsSandbox()
+            inputs = {
+                "sandbox": sandbox,
+                "x": x,
+                "y": y,
+                "model_type": model_type
+            }
+            source = "result = sandbox.fit_archie(x, y, model_type)"
+            try:
+                fit_res = run_sandboxed(source, inputs=inputs)
+                sid = getattr(_tls, 'current_session_id', None)
+                # A corrected (clamped) fit is NOT a fitted value: binding it would let
+                # a `{{val:n}}` token render the clamp bound as CACHED (D2 corpus finding).
+                if sid and isinstance(fit_res, dict) and "parameters" in fit_res \
+                        and not fit_res.get("corrected"):
+                    with SESSION_DATA_CACHE_LOCK:
+                        if sid not in SESSION_DATA_CACHE:
+                            SESSION_DATA_CACHE[sid] = {}
+                        if "labeled_values" not in SESSION_DATA_CACHE[sid]:
+                            SESSION_DATA_CACHE[sid]["labeled_values"] = {}
+                        params = fit_res.get("parameters", {})
+                        if model_type.upper() == "RI":
+                            SESSION_DATA_CACHE[sid]["labeled_values"]["b"] = params.get("b")
+                            SESSION_DATA_CACHE[sid]["labeled_values"]["n"] = params.get("n")
+                        else:
+                            SESSION_DATA_CACHE[sid]["labeled_values"]["a"] = params.get("a")
+                            SESSION_DATA_CACHE[sid]["labeled_values"]["m"] = params.get("m")
+                    _logger.info(f"[Skills Audit] Sandbox Archie {model_type} parameters successfully bound to cache for session {sid}.")
+                result = _json.dumps(fit_res)
+            except Exception as e:
+                result = _json.dumps({"status": "error", "error": str(e)})
+
+        elif name == "hybrid_geological_search":
+            try:
+                from geological_graph import GeologicalGraph
+
+                query_text = args.get("query_text", "")
+                porous_low = args.get("porous_low")
+                porous_high = args.get("porous_high")
+                perm_low = args.get("perm_low")
+                perm_high = args.get("perm_high")
+                depth_limit = int(args.get("depth_limit") or 1)
+                n_results = int(args.get("n_results") or 3)
+
+                porous_range = (
+                    (float(porous_low), float(porous_high))
+                    if porous_low is not None and porous_high is not None else None
+                )
+                perm_range = (
+                    (float(perm_low), float(perm_high))
+                    if perm_low is not None and perm_high is not None else None
+                )
+
+                graph = GeologicalGraph(db_path=settings.graph_db_path, seed=True)
+
+                retriever = None
+                vector_unavailable = None
+                outage = []          # query-time failure: hybrid_search logs and swallows it
+
+                class _TrackedRetriever:
+                    def __init__(self, inner):
+                        self._inner = inner
+
+                    def query_analog_wells(self, **kw):
+                        try:
+                            return self._inner.query_analog_wells(**kw)
+                        except Exception as q_exc:
+                            outage.append(f"{type(q_exc).__name__}: {q_exc}")
+                            raise
+                try:
+                    from rag_database import RAGDatabase
+                    retriever = _TrackedRetriever(RAGDatabase())
+                except (KeyboardInterrupt, SystemExit):
+                    raise
+                except BaseException as rag_exc:
+                    # BaseException on purpose: chromadb's Rust bindings raise
+                    # pyo3 PanicException (a BaseException) on corrupt/legacy
+                    # stores; degrade to a graph-only answer instead of dying —
+                    # but an OUTAGE is not "no matches": it is carried in the
+                    # payload (rendered) and on the request degradation channel.
+                    vector_unavailable = f"{type(rag_exc).__name__}: {rag_exc}"
+                    note_degradation("vector-retriever", f"{vector_unavailable} - graph-only result")
+
+                res = graph.hybrid_search(
+                    query_text=query_text,
+                    porous_range=porous_range,
+                    perm_range=perm_range,
+                    retriever=retriever,
+                    depth_limit=depth_limit,
+                    n_results=n_results,
+                )
+                if outage and not vector_unavailable:
+                    vector_unavailable = outage[0]
+                    note_degradation("vector-retriever", f"{vector_unavailable} - graph-only result")
+                if vector_unavailable:
+                    res["vector_unavailable"] = vector_unavailable
+                result = _json.dumps(res)
+            except Exception as e:
+                result = _json.dumps({"status": "error", "error": str(e)})
+
         else:
 
             result = f"Unknown tool: {name}"
 
-        
-
-        yield (True, result)
-
-
-
-    def _filter_duplicate_plots(self, tool_calls_in_turn: list) -> list[str]:
-        """
-        Filters out intermediate plots of the same model type, preserving only the last plot payload
-        for each curve-fitting type to prevent visual clutter in the chat UI.
-        """
-        formatted_outputs = []
-        last_call_index = {}
-        
-        # Track the last index of the tool call for each model/type
-        for idx, (fc, raw, fmt) in enumerate(tool_calls_in_turn):
-            if fc.name == "fit_petrophysical_curve":
-                model = fc.args.get("model")
-                if model:
-                    last_call_index[model] = idx
-                    
-        for idx, (fc, raw, fmt) in enumerate(tool_calls_in_turn):
-            if fc.name == "fit_petrophysical_curve":
-                model = fc.args.get("model")
-                # If this is not the last call for this model, strip the __PRC_PLOT__ block
-                if model and last_call_index.get(model) != idx:
-                    cleaned_fmt = re.sub(r'__PRC_PLOT__\n.*?\n\n', '', fmt, flags=re.DOTALL)
-                    formatted_outputs.append(cleaned_fmt)
-                else:
-                    formatted_outputs.append(fmt)
-            else:
-                formatted_outputs.append(fmt)
-                
-        return formatted_outputs
+        _tail_err = _tool_result_error(result)
+        if _tail_err:
+            _record_tool_failure(name, _tail_err)
+        yield (True, _tail_err is None, result)
 
 
 
     def _format_tool_response(self, name: str, args: dict, result: str) -> str:
+        """Format a tool result and record the outcome in the tool-call ledger.
+
+        The fit tools report their real outcome here, not in `_execute_tool`:
+        `_execute_tool` only marks the fit "ready", and the regression that can
+        actually fail runs during formatting. Recording here is what makes the
+        citation gate reflect whether a parameter was genuinely produced.
+        """
+        formatted = self._format_tool_response_impl(name, args, result)
+        try:
+            # The contract (tools_registry.normalize) decides ok from the OUTCOME —
+            # a rendered refusal, an error payload — never from having got here.
+            spec = tools_registry.REGISTRY.get(name)
+            contract = tools_registry.normalize(spec, result, formatted, True) if spec else None
+            failed = (contract is not None and not contract.ok) or \
+                (isinstance(formatted, str) and formatted.lstrip().startswith("⚠"))
+            fitted = {} if failed else _extract_fitted_values(formatted)
+            contract_values = {} if (failed or contract is None) else dict(contract.values)
+            if spec is not None and spec.values_from == "plot_metadata":
+                # One seam for plot-carried values: what _extract_fitted_values
+                # read from the __PRC_PLOT__ metadata. The contract supplies the
+                # provenance of those keys, never a second reading of the payload.
+                contract_values = {k: v for k, v in contract_values.items() if k in fitted}
+            values = {**{k: v["value"] for k, v in contract_values.items()}, **fitted}
+            sources = {k: v["source"] for k, v in contract_values.items()}
+            if spec is not None:
+                sources.update({k: spec.source_kind for k in fitted if k not in sources})
+            record_tool_call(
+                getattr(_tls, "current_session_id", "") or "",
+                name,
+                "error" if failed else "success",
+                args or {},
+                # The parameters this call backs: the ones its render is about
+                # plus any it produced a value for. A success that fitted nothing
+                # (MICP, J-function, an unparseable payload) backs nothing — the
+                # gate keys on this list, not on the tool name.
+                [] if failed else sorted(set(_rendered_parameters(formatted))
+                                         | {k for k in values if k in _GATED_PARAMETERS}),
+                values=values,
+                sources=sources,
+            )
+        except Exception as ledger_exc:                 # noqa: BLE001 - never break an answer
+            _logger.warning("[citation gate] could not record tool call: %s", ledger_exc)
+        return formatted
+
+    def _format_tool_response_impl(self, name: str, args: dict, result: str) -> str:
 
         try:
+
+            if name == "sandbox_fit_brooks_corey":
+                try:
+                    fit_res = _json.loads(result)
+                    if "error" in fit_res:
+                        return f"⚠️ Sandbox Brooks-Corey fitting failed: {fit_res['error']}"
+                    
+                    sw = args.get("sw", [])
+                    krw = args.get("krw", [])
+                    kro = args.get("kro", [])
+                    sample = args.get("sample_name", "Core")
+                    
+                    params = fit_res.get("parameters", {})
+                    nw = params.get("nw")
+                    no = params.get("no")
+                    Swi = params.get("Swi")
+                    Sor = params.get("Sor")
+                    Krw_max = params.get("Krw_max")
+                    Kro_max = params.get("Kro_max")
+                    
+                    coords = fit_res.get("coordinates", {})
+                    sw_fit = coords.get("Sw", [])
+                    krw_fit = coords.get("Krw", [])
+                    kro_fit = coords.get("Kro", [])
+                    
+                    health = fit_res.get("health", {})
+                    
+                    def _pts(S, K): 
+                        return [{"x": round(float(s), 4), "y": round(float(k), 4)} for s, k in zip(S, K)]
+                    
+                    curves = [
+                        {"name": "Krw (Lab)", "data": _pts(sw, krw), "color": "#38bdf8", "showLine": False, "showPoints": True, "yId": "left"},
+                        {"name": "Kro (Lab)", "data": _pts(sw, kro), "color": "#fb923c", "showLine": False, "showPoints": True, "yId": "right"},
+                        {"name": "Krw (Brooks Corey)", "data": _pts(sw_fit, krw_fit), "color": "#0ea5e9", "showLine": True, "showPoints": False, "yId": "left"},
+                        {"name": "Kro (Brooks Corey)", "data": _pts(sw_fit, kro_fit), "color": "#f97316", "showLine": True, "showPoints": False, "yId": "right"}
+                    ]
+                    
+                    plot_data = {
+                        "title": f"Relative Permeability — Kr vs Sw ({sample})",
+                        "xAxis": {"label": "Water Saturation Sw"},
+                        "yAxis": {"label": "Krw"}, "yAxis2": {"label": "Kro"},
+                        "dualAxis": True, 
+                        "curves": curves,
+                        "metadata": {
+                            "endpoints": {"Swi": Swi, "Sor": Sor, "Krw_max": Krw_max, "Kro_max": Kro_max},
+                            "validation": {
+                                "is_valid": health.get("grade") in ("A", "B"),
+                                "warnings": health.get("warnings", []),
+                                "errors": health.get("errors", [])
+                            },
+                            "fit_params": {"model": "Brooks Corey", "nw": nw, "no": no}
+                        }
+                    }
+                    
+                    # Log the physics audit
+                    audit = {
+                        "score": health.get("score", 0.0),
+                        "grade": health.get("grade", "F"),
+                        "warnings": health.get("warnings", []),
+                        "errors": health.get("errors", [])
+                    }
+                    _log_physics_audit(
+                        getattr(_tls, 'current_session_id', 'ANONYMOUS'), 
+                        "history_matching", 
+                        audit, 
+                        getattr(_tls, 'last_file_name', None)
+                    )
+                    
+                    return f"__PRC_PLOT__\n{_safe_json_dumps(plot_data)}\n\n"
+                except Exception as e:
+                    return f"⚠️ Error formatting sandbox Brooks-Corey response: {e}"
+
+            if name == "sandbox_fit_archie":
+                try:
+                    fit_res = _json.loads(result)
+                    if "error" in fit_res:
+                        return f"⚠️ Sandbox Archie fitting failed: {fit_res['error']}"
+                    
+                    model_type = args.get("model_type", "RI").upper()
+                    sample = args.get("sample_name", "Core")
+                    
+                    params = fit_res.get("parameters", {})
+                    health = fit_res.get("health", {})
+                    coords = fit_res.get("coordinates", {})
+                    x_coords = coords.get("x", [])
+                    y_lab = coords.get("y", [[], []])[0]
+                    y_fit = coords.get("y", [[], []])[1]
+                    
+                    # Provenance (A3 pattern): a `corrected` fit had its free
+                    # parameters forced back into the physical window — the value
+                    # sits on a bound, not on the data. It is NOT a fitted result,
+                    # so the rendered plot label must not present it as one (this
+                    # is the n=1.500 leak B0.1 surfaced). The citation gate cannot
+                    # help here — it must never rewrite plot JSON.
+                    corrected = bool(fit_res.get("corrected"))
+                    fit_note = "; ".join(fit_res.get("notes") or []) or \
+                        "parameter fell outside the physical range; no successful fit"
+
+                    if model_type == "RI":
+                        n_val = params.get("n")
+                        if corrected:
+                            ri_curve_label = "RI Archie (n unresolved — outside physical range, not fitted)"
+                            archie_meta = {"n": None, "fitted": False, "note": fit_note}
+                        else:
+                            ri_curve_label = f"RI Archie  n={n_val:.3f}"
+                            archie_meta = {"n": round(n_val, 4), "fitted": True}
+                        plot_ri = {
+                            "title": f"Resistivity Index  -  RI vs Sw ({sample})",
+                            "xAxis": {"label": "Water Saturation Sw (fraction)"},
+                            "yAxis": {"label": "Resistivity Index RI (dimensionless)"},
+                            "xAxisLog": True, "yAxisLog": True,
+                            "curves": [
+                                {"name": f"RI Lab ({sample})", "showLine": False, "showPoints": True, "color": "#f59e0b", "data": [{"x": float(s), "y": float(r)} for s, r in zip(x_coords, y_lab)]},
+                                {"name": ri_curve_label, "showLine": True, "showPoints": False, "color": "#fbbf24", "data": [{"x": float(s), "y": float(r)} for s, r in zip(x_coords, y_fit)]},
+                            ],
+                            "metadata": {"archie": archie_meta, "physics_audit": health},
+                        }
+                        
+                        _log_physics_audit(
+                            getattr(_tls, 'current_session_id', 'ANONYMOUS'), 
+                            "ri", 
+                            health, 
+                            getattr(_tls, 'last_file_name', None)
+                        )
+                        
+                        return f"__PRC_PLOT__\n{_safe_json_dumps(plot_ri)}\n\n"
+                    else:
+                        m_val = params.get("m")
+                        a_val = params.get("a")
+                        if corrected:
+                            ff_curve_label = "FF Archie (m/a unresolved — outside physical range, not fitted)"
+                            archie_meta = {"m": None, "a": None, "fitted": False, "note": fit_note}
+                        else:
+                            ff_curve_label = f"FF Archie  m={m_val:.3f} a={a_val:.3f}"
+                            archie_meta = {"m": round(m_val, 4), "a": round(a_val, 4), "fitted": True}
+                        plot_ff = {
+                            "title": f"Formation Factor  -  FF vs Porosity ({sample})",
+                            "xAxis": {"label": "Porosity φ (fraction)"},
+                            "yAxis": {"label": "Formation Factor FF (dimensionless)"},
+                            "xAxisLog": True, "yAxisLog": True,
+                            "curves": [
+                                {"name": f"FF Lab ({sample})", "showLine": False, "showPoints": True, "color": "#10b981", "data": [{"x": float(p), "y": float(f)} for p, f in zip(x_coords, y_lab)]},
+                                {"name": ff_curve_label, "showLine": True, "showPoints": False, "color": "#34d399", "data": [{"x": float(p), "y": float(f)} for p, f in zip(x_coords, y_fit)]},
+                            ],
+                            "metadata": {"archie": archie_meta, "physics_audit": health},
+                        }
+                        
+                        _log_physics_audit(
+                            getattr(_tls, 'current_session_id', 'ANONYMOUS'), 
+                            "ff", 
+                            health, 
+                            getattr(_tls, 'last_file_name', None)
+                        )
+                        
+                        return f"__PRC_PLOT__\n{_safe_json_dumps(plot_ff)}\n\n"
+                except Exception as e:
+                    return f"⚠️ Error formatting sandbox Archie response: {e}"
+
+            if name == "hybrid_geological_search":
+                try:
+                    res = _json.loads(result)
+                    if isinstance(res, dict) and res.get("status") == "error":
+                        return f"⚠️ Hybrid geological search failed: {res.get('error')}"
+
+                    query = res.get("query") or args.get("query_text", "")
+                    graph_part = res.get("graph", {}) or {}
+                    matched = graph_part.get("matched_nodes", []) or []
+                    subgraphs = graph_part.get("subgraphs", []) or []
+                    vector = res.get("vector", []) or []
+
+                    lines = [f"\n\n**🗺️ Hybrid Geological Search** — `{query}`\n"]
+
+                    if matched:
+                        lines.append("**Matched Graph Entities:** " + ", ".join(f"`{m}`" for m in matched) + "\n")
+                    else:
+                        lines.append("**Matched Graph Entities:** none found in the knowledge graph.\n")
+
+                    for sg in subgraphs:
+                        edges = sg.get("edges", []) or []
+                        if not edges:
+                            continue
+                        lines.append(f"**Relations around `{sg.get('root')}`** (depth {sg.get('depth_limit')}):")
+                        for e in edges:
+                            meta = e.get("metadata") or {}
+                            meta_str = ""
+                            if meta:
+                                meta_str = " — *" + ", ".join(f"{k}={v}" for k, v in sorted(meta.items())) + "*"
+                            lines.append(f"- `{e.get('source')}` —[{e.get('relation')}]→ `{e.get('target')}`{meta_str}")
+                        lines.append("")
+
+                    if res.get("vector_unavailable"):
+                        lines.append(f"**Analog Wells:** vector search unavailable ({res['vector_unavailable']}) — "
+                                     "graph-only result; no analog wells were searched.")
+                    elif vector:
+                        lines.append(f"**Analog Wells (vector search — {len(vector)} match(es)):**")
+                        for w in vector:
+                            ctx = str(w.get("context", ""))[:140]
+                            lines.append(f"- `{w.get('id')}` — {ctx}")
+                    else:
+                        lines.append("**Analog Wells:** no vector matches for the requested petrophysical window.")
+
+                    return "\n".join(lines) + "\n\n"
+                except Exception as e:
+                    return f"⚠️ Error formatting hybrid geological search response: {e}"
 
             # â"€â"€ Executive Report â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€
 
@@ -3357,7 +3997,11 @@ class PRCChatAssistant:
 
                 return f"\n\n{result}\n\n"
 
-
+            # Text results: the diagram markers the frontend renders, and the audit
+            # ledger markdown. Neither is JSON; without these branches both fell
+            # through the JSON parse below to `return ""` and reached nobody.
+            if name in ("generate_mermaid_diagram", "get_audit_history"):
+                return f"\n\n{result}\n\n"
 
             # â"€â"€ MICP: Drainage + Imbibition, log-Pc, % x-axis, hysteresis â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€
 
@@ -3397,7 +4041,15 @@ class PRCChatAssistant:
 
                     entry_mask = shg_s > 0.01
 
-                    pe = float(pc_s[entry_mask][0]) if entry_mask.any() else float(pc_s[0])
+                    # A value the data cannot support is None with the reason in
+                    # metadata.micp.notes — never the first point / the entry
+                    # pressure / 1.0 dressed up as a computed result.
+                    micp_notes = []
+                    if entry_mask.any():
+                        pe = float(pc_s[entry_mask][0])
+                    else:
+                        pe = None
+                        micp_notes.append("entry pressure not determined: no point exceeds 1% Hg saturation")
 
                     # Threshold pressure  -  inflection of Pc(Sw) curve
 
@@ -3409,9 +4061,10 @@ class PRCChatAssistant:
 
                     else:
 
-                        thr_pc = pe
+                        thr_pc = None
+                        micp_notes.append("threshold pressure / modal radius not determined: fewer than 3 points")
 
-                    thr_r = 107.5 / max(thr_pc, 0.1)
+                    thr_r = 107.5 / max(thr_pc, 0.1) if thr_pc is not None else None
 
                     # PSD: dSw/d(log10 r)
 
@@ -3487,8 +4140,6 @@ class PRCChatAssistant:
 
                     # or better: use the PSD peak width. For now, let's provide a 'Sorting Index'
 
-                    sorting_idx = 1.0
-
                     if len(psd_pts) > 5:
 
                         psd_y = np.array([p["y"] for p in psd_pts])
@@ -3496,6 +4147,11 @@ class PRCChatAssistant:
                         # Normalize sorting: sharp peak = low index (well sorted)
 
                         sorting_idx = round(float(np.sum(psd_y) / (np.max(psd_y) * len(psd_y) + 1e-9)), 2)
+
+                    else:
+
+                        sorting_idx = None
+                        micp_notes.append(f"sorting index not determined: {len(psd_pts)} PSD points (need > 5)")
 
 
 
@@ -3515,17 +4171,19 @@ class PRCChatAssistant:
 
                         "metadata": {"micp": {
 
-                            "entry_pressure_psia":     round(pe, 2),
+                            "entry_pressure_psia":     round(pe, 2) if pe is not None else None,
 
-                            "threshold_pressure_psia": round(thr_pc, 2),
+                            "threshold_pressure_psia": round(thr_pc, 2) if thr_pc is not None else None,
 
-                            "modal_pore_radius_um":    round(thr_r, 3),
+                            "modal_pore_radius_um":    round(thr_r, 3) if thr_r is not None else None,
 
                             "max_hg_saturation_pct":   round(float(shg_pct[-1]), 1),
 
                             "trapped_hg_pct":          trapped_pct,
 
                             "sorting_index":           sorting_idx,
+
+                            "notes":                   micp_notes,
 
                         }},
 
@@ -3569,26 +4227,6 @@ class PRCChatAssistant:
 
 
 
-                    parts = [
-
-                        f"Entry Pressure Pe = {pe:.1f} psia",
-
-                        f"Threshold Pressure = {thr_pc:.1f} psia",
-
-                        f"Modal Pore Throat r = {thr_r:.3f} Âµm",
-
-                        f"Max Hg Saturation = {float(shg_pct[-1]):.1f}%",
-
-                        f"Pore Sorting Index = {sorting_idx}",
-
-                    ]
-
-                    if trapped_pct is not None:
-
-                        parts.append(f"Trapped Hg (Hysteresis) = {trapped_pct:.1f}%")
-
-                    summary = "  |  ".join(parts)
-
                     return (
 
                         f"__PRC_PLOT__\n{_safe_json_dumps(plot_pc)}\n\n"
@@ -3597,7 +4235,10 @@ class PRCChatAssistant:
 
                     )
 
-
+                # Guard false: say so. Falling through to `return ""` recorded a
+                # "success" with no values and told the model "Pc curve computed".
+                return (f"⚠️ MICP fit not performed: {len(pc_raw)} pc / {len(shg_raw)} s_hg point(s) "
+                        f"supplied — more than one of each is required.")
 
             # â"€â"€ RESISTIVITY INDEX (Archie n fit, log-log) â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€
 
@@ -3607,15 +4248,14 @@ class PRCChatAssistant:
 
                 # STRICT CACHE-ONLY: fit exclusively on the verified cached column vectors
                 # the report engine uses. NO LLM/inline-arg fallback. No cache -> terminate.
-                sw_raw, ri_raw = [], []
-                if sid:
-                    sw_raw = find_cached_vector(sid, ["sw", "water saturation", "saturation"])
-                    ri_raw = find_cached_vector(sid, ["ri", "resistivity index", "index"])
-                if not sw_raw or not ri_raw:
+                try:
+                    sw_raw = find_cached_vector(sid, "sw")
+                    ri_raw = find_cached_vector(sid, "ri")
+                except VectorLookupError as exc:
+                    _logger.warning("[RI fit] cached vector lookup failed: %s", exc)
                     return (
-                        "⚠️ Resistivity Index fit aborted: no verified Sw / RI vectors are present "
-                        "in the session cache. Upload the SCAL file so the fit runs strictly on "
-                        "cached laboratory data — inline or model-supplied values are not accepted."
+                        "⚠️ Resistivity Index fit aborted: the verified Sw / RI column vectors "
+                        f"could not be resolved from the session cache. {exc}"
                     )
 
                 sample = args.get("sample_name", "Core")
@@ -3630,6 +4270,12 @@ class PRCChatAssistant:
                     sw_a = sw_a[idx_sort]
                     ri_a = ri_a[idx_sort]
 
+                    try:
+                        assert_independent_vectors(sw_a, ri_a, "Sw", "RI")
+                    except VectorLookupError as exc:
+                        _logger.error("[RI fit] self-regression guard tripped: %s", exc)
+                        return f"⚠️ Resistivity Index fit aborted: {exc}"
+
                     mask     = (sw_a > 0) & (ri_a > 0)
                     n_arch   = float(-np.polyfit(np.log(sw_a[mask]), np.log(ri_a[mask]), 1)[0])
 
@@ -3640,10 +4286,15 @@ class PRCChatAssistant:
                         _log_physics_audit(getattr(_tls, 'current_session_id', 'ANONYMOUS'), "ri",
                                            _audit_fail, getattr(_tls, 'last_file_name', None))
                         return (
+                            # Worded as a REJECTED regression, not a fitted claim: the old
+                            # "fitted … n=1.200 falls outside" matched the citation gate's
+                            # claim shape and came back garbled ("n=[unverified …] falls
+                            # outside") — the D2 fabrication scenario surfaced it.
                             f"⚠️ Physics boundary check failed for the Resistivity Index fit: "
-                            f"the fitted Archie saturation exponent n={n_arch:.3f} falls outside the valid "
-                            f"reservoir-rock range [1.5, 3.0]. No RI chart was generated, to avoid emitting "
-                            f"fabricated data points. Please verify the raw Sw / RI columns for sample '{sample}'."
+                            f"the unconstrained regression slope of {n_arch:.3f} lies outside the valid "
+                            f"reservoir-rock range [1.5, 3.0] for Archie n, so no saturation exponent was fitted. "
+                            f"No RI chart was generated, to avoid emitting fabricated data points. "
+                            f"Please verify the raw Sw / RI columns for sample '{sample}'."
                         )
 
                     sw_fit   = np.linspace(float(sw_a.min()), 1.0, 80)
@@ -3723,7 +4374,8 @@ class PRCChatAssistant:
 
                     )
 
-
+                return (f"⚠️ Resistivity Index fit not performed: the cached Sw ({len(sw_raw)} values) and "
+                        f"RI ({len(ri_raw)} values) vectors must each hold more than one point and be equal in length.")
 
             # â"€â"€ FORMATION FACTOR (Archie m, a fit, log-log) â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€
 
@@ -3733,15 +4385,14 @@ class PRCChatAssistant:
 
                 # STRICT CACHE-ONLY: fit exclusively on the verified cached column vectors
                 # the report engine uses. NO LLM/inline-arg fallback. No cache -> terminate.
-                phi_raw, ff_raw = [], []
-                if sid:
-                    phi_raw = find_cached_vector(sid, ["porosity", "phi"])
-                    ff_raw  = find_cached_vector(sid, ["ff", "formation factor"])
-                if not phi_raw or not ff_raw:
+                try:
+                    phi_raw = find_cached_vector(sid, "porosity")
+                    ff_raw  = find_cached_vector(sid, "ff")
+                except VectorLookupError as exc:
+                    _logger.warning("[FF fit] cached vector lookup failed: %s", exc)
                     return (
-                        "⚠️ Formation Factor fit aborted: no verified porosity / FF vectors are "
-                        "present in the session cache. Upload the SCAL file so the fit runs strictly "
-                        "on cached laboratory data — inline or model-supplied values are not accepted."
+                        "⚠️ Formation Factor fit aborted: the verified porosity / FF column "
+                        f"vectors could not be resolved from the session cache. {exc}"
                     )
 
                 sample  = args.get("sample_name", "Core")
@@ -3755,6 +4406,12 @@ class PRCChatAssistant:
                     phi_a = phi_a[idx_sort]
                     ff_a = ff_a[idx_sort]
 
+                    try:
+                        assert_independent_vectors(phi_a, ff_a, "Porosity", "FF")
+                    except VectorLookupError as exc:
+                        _logger.error("[FF fit] self-regression guard tripped: %s", exc)
+                        return f"⚠️ Formation Factor fit aborted: {exc}"
+
                     mask    = (phi_a > 0) & (ff_a > 0)
                     coeffs  = np.polyfit(np.log(phi_a[mask]), np.log(ff_a[mask]), 1)
                     m_arch  = float(-coeffs[0])
@@ -3767,10 +4424,14 @@ class PRCChatAssistant:
                         _log_physics_audit(getattr(_tls, 'current_session_id', 'ANONYMOUS'), "ff",
                                            _audit_fail, getattr(_tls, 'last_file_name', None))
                         return (
+                            # Worded as a REJECTED regression, not a fitted claim (see the RI
+                            # branch): the citation gate must not garble the refusal.
                             f"⚠️ Physics boundary check failed for the Formation Factor fit: "
-                            f"fitted m={m_arch:.3f}, a={a_arch:.3f} fall outside valid reservoir-rock ranges "
-                            f"(m∈[1.3,3.5], a∈[0.3,2.5]). No FF chart was generated, to avoid emitting "
-                            f"fabricated data points. Please verify the raw porosity / FF columns for sample '{sample}'."
+                            f"the unconstrained regression returned {m_arch:.3f} for the cementation exponent and "
+                            f"{a_arch:.3f} for tortuosity, outside the valid reservoir-rock ranges "
+                            f"(m∈[1.3,3.5], a∈[0.3,2.5]), so no Archie m / a were fitted. No FF chart was generated, "
+                            f"to avoid emitting fabricated data points. Please verify the raw porosity / FF columns "
+                            f"for sample '{sample}'."
                         )
 
                     phi_fit = np.linspace(float(phi_a.min()), float(phi_a.max()), 80)
@@ -3843,7 +4504,8 @@ class PRCChatAssistant:
 
                     )
 
-
+                return (f"⚠️ Formation Factor fit not performed: the cached porosity ({len(phi_raw)} values) and "
+                        f"FF ({len(ff_raw)} values) vectors must each hold more than one point and be equal in length.")
 
             # â"€â"€ LEVERETT J-FUNCTION â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€
 
@@ -3915,7 +4577,8 @@ class PRCChatAssistant:
 
                     )
 
-
+                return (f"⚠️ J-Function not computed: {len(sw_raw)} sw / {len(pc_raw)} pc point(s) supplied — "
+                        f"more than one of each is required.")
 
             # â"€â"€ CAPILLARY PRESSURE  -  CENTRIFUGE / POROUS PLATE â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€
 
@@ -3975,13 +4638,10 @@ class PRCChatAssistant:
 
 
 
-                    summary = (f"Pc range: {float(pc_a.min()):.2f} â€“ {float(pc_a.max()):.2f} psia | "
-
-                               f"Sw range: {float(sw_a.min()):.3f} â€“ {float(sw_a.max()):.3f}")
-
                     return (f"__PRC_PLOT__\n{_safe_json_dumps(plot_pc)}\n\n")
 
-
+                return (f"⚠️ Capillary pressure curve not computed: {len(sw_raw)} sw / {len(pc_raw)} pc point(s) "
+                        f"supplied — more than one of each is required.")
 
             # ── OVERBURDEN COMPACTION (dual-axis: φ left, k right log-scale) ──────────
 
@@ -4049,25 +4709,25 @@ class PRCChatAssistant:
 
                     }
 
-                    summary = (f"Pressure range: {float(pres_a.min()):.0f} – {float(pres_a.max()):.0f} psia")
-
                     return (f"__PRC_PLOT__\n{_safe_json_dumps(plot_ob)}\n\n")
 
                 else:
                     if len(phi_raw) > 1 and len(perm_raw) > 1:
                         is_depth_like = any(p > 100 for p in pres_raw) if pres_raw else False
                         if is_depth_like:
-                            args["model"] = "poroperm_depth"
-                            if len(pres_raw) == 1:
-                                try:
-                                    start_depth = float(pres_raw[0])
-                                except ValueError:
-                                    start_depth = 1000.0
-                                args["depth"] = [start_depth + i for i in range(len(phi_raw))]
-                            else:
-                                args["depth"] = pres_raw
-                        else:
-                            args["model"] = "poroperm"
+                            # Only len(pres_raw) == 1 reaches here. A depth axis was
+                            # synthesized as start+i (or 1000+i) and plotted as
+                            # "Depth (ft)": refuse instead of inventing one.
+                            return (f"⚠️ Overburden fit not performed: one pressure/depth value for "
+                                    f"{len(phi_raw)} porosity points — a depth axis cannot be synthesized. "
+                                    f"Pass pressure=[...] per point, or depth=[...] with model='poroperm_depth'.")
+                        return (f"⚠️ Overburden fit not performed: {len(pres_raw)} pressure value(s) for "
+                                f"{len(phi_raw)} porosity / {len(perm_raw)} permeability points is not a compaction "
+                                f"series. Pass pressure=[...] per point, or call model='poroperm' for a "
+                                f"porosity-permeability cross-plot.")
+                    else:
+                        return (f"⚠️ Overburden fit not performed: {len(pres_raw)} pressure, {len(phi_raw)} porosity "
+                                f"and {len(perm_raw)} permeability point(s) supplied — more than one pressure is required.")
 
 
             # ── POROSITY-PERMEABILITY CROSS-PLOT ──────────────────────────────────────
@@ -4158,6 +4818,11 @@ class PRCChatAssistant:
 
                         return (f"__PRC_PLOT__\n{_safe_json_dumps(plot_poroperm)}\n\n")
 
+                    return (f"⚠️ Porosity-permeability cross-plot not computed: only {int(np.sum(mask))} "
+                            f"positive porosity/permeability pair(s) — at least two are required for the log-linear fit.")
+
+                return (f"⚠️ Porosity-permeability cross-plot not computed: {len(phi_raw)} porosity / "
+                        f"{len(perm_raw)} permeability point(s) supplied — more than one of each is required.")
 
             # ── POROSITY & PERMEABILITY VS DEPTH ──────────────────────────────────────
 
@@ -4249,15 +4914,43 @@ class PRCChatAssistant:
 
                     return (f"__PRC_PLOT__\n{_safe_json_dumps(plot_depth)}\n\n")
 
+                return (f"⚠️ Porosity/permeability vs depth plot not computed: {len(depth_raw)} depth / "
+                        f"{len(phi_raw)} porosity / {len(perm_raw)} permeability point(s) — more than one of each is required.")
 
+            if name == "fit_petrophysical_curve":
+                # An analytic model name no branch above handles (or a model that
+                # ran through curve_fitting_skill, whose payload the summary carries).
+                _model = args.get("model", "")
+                if _model in ("micp", "ri", "ff", "jfunction", "pc_centrifuge", "overburden", "poroperm", "poroperm_depth"):
+                    return f"⚠️ fit_petrophysical_curve: model '{_model}' produced no render."
 
             try:
 
                 tr = _json.loads(result) if isinstance(result, str) else result
 
-            except Exception:
+            except (ValueError, TypeError):
 
-                tr = {}
+                # Not JSON. Every text-shaped result has an explicit branch above.
+                tr = None
+
+            if not isinstance(tr, dict):
+                return f"⚠️ {name}: result not rendered — no formatter branch for this payload."
+
+            if name == "fit_petrophysical_curve" and tr.get("success"):
+                # brooks_corey / let via curve_fitting_skill: no plot; the fitted
+                # parameters reach the model through _tool_result_summary(fit_params).
+                return ""
+
+            if name == "calculate_petrophysics_properties" and "r_squared" in tr \
+                    and args.get("model") in ("regress_archie_m_a", "regress_archie_n"):
+                # Rendered WITHOUT the gate's cue words on the value lines: these are
+                # regressions on arrays the model supplied, not cache-backed fits, and
+                # the citation gate must neither accept nor garble them.
+                rows = [f"| {k} (model-args) | {float(tr[k]):.4f} |" for k in ("n", "m", "a") if k in tr]
+                return ("\n\n**Regression on arrays supplied in the tool call** (model-args; not the verified "
+                        "session cache — the citation gate does not accept these as fitted values)\n\n"
+                        "| result | value |\n|---|---|\n" + "\n".join(rows)
+                        + f"\n| R-squared | {float(tr['r_squared']):.4f} |\n\n")
 
             # ── RQI/FZI Black Box Fix ─────────────────────────────────────────
             # The petrophysics.py rqi_fzi model returns a full structured payload
@@ -4279,21 +4972,6 @@ class PRCChatAssistant:
                         pass
                 
                 if model == "rqi_fzi":
-                    if sid:
-                        with SESSION_DATA_CACHE_LOCK:
-                            if sid not in SESSION_DATA_CACHE:
-                                SESSION_DATA_CACHE[sid] = {}
-                            if "labeled_values" not in SESSION_DATA_CACHE[sid]:
-                                SESSION_DATA_CACHE[sid]["labeled_values"] = {}
-                            for s in tr["samples"]:
-                                s_name = str(s.get('sample', '')).lower().strip()
-                                if s_name:
-                                    SESSION_DATA_CACHE[sid]["labeled_values"][f"rqi_{s_name}"] = s.get('rqi', 0.0)
-                                    SESSION_DATA_CACHE[sid]["labeled_values"][f"fzi_{s_name}"] = s.get('fzi', 0.0)
-                                    SESSION_DATA_CACHE[sid]["labeled_values"][f"hu_{s_name}"] = s.get('hu', 1)
-                                    SESSION_DATA_CACHE[sid]["labeled_values"][f"bca_hydraulicunits_rqi_{s_name}"] = s.get('rqi', 0.0)
-                                    SESSION_DATA_CACHE[sid]["labeled_values"][f"bca_hydraulicunits_fzi_{s_name}"] = s.get('fzi', 0.0)
-                                    SESSION_DATA_CACHE[sid]["labeled_values"][f"bca_hydraulicunits_hu_{s_name}"] = s.get('hu', 1)
                     hu_summary = tr.get("summary", [])
                     num_units = len(hu_summary)
                     lines.append(f"\n\n**RQI / FZI Calculation — {tr.get('total_samples', '?')} Samples, {num_units} Hydraulic Units**\n")
@@ -4322,8 +5000,20 @@ class PRCChatAssistant:
                             if tk in thresh:
                                 t_parts.append(f"HU{idx+1}/HU{idx+2} = {thresh[tk]} FZI")
                         if t_parts:
-                            lines.append(f"**Partition Thresholds:** " + " | ".join(t_parts))
-                            
+                            lines.append("**Partition Thresholds:** " + " | ".join(t_parts))
+                    # Bind AFTER the table rendered (a KeyError above means nothing is
+                    # bound) and only the keys the sample actually carries — never a
+                    # 0.0 / 1 default that a {{val:}} token would render as CACHED·HIGH.
+                    if sid:
+                        with SESSION_DATA_CACHE_LOCK:
+                            labeled = SESSION_DATA_CACHE.setdefault(sid, {}).setdefault("labeled_values", {})
+                            for s in tr["samples"]:
+                                s_name = str(s.get('sample', '')).lower().strip()
+                                for key in ("rqi", "fzi", "hu"):
+                                    if s_name and key in s:
+                                        labeled[f"{key}_{s_name}"] = s[key]
+                                        labeled[f"bca_hydraulicunits_{key}_{s_name}"] = s[key]
+
                 elif model == "klinkenberg":
                     lines.append(f"\n\n**Klinkenberg Permeability Correction — {tr.get('total_samples', '?')} Samples**\n")
                     lines.append("| # | Depth | Gas Perm Ka (mD) | Mean Pressure (psi) | Corrected Perm KL (mD) | Slippage b (psi) |")
@@ -4439,8 +5129,19 @@ class PRCChatAssistant:
                             lines.append("")
                             lines.append("> ⚠️ **Engineering Note (Acid Solubility > 50%):** High carbonate content detected. Avoid acid-based core cleaning solvents to prevent structural damage, and flag the core for carbonate-specific SCAL protocols.")
                 
-                # Fetch sheet name
+                if tr.get("depth_synthetic"):
+                    # The script echoes a row index 1..N as "depth" when no depth
+                    # column exists; the header says so instead of "Depth".
+                    lines = [ln.replace("| # | Depth |", "| # | Row # (no depth column) |", 1) for ln in lines]
+
+                # Fetch sheet name — only meaningful when the arrays came from the cache.
                 sheet_name = None
+                if tr.get("input_source") != "cache":
+                    lines.append("")
+                    lines.append("*Provenance: arrays supplied in the tool call (model-args) — not read from the uploaded "
+                                 "spreadsheet | calculations performed programmatically.*")
+                    lines.append("")
+                    return "\n".join(lines)
                 try:
                     expected_dict = {}
                     if model == "klinkenberg":
@@ -4464,9 +5165,10 @@ class PRCChatAssistant:
                         _, s_name = find_aligned_columns(sid, expected_dict)
                         sheet_name = s_name
                     elif model == "xrd_mineralogy":
-                        load_session_cache_from_db(sid)
+                        fhash_xrd2 = resolve_cache_key(sid)
+                        load_session_cache_from_db(fhash_xrd2)
                         with SESSION_DATA_CACHE_LOCK:
-                            raw_excel = SESSION_DATA_CACHE.get(sid, {}).get("raw_excel_data", {})
+                            raw_excel = SESSION_DATA_CACHE.get(fhash_xrd2, {}).get("raw_excel_data", {})
                         if raw_excel:
                             for s_name, sheet_dict in raw_excel.items():
                                 aligned = sheet_dict.get("__aligned_vectors__")
@@ -4497,7 +5199,7 @@ class PRCChatAssistant:
 
                 sw, krw, kro = args.get("sw",[]), args.get("krw",[]), args.get("kro",[])
 
-                p, mse = tr.get("optimal_parameters",{}), tr.get("final_mse", 0)
+                p = tr.get("optimal_parameters", {})
 
 
 
@@ -4567,15 +5269,17 @@ class PRCChatAssistant:
 
                     sw_arr, krw_arr, kro_arr = np.array(sw), np.array(krw), np.array(kro)
 
+                    # No second set of defaults here: _execute_tool filled and
+                    # marked them, and the echo carries them (KeyError = a real bug).
                     ep = Endpoints(
 
-                        Swi=pm.get("swr", 0.15),
+                        Swi=pm["swr"],
 
-                        Sor=pm.get("snr", 0.2),
+                        Sor=pm["snr"],
 
-                        Krw_max=pm.get("krw_max", 0.5),
+                        Krw_max=pm["krw_max"],
 
-                        Kro_max=pm.get("kro_max", 0.8)
+                        Kro_max=pm["kro_max"]
 
                     )
 
@@ -4615,17 +5319,43 @@ class PRCChatAssistant:
 
                     )
 
-        except Exception:
+        except Exception as fmt_exc:
 
-            pass
+            # A formatter crash is a failed step: counted, AND rendered as a
+            # refusal so the ledger records error and the model is told
+            # "[TOOL FAILURE …]" instead of "computed" (the "" it used to return
+            # recorded success with no values).
+            _record_tool_failure(name, f"response formatting error: {fmt_exc}")
+            return f"⚠️ {name}: response formatting failed ({type(fmt_exc).__name__}: {fmt_exc})"
 
+        # A JSON object with no dedicated render: nothing for the user, but the
+        # raw payload reaches the model through _tool_result_summary.
         return ""
 
 
 
-    def _tool_result_summary(self, name: str, raw_result: str) -> dict:
+    def _tool_result_summary(self, name: str, raw_result: str, ok: bool = True,
+                             rendered: str = "") -> dict:
 
-        """Returns a compact dict for the next-turn FunctionResponse so Gemini can interpret results."""
+        """Returns a compact dict for the next-turn FunctionResponse so Gemini can interpret results.
+
+        When ok is False the failure is stated explicitly — the model must acknowledge
+        it instead of hallucinating plots/parameters for the failed step.
+        `rendered` is what the formatter actually produced for the user: a "plot
+        computed" note is only emitted when a __PRC_PLOT__ payload exists."""
+
+        if not ok:
+            detail = _tool_result_error(raw_result) or str(raw_result)[:300]
+            return {
+                "status": "error",
+                "tool": name,
+                "error": str(detail)[:500],
+                "note": (
+                    f"[TOOL FAILURE: {name} returned error: {str(detail)[:300]}] "
+                    "This step FAILED. Acknowledge the failure to the engineer and do NOT "
+                    "invent results, plots, tables, or parameters for this step."
+                ),
+            }
 
         try:
 
@@ -4677,7 +5407,11 @@ class PRCChatAssistant:
 
                             "parameters": {k: pm.get(k) for k in ("swr","snr","krw_max","kro_max","nw","no") if pm.get(k) is not None},
 
-                            "note": "Kr curves computed. Proceed with physics interpretation without mentioning tool execution.",
+                            "defaulted": list(pm.get("defaulted") or []),
+
+                            "note": "Kr curves computed. Parameters listed under 'defaulted' were NOT supplied in the call "
+                                    "and were filled with simulation_core defaults — say so if you report them. "
+                                    "Proceed with physics interpretation without mentioning tool execution.",
 
                         }
 
@@ -4729,7 +5463,11 @@ class PRCChatAssistant:
 
                 model_key = data.get("model", "") if isinstance(data, dict) else ""
 
-                if model_key in _MODEL_NOTES:
+                # The note claims a plot was computed: only true when the formatter
+                # rendered one. A blank render (JSON with no dedicated renderer,
+                # or the caller not passing `rendered`) falls through to the raw
+                # payload summary below instead of "plot computed, state Archie n".
+                if model_key in _MODEL_NOTES and "__PRC_PLOT__" in (rendered or ""):
 
                     return {
 
@@ -4755,11 +5493,24 @@ class PRCChatAssistant:
 
             elif name == "get_audit_history":
 
+                if str(raw_result).startswith("No audit records"):
+                    return {
+                        "status": "empty",
+                        "ledger": str(raw_result)[:300],
+                        "note": "The PRC Audit Ledger holds no records for this session. Report that "
+                                "there is no trend to analyse; do not describe a quality trend or "
+                                "any violations, without mentioning tool execution.",
+                    }
+
                 return {
 
                     "status": "success",
 
-                    "note": "PRC Audit Ledger retrieved. Analyze the quality trend and alert the engineer of recurring violations without mentioning tool execution."
+                    # The ledger rows themselves: the model was told to analyse a
+                    # trend it had never been given.
+                    "ledger": str(raw_result)[:4000],
+
+                    "note": "PRC Audit Ledger retrieved (rows in 'ledger'). Analyze the quality trend and alert the engineer of recurring violations without mentioning tool execution."
 
                 }
 
@@ -4769,35 +5520,29 @@ class PRCChatAssistant:
 
                     "status": "success",
 
-                    "well_name": args.get("well_name", "Unknown Well"),
-
                     "note": "Executive report generated. Do not mention tool execution."
 
                 }
 
         except Exception as e:
 
-            _logger.error(f"[Tool] _format_tool_response error ({name}): {e}")
+            _record_tool_failure(name, f"summary formatting error: {e}")
 
-            pass
+        # Defense in depth: never launder an error-shaped payload as "executed"
+        # even if the caller passed ok=True.
+        _fallback_err = _tool_result_error(raw_result)
+        if _fallback_err:
+            return self._tool_result_summary(name, raw_result, ok=False)
 
-        return {"status": "executed", "tool": name, "note": "Action complete. Provide the final engineering interpretation directly without stating that a tool was executed."}
+        # No dedicated summary for this payload: hand the model the raw result
+        # (truncated) instead of a bare "Action complete" it would narrate from nothing.
+        return {"status": "executed", "tool": name, "result": str(raw_result)[:2000],
+                "note": "No dedicated summary exists for this payload; 'result' is the raw tool output. "
+                        "Interpret only what it contains, without stating that a tool was executed."}
 
 
 
     def _build_contents(self, history: list, enriched_msg: str, f_parts: list) -> tuple[list, list[str]]:
-
-        SUPPORTED = {
-
-            "application/pdf", "image/jpeg", "image/png", "image/gif", "image/webp",
-
-            "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-
-            "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-
-            "text/plain", "text/csv", "application/json"
-
-        }
 
         contents  = []
 
@@ -4827,70 +5572,15 @@ class PRCChatAssistant:
 
 
 
-        with self._client_lock:
-
-            client = self._client
-
-
-
         user_parts    = [genai_types.Part(text=enriched_msg)]
 
         uploaded_uris: list[str] = []
 
 
 
-        import tempfile
-
-        for data_bytes, mime, fname in f_parts:
-
-            safe_mime = mime or "application/octet-stream"
-
-            if safe_mime not in SUPPORTED:
-
-                continue
-
-
-
-            # Skip Gemini Files API for spreadsheets, PDFs, DOCX, and plain text — all
-            # extracted locally in chat() and injected into the prompt. Avoids 30-120s upload latency.
-            if any(x in safe_mime for x in ["spreadsheet", "excel", "csv", "sheet", "pdf", "wordprocessingml", "text/plain"]):
-
-                continue
-
-
-
-            with tempfile.NamedTemporaryFile(delete=False) as tf:
-
-                tf.write(data_bytes)
-
-                tmp = tf.name
-
-            try:
-
-                uf = client.files.upload(file=tmp, config={"mime_type": mime})
-
-                for _ in range(7):
-
-                    if str(getattr(uf, "state", "")).upper().endswith("ACTIVE"):
-
-                        break
-
-                    time.sleep(0.5)
-
-                    uf = client.files.get(name=uf.name)
-
-                user_parts.append(genai_types.Part(file_data=genai_types.FileData(file_uri=uf.uri, mime_type=mime)))
-
-                uploaded_uris.append(f"{uf.uri}|{mime}")
-
-            finally:
-
-                try:
-                    Path(tmp).unlink(missing_ok=True)
-                except Exception:
-                    pass
-
-
+        # Uploaded files are extracted locally in chat() and injected as text;
+        # there is no provider-side file upload (the adapter drops file_data
+        # parts), so nothing is uploaded here.
 
         contents.append(genai_types.Content(role="user", parts=user_parts))
 
@@ -4905,9 +5595,79 @@ class PRCChatAssistant:
 
 
     def chat(self, history: list, msg: str, kb_context: str = "", f_parts: list = [], stream: bool = False, sid: str = None, email: str = None):
+        """One chat request. The retry budget it creates is released on every
+        exit - assembled answer, exhausted stream, or an exception - so no later
+        caller on this context inherits it (D3.3)."""
+        try:
+            return self._chat_impl(history, msg, kb_context=kb_context, f_parts=f_parts, stream=stream, sid=sid, email=email)
+        except BaseException:
+            _tls.retry_budget = None
+            raise
 
+    def _chat_impl(self, history: list, msg: str, kb_context: str = "", f_parts: list = [], stream: bool = False, sid: str = None, email: str = None):
+
+        # Bind the session id HERE, not only in the HTTP routes: the tool-call
+        # ledger and the citation gate key on it, and every caller — routes,
+        # the eval harness, in-process scripts — must record and check under
+        # the same sid. Unbound callers used to write a shared "" bucket.
+        if sid:
+            _tls.current_session_id = sid
         _tls.pending_kb = []       # thread-local: safe under 50+ concurrent workers
+        # Per-request state (D3): a fresh retry budget; the degradation list is
+        # cleared, not replaced — a route may hold a reference to it.
+        _tls.retry_budget = retry_budget.RetryBudget.from_env()
+        _tls.request_failed = None
+        _degr = getattr(_tls, "degradations", None)
+        if isinstance(_degr, list):
+            _degr.clear()
+        else:
+            _tls.degradations = []
         _tls.last_well_name = None  # updated when a SCAL file is processed this turn
+        # KnowledgeBase.search runs before chat() (often on a thread whose context
+        # the clear above cannot reach) and reports its own failures as markers in
+        # the text it returns; re-raise them on this request's channel.
+        for _kb_marker in re.findall(r"\[KB DEGRADED: ([^\]]+)\]", kb_context or ""):
+            note_degradation("knowledge-base", _kb_marker)
+
+        # ── Dual-RAG router: pick the retrieval strategy for THIS query ──
+        # VECTOR_SEARCH keeps the KnowledgeBase context already assembled by the
+        # handler; GRAPH_SEARCH swaps in geological-graph context; HYBRID merges
+        # both (de-duplicated by content snippet). Any failure here degrades to
+        # the default vector context — routing must never kill a chat turn.
+        try:
+            from hviel.rag.router import RagRoute, classify_query, merge_context_chunks
+
+            _route = classify_query(msg)
+            _logger.info("[RAG-ROUTER] route=%s confidence=%.2f", _route.route.value, _route.confidence)
+            if _route.route in (RagRoute.GRAPH_SEARCH, RagRoute.HYBRID):
+                from geological_graph import GeologicalGraph
+
+                _retriever = None
+                try:
+                    from rag_database import RAGDatabase
+                    _retriever = RAGDatabase()
+                except (KeyboardInterrupt, SystemExit):
+                    raise
+                except BaseException as _rag_exc:
+                    # chromadb's Rust bindings can raise pyo3 PanicException (a
+                    # BaseException) on corrupt stores; degrade to graph-only —
+                    # and say so where the caller can see it.
+                    note_degradation("rag-vector-store",
+                                     f"{type(_rag_exc).__name__}: {_rag_exc} - analog vector store unavailable, graph-only")
+
+                _graph_res = GeologicalGraph(db_path=settings.graph_db_path, seed=True).hybrid_search(
+                    query_text=msg, retriever=_retriever,
+                )
+                _graph_chunks = _graph_context_chunks(_graph_res)
+                if _graph_chunks:
+                    if _route.route is RagRoute.GRAPH_SEARCH:
+                        kb_context = merge_context_chunks("", _graph_chunks)
+                    else:
+                        kb_context = merge_context_chunks(kb_context or "", _graph_chunks)
+        except Exception as _route_exc:
+            # Defect (c) of D3.1: this used to be a log line only. The degradation now
+            # reaches the caller (route JSON, SSE done event, answer trailer).
+            note_degradation("rag-router", f"{type(_route_exc).__name__}: {_route_exc} - default vector context used")
 
         extracted_context = ""
 
@@ -4923,9 +5683,54 @@ class PRCChatAssistant:
                     session_files_ctx = f"[SESSION FILE REGISTRY]: This session contains data for: {', '.join(fnames)}.\n"
                     session_files_ctx += f"[LATEST SESSION FILE]: {fnames[0]}\n"
                     session_files_ctx += "Reference the [LATEST SESSION FILE] if the user asks generic questions.\n\n"
-            except: pass
+            except Exception as _reg_exc:
+                note_degradation("session-file-registry", f"{type(_reg_exc).__name__}: {_reg_exc}")
+                session_files_ctx = ("[SESSION FILE REGISTRY unavailable: the list of files in this session "
+                                     "could not be read; do not name session files from memory.]\n\n")
 
         extracted_context = ""
+        # Accumulates raw text from NON-TABULAR files (DOCX/PDF/TXT) uploaded THIS turn so
+        # the model can read/summarize them immediately. Spreadsheets continue to flow
+        # through the structural ground-truth + labeled-values path below.
+        fresh_file_context = ""
+
+        def _cap_doc_text(t: str, limit: int = 60000) -> str:
+            # Guardrail: a very large extracted document can push the model's mandated
+            # <thinking> block past the output-token limit, leaving an empty visible answer.
+            # Cap the raw text dump (summaries and section lookups still work fine) and mark
+            # the truncation so the model knows more content exists.
+            if t and len(t) > limit:
+                return t[:limit] + (
+                    f"\n\n[... {len(t) - limit} more characters truncated for length. "
+                    f"Ask about a specific section or table for its full detail ...]"
+                )
+            return t
+
+        def _labeled_blocks(labeled: dict) -> str:
+            # The only per-key provenance the code can CHECK is the tool-call
+            # ledger: a key whose value a successful call produced is tool-fitted.
+            # The rest are labelled cells read from the file OR parameters bound
+            # by a fit before this ledger was held — the producers record no
+            # per-key provenance, so the block says so instead of claiming the
+            # whole dict is "fully verified extraction".
+            fitted: dict = {}
+            for _row in get_tool_call_records(sid):
+                if _row.get("status") == "success":
+                    fitted.update(_row.get("values") or {})
+            tool = {k: v for k, v in labeled.items() if k in fitted}
+            other = {k: v for k, v in labeled.items() if k not in fitted}
+            cap = _env_int("SCAL_GT_JSON_MAX_CHARS", 30000)
+            out = ""
+            if tool:
+                out += ("[TOOL-FITTED PARAMETERS] (produced by a successful tool call in this session; "
+                        "cite the fit, not a file cell):\n"
+                        f"{_cap_prompt_block(_json.dumps(tool, indent=2, default=str), cap, 'TOOL-FITTED')}\n\n")
+            if other:
+                out += ("[SESSION LABELED VALUES] (labelled cells read from the uploaded file, or parameters "
+                        "bound by an earlier fit — per-key provenance is NOT recorded; cite a sheet/cell only "
+                        "when the key names one):\n"
+                        f"{_cap_prompt_block(_json.dumps(other, indent=2, default=str), cap, 'LABELED VALUES')}\n\n")
+            return out
 
         import tempfile
 
@@ -4982,6 +5787,17 @@ class PRCChatAssistant:
                     # ALWAYS persist raw text to user_files so follow-up messages can recover it
                     fr_data = read_file(tmp_path, target_identifier=None)
                     fr_text, _ = to_prompt_string(fr_data)
+                    # Surface freshly-uploaded WORD DOCUMENT text in THIS turn's prompt so
+                    # Hviel can read/summarize narrative reports (and their tables) right away.
+                    # Spreadsheets keep using the structural ground-truth path, not this dump.
+                    if is_docx and fr_text:
+                        _doc_label = "WORD DOCUMENT" if ext == ".docx" else "DOCUMENT"
+                        fresh_file_context += f"\n\n[{_doc_label}: {fname}]\n{_cap_doc_text(fr_text)}\n"
+                    # Feed the session KB: consumers capture _tls.pending_kb from this
+                    # thread (app.py:8182 stream / :8799 non-stream) and enqueue
+                    # ingest_transactional — this was a dead path with no producer.
+                    if fr_text:
+                        _tls.pending_kb.extend(KnowledgeBase.chunk_text(fr_text, fname))
                     if email and fr_text:
                         _fhash_store = hashlib.sha256(data_bytes).hexdigest()
                         db(
@@ -5000,6 +5816,9 @@ class PRCChatAssistant:
             elif "pdf" in safe_mime:
                 try:
                     text = _sfh_extract_pdf(data_bytes)
+                    if text.strip():
+                        fresh_file_context += f"\n\n[PDF DOCUMENT: {fname}]\n{_cap_doc_text(text)}\n"
+                        _tls.pending_kb.extend(KnowledgeBase.chunk_text(text, fname))
                     if text.strip() and email:
                         _fhash_store = hashlib.sha256(data_bytes).hexdigest()
                         db(
@@ -5012,11 +5831,17 @@ class PRCChatAssistant:
                             (email, fname, _fhash_store, text, "PDF", time.time()),
                         )
                 except Exception as e:
-                    _logger.warning(f"[PDF Extract] {fname}: {e}")
+                    note_degradation("pdf-extract", f"{fname}: {type(e).__name__}: {e}")
+                    fresh_file_context += (f"\n\n[PDF DOCUMENT: {fname} — extraction FAILED ({type(e).__name__}: "
+                                           f"{str(e)[:200]}). Its content is NOT available; tell the engineer so "
+                                           f"and do not summarize or quote it.]\n")
 
             elif "text/plain" in safe_mime or ext in (".txt", ".text"):
                 try:
                     content = data_bytes.decode("utf-8", errors="ignore")
+                    if content.strip():
+                        fresh_file_context += f"\n\n[DOCUMENT: {fname}]\n{_cap_doc_text(content)}\n"
+                        _tls.pending_kb.extend(KnowledgeBase.chunk_text(content, fname))
                     if content.strip() and email:
                         _fhash_store = hashlib.sha256(data_bytes).hexdigest()
                         db(
@@ -5029,8 +5854,15 @@ class PRCChatAssistant:
                             (email, fname, _fhash_store, content, "TXT", time.time()),
                         )
                 except Exception as e:
-                    _logger.warning(f"[TXT Extract] {fname}: {e}")
+                    note_degradation("txt-extract", f"{fname}: {type(e).__name__}: {e}")
+                    fresh_file_context += (f"\n\n[DOCUMENT: {fname} — extraction FAILED ({type(e).__name__}: "
+                                           f"{str(e)[:200]}). Its content is NOT available; tell the engineer so "
+                                           f"and do not summarize or quote it.]\n")
 
+
+        # Surface freshly-uploaded document text (DOCX/PDF/TXT) in THIS turn's prompt.
+        if fresh_file_context:
+            extracted_context += fresh_file_context
 
         # ── DIRECTLY HYDRATE THE CHAT PROMPT WITH TRUE CACHE ──
         has_cached_data = False
@@ -5044,12 +5876,19 @@ class PRCChatAssistant:
                     cached_gt = SESSION_DATA_CACHE[sid].get("ground_truth", "")
                     labeled_values = SESSION_DATA_CACHE[sid].get("labeled_values", {})
 
-        # Inject the full un-truncated database structures directly into the context payload
+        # Inject the full un-truncated database structures directly into the context payload.
+        # Only inject the structural ground-truth inventory when it actually describes tabular
+        # data. For non-tabular files (DOCX/PDF/TXT) the inventory is content-free
+        # ("[Non-tabular file, no sheet/column inventory applicable]") — injecting it would both
+        # mislead the model into refusing AND (by making extracted_context non-empty) suppress
+        # the document-recovery block below on follow-up turns.
         if has_cached_data:
-            if cached_gt:
-                extracted_context += f"\n\n[MANDATORY GROUND TRUTH INVENTORY]:\n{cached_gt}\n\n"
+            gt_has_tables = bool(cached_gt) and ("COLUMNS (" in cached_gt or bool(labeled_values))
+            if gt_has_tables:
+                truncated_gt = _truncate_ground_truth(cached_gt)
+                extracted_context += f"\n\n[MANDATORY GROUND TRUTH INVENTORY]:\n{truncated_gt}\n\n"
             if labeled_values:
-                extracted_context += f"[FULLY-VERIFIED EXTRACTION PARAMETERS]:\n{str(labeled_values)}\n\n"
+                extracted_context += _labeled_blocks(labeled_values)
 
 
         # ── DOCUMENT RECOVERY FOR FOLLOW-UP MESSAGES ──────────────────────────
@@ -5058,30 +5897,41 @@ class PRCChatAssistant:
         # This is what makes Hviel work like Claude/Gemini — the full document is always available.
         if not extracted_context and sid and email:
             try:
-                fname_rows = db(
-                    "SELECT DISTINCT fname FROM (SELECT fname FROM m WHERE sid=? AND user_email=? AND fname IS NOT NULL ORDER BY id DESC) sub",
+                file_rows = db(
+                    "SELECT DISTINCT fname, file_hash FROM (SELECT fname, file_hash FROM m WHERE sid=? AND user_email=? AND fname IS NOT NULL ORDER BY id DESC) sub",
                     (sid, email),
                 )
                 _seen_fn: set = set()
-                session_fnames: list = []
-                for _raw_fn in [r[0] for r in (fname_rows or []) if r[0]]:
-                    for _fn in _raw_fn.split(";"):
-                        _fn = _fn.strip()
-                        if _fn and _fn not in _seen_fn:
-                            session_fnames.append(_fn)
-                            _seen_fn.add(_fn)
-                for _sfname in session_fnames[:5]:  # Up to 5 files per session
-                    stored = db(
-                        "SELECT extracted_text FROM user_files WHERE user_email=? AND filename=?",
-                        (email, _sfname),
-                    )
+                session_files: list = []
+                for row in (file_rows or []):
+                    _raw_fn = row[0]
+                    _fhash = row[1]
+                    if _raw_fn:
+                        for _fn in _raw_fn.split(";"):
+                            _fn = _fn.strip()
+                            if _fn and _fn not in _seen_fn:
+                                session_files.append((_fn, _fhash))
+                                _seen_fn.add(_fn)
+                for _sfname, _sfhash in session_files[:5]:  # Up to 5 files per session
+                    if _sfhash:
+                        stored = db(
+                            "SELECT extracted_text FROM user_files WHERE user_email=? AND file_hash=?",
+                            (email, _sfhash),
+                        )
+                    else:
+                        stored = db(
+                            "SELECT extracted_text FROM user_files WHERE user_email=? AND filename=?",
+                            (email, _sfname),
+                        )
                     if stored and stored[0][0]:
                         _ext = Path(_sfname).suffix.lower()
                         _label = "SPREADSHEET" if _ext in (".xlsx", ".xls", ".csv") else "WORD DOCUMENT" if _ext == ".docx" else "DOCUMENT"
-                        extracted_context += f"\n\n[{_label}: {_sfname}]\n{stored[0][0]}\n"
+                        extracted_context += f"\n\n[{_label}: {_sfname}]\n{_cap_doc_text(stored[0][0])}\n"
                         _logger.info(f"[Chat] Recovered stored document text for {_sfname} ({len(stored[0][0])} chars)")
             except Exception as _dbe:
-                _logger.warning(f"[Chat] Could not retrieve stored document context: {_dbe}")
+                # The gate below then refuses for "no data loaded" — the trailer
+                # names the real cause (the stored document could not be read).
+                note_degradation("stored-document", f"{type(_dbe).__name__}: {_dbe} - stored document text unavailable")
 
         # ── HARD REFUSAL GATE (zero-hallucination data isolation) ─────────────
         # If the user asks for file/sheet/column/sample data but this session has NO
@@ -5094,7 +5944,7 @@ class PRCChatAssistant:
             r"spreadsheet|excel|uploaded|extract|tabulate|the\s+file|the\s+data|"
             r"the\s+report|the\s+table|values?)\b"
         )
-        if (not extracted_context) and (not f_parts) and msg and _scal_data_ref.search(msg):
+        if (not extracted_context) and (not has_cached_data) and (not f_parts) and msg and _scal_data_ref.search(msg):
             _refusal = (
                 "⚠️ I can't answer that from this session. No SCAL file data is currently "
                 "loaded in this conversation (the session cache is empty), so I have no "
@@ -5102,42 +5952,10 @@ class PRCChatAssistant:
                 "estimate or infer petrophysical values from general knowledge.\n\n"
                 "Please upload the relevant Excel/CSV file (or use the Generate Report flow) "
                 "so every reported number is grounded in your actual data."
-            )
+            ) + _degradation_trailer()
             def _gen_refusal():
                 yield _refusal
-            return _gen_refusal() if stream else _refusal
-
-        # ── INCOMPLETE-LOAD GATE (fluid-saturation-bound completeness) ────────
-        # [DELEGATED TO LLM SYSTEM PROMPT INSTEAD OF BLANKET INTERCEPT FOR BATCH QUERIES]
-        # if has_cached_data and msg:
-        #     def _cache_has(param: str) -> bool:
-        #         if param in labeled_values:
-        #             return True
-        #         for _k in labeled_values.keys():
-        #             if param in _re_gate.split(r'[^a-z0-9]+', str(_k).lower()):
-        #                 return True
-        #         return False
-        #     _sat_query = _re_gate.search(
-        #         r"(?i)\b(?:swi|sor|displacement\s+effic|recover|mobile\s+(?:oil|fluid)|"
-        #         r"residual\s+oil|irreducible\s+water|saturation\s+endpoint)\b",
-        #         msg,
-        #     )
-        #     if _sat_query:
-        #         _has_swi, _has_sor = _cache_has("swi"), _cache_has("sor")
-        #         if not (_has_swi and _has_sor):
-        #             _missing = ("Swi and Sor" if not (_has_swi or _has_sor)
-        #                         else ("Swi" if not _has_swi else "Sor"))
-        #             _refusal2 = (
-        #                 f"⚠️ I can't compute that: the session cache is loaded but its verified "
-        #                 f"parameters are missing the required fluid-saturation bound(s) ({_missing}). "
-        #                 f"Saturation-dependent results (displacement efficiency, recovery, residual "
-        #                 f"saturations) cannot be derived without them, and I will not substitute "
-        #                 f"assumed values. Please re-upload a file whose extraction yields explicit "
-        #                 f"Swi and Sor."
-        #             )
-        #             def _gen_refusal2():
-        #                 yield _refusal2
-        #             return _gen_refusal2() if stream else _refusal2
+            return _finishing(_gen_refusal()) if stream else _end_request(_refusal)
 
         # Strict Context Shielding
 
@@ -5206,11 +6024,16 @@ class PRCChatAssistant:
         
 
         bypass_cache = email and "test@prc.local" in email.lower()
-        if cached and not bypass_cache:
+        # A hit is assembled exactly like a fresh answer: tokens resolved and the
+        # citation gate applied against THIS session's ledger (cached text is
+        # stored pre-gate). An empty row (legacy) is a miss, never a blank reply.
+        _hit = enforce_citation_gate(process_provenance_tokens(cached[0][0] or "", sid), sid) \
+            if (cached and not bypass_cache) else ""
+        if _hit.strip():
             _logger.info(f"[CACHE] Hit for query hash: {query_hash[:8]}")
             def _gen_cached():
-                yield cached[0][0]
-            return _gen_cached() if stream else cached[0][0]
+                yield _hit
+            return _finishing(_gen_cached()) if stream else _end_request(_hit + _degradation_trailer())
 
 
 
@@ -5222,14 +6045,6 @@ class PRCChatAssistant:
 
         def _generate():
 
-            # Dynamic Model Routing
-
-            msg_low_routing = msg.lower() if msg else ""
-
-            # Always use the validated model. gemini-2.5-pro leaked <execute_python>
-            # thinking tokens into text output during function-calling turns.
-            # gemini-2.5-flash is the only CLAUDE.md-validated model (section 5).
-            active_model = "gemini-2.5-flash"
 
 
 
@@ -5237,13 +6052,9 @@ class PRCChatAssistant:
 
             _MAX_503_RETRIES = 3
 
-            for attempt in range(len(self._keys)):
+            for attempt in range(_CHAT_TURN_RETRIES):
 
                 try:
-
-                    with self._client_lock:
-
-                        client = self._client
 
                     # Dynamic prompt construction with continuous learning corrections
                     dynamic_system_prompt = SYSTEM_PROMPT
@@ -5259,14 +6070,20 @@ class PRCChatAssistant:
                             
                             extra_prompt = "## MANDATORY_GROUND_TRUTH_INVENTORY (SESSION DATA CACHE)\n\n"
                             extra_prompt += "You are provided with a MANDATORY_GROUND_TRUTH_INVENTORY and cached data structures extracted programmatically by the Python server from the actual binary file uploaded in this session.\n"
-                            extra_prompt += "This data is ABSOLUTE TRUTH. You MUST read and cite only values/sheets/columns listed below.\n\n"
-                            
+                            extra_prompt += "The inventory is the verified file structure. You MUST read and cite only values/sheets/columns listed below.\n\n"
+
+                            _json_cap = _env_int("SCAL_GT_JSON_MAX_CHARS", 30000)
                             if gt_text:
-                                extra_prompt += f"{gt_text}\n\n"
+                                extra_prompt += f"{_truncate_ground_truth(gt_text)}\n\n"
                             if labeled_vals:
-                                extra_prompt += f"### CACHED LABELED VALUES:\n{_json.dumps(labeled_vals, indent=2)}\n\n"
+                                # Same provenance split as the user-turn context: tool-fitted
+                                # keys (ledger-checked) apart from labelled cells.
+                                extra_prompt += _labeled_blocks(labeled_vals)
                             if flat_vecs:
-                                extra_prompt += f"### CACHED FLAT VECTORS:\n{_json.dumps(flat_vecs, indent=2)}\n\n"
+                                # flat_vectors holds full numeric column vectors for every sheet
+                                # (each stored under two keys) — for a 10-sheet x 2000-row workbook
+                                # this JSON dump alone can exceed the model context. Cap it hard.
+                                extra_prompt += f"### CACHED FLAT VECTORS:\n{_cap_prompt_block(_json.dumps(flat_vecs, indent=2), _json_cap, 'FLAT VECTORS')}\n\n"
                                 
                             extra_prompt += "=========================================\n\n"
                             
@@ -5274,7 +6091,7 @@ class PRCChatAssistant:
                             refusal_rules = "\n\n=== MANDATORY GRANULAR CALCULATIONS & REFUSAL INSTRUCTIONS ===\n"
                             refusal_rules += "1. INDEPENDENT QUESTION EVALUATION: You must evaluate every question in a batch completely independently. Never refuse to answer a whole message or batch because one question lacks parameters.\n"
                             refusal_rules += "2. GRANULAR CALCULATIONS & MISSING PARAMETER REFUSALS:\n"
-                            refusal_rules += "   If the user asks for a specific petrophysical parameter, fit, or calculation, and its required inputs are missing from the CACHED LABELED VALUES above:\n"
+                            refusal_rules += "   If the user asks for a specific petrophysical parameter, fit, or calculation, and its required inputs are missing from the labeled-value blocks above:\n"
                             refusal_rules += "     - You MUST output a clean, structured refusal ONLY for that specific question.\n"
                             refusal_rules += "     - For example, if Swi or Sor is missing from the cache, and a question asks for displacement efficiency (Ed), recovery, mobile oil, or residual saturation, you MUST output a warning: "
                             refusal_rules += "'⚠️ I can't compute that: the session cache is loaded but its verified parameters are missing the required fluid-saturation bound(s) (Swi/Sor). Saturation-dependent results cannot be derived without them, and I will not substitute assumed values. Please re-upload a file whose extraction yields explicit Swi and Sor.'\n"
@@ -5298,7 +6115,9 @@ class PRCChatAssistant:
                                     dynamic_system_prompt += f"- [Issue]: {orig}  -->  [Correction]: {corr}\n"
                                 dynamic_system_prompt += "======================================================\n\n"
                         except Exception as e_corr:
-                            _logger.warning(f"[LearningLoop] Failed to fetch corrections: {e_corr}")
+                            note_degradation("user-corrections", f"{type(e_corr).__name__}: {e_corr} - corrections not applied")
+                            dynamic_system_prompt += ("\n\n[user corrections unavailable: the recorded corrections "
+                                                      "for this session could not be read and are NOT applied]\n")
 
                     cfg = genai_types.GenerateContentConfig(
 
@@ -5338,19 +6157,17 @@ class PRCChatAssistant:
 
                         yield {"type": "mode", "text": initial_mode}
 
-
+                        any_tool_calls = False   # a tool-bearing answer is never cached (plots replay under another sid)
 
                         for _turn in range(4):
 
-                            tool_calls_in_turn: list = []  # (fc_obj, raw_result, formatted_str)
+                            tool_calls_in_turn: list = []  # (fc_obj, raw_result, formatted_str, tool_ok)
 
                             model_parts_in_turn: list = []
 
 
 
-                            for chunk in _call_gemini_stream_with_retry(
-
-                                client, active_model, current_contents, cfg
+                            for chunk in chat_generate_stream_with_retry(current_contents, cfg
 
                             ):
 
@@ -5365,23 +6182,39 @@ class PRCChatAssistant:
                                     if part.function_call:
 
                                         raw = ""
+                                        tool_ok = True
 
                                         # Update mode to reflect tool usage
 
                                         yield {"type": "mode", "text": f"Running {part.function_call.name.replace('_', ' ')}"}
 
-                                        for is_final, data in self._execute_tool(part.function_call):
+                                        try:
 
-                                            if not is_final:
+                                            for is_final, ok, data in self._execute_tool(part.function_call):
 
-                                                yield {"type": "progress", "text": data}
+                                                if not is_final:
 
-                                            else:
+                                                    yield {"type": "progress", "text": data}
 
-                                                raw = data
+                                                else:
 
-                                        
+                                                    raw, tool_ok = data, ok
 
+                                        except Exception as tool_exc:
+
+                                            # A crash inside dispatch becomes a counted, model-visible
+                                            # failure payload instead of killing the whole turn.
+                                            _record_tool_failure(part.function_call.name,
+                                                                 f"Unhandled exception: {tool_exc}")
+                                            raw = _json.dumps({
+                                                "status": "error",
+                                                "error": f"Tool execution crashed: {type(tool_exc).__name__}: {tool_exc}",
+                                            })
+                                            tool_ok = False
+
+                                        # Failed steps never reach the plot/diagram formatter:
+                                        # the failure is surfaced to the model via
+                                        # _tool_result_summary, not rendered as user output.
                                         fmt = self._format_tool_response(
 
                                             part.function_call.name,
@@ -5390,9 +6223,16 @@ class PRCChatAssistant:
 
                                             raw,
 
-                                        )
+                                        ) if tool_ok else ""
 
-                                        tool_calls_in_turn.append((part.function_call, raw, fmt))
+                                        if tool_ok and isinstance(fmt, str) and fmt.lstrip().startswith("⚠"):
+                                            # The fit ran during formatting and REFUSED (physics
+                                            # boundary / cache lookup). The model must be told a
+                                            # failure — not "plot computed, state Archie n" (D2).
+                                            tool_ok = False
+                                            raw = _json.dumps({"status": "error", "error": fmt.strip()[:500]})
+
+                                        tool_calls_in_turn.append((part.function_call, raw, fmt, tool_ok))
 
 
 
@@ -5406,7 +6246,7 @@ class PRCChatAssistant:
 
                             # Emit formatted tool results (plots/mermaid) after text for this turn
 
-                            for _, _, fmt in tool_calls_in_turn:
+                            for _, _, fmt, _ in tool_calls_in_turn:
 
                                 full_response += fmt
 
@@ -5416,19 +6256,20 @@ class PRCChatAssistant:
 
                             if not tool_calls_in_turn:
 
-                                # Save to cache
-
-                                try:
-
-                                    db("INSERT INTO response_cache (query_hash, response, created_at) VALUES (?, ?, ?)",
-
-                                       (query_hash, full_response, time.time()))
-
-                                except Exception: pass
+                                if not full_response.strip():
+                                    # The provider answered with nothing: a failed request the
+                                    # route reports as such — not a blank stream, never cached.
+                                    _tls.request_failed = "empty provider response"
+                                    yield {"type": "token", "text": "[!] The AI provider returned an empty response — nothing was generated. Please retry."}
+                                elif not any_tool_calls:
+                                    try:
+                                        db("INSERT INTO response_cache (query_hash, response, created_at) VALUES (?, ?, ?)",
+                                           (query_hash, full_response, time.time()))
+                                    except Exception: pass
 
                                 break  # Pure text turn — conversation complete
 
-
+                            any_tool_calls = True
 
                             # Append model turn + function responses, then loop for Gemini's interpretation
 
@@ -5448,13 +6289,13 @@ class PRCChatAssistant:
 
                                         name=fc.name,
 
-                                        response=self._tool_result_summary(fc.name, raw),
+                                        response=self._tool_result_summary(fc.name, raw, ok, rendered=fmt),
 
                                     )
 
                                 )
 
-                                for fc, raw, _ in tool_calls_in_turn
+                                for fc, raw, fmt, ok in tool_calls_in_turn
 
                             ]
 
@@ -5463,6 +6304,12 @@ class PRCChatAssistant:
                                 genai_types.Content(role="user", parts=fn_parts)
 
                             )
+
+                        else:
+                            # Four tool rounds and no final text: the client used to get
+                            # only 'done'. Say so in the stream and on the request channel.
+                            note_degradation("turn-budget", "4 tool rounds without a final answer")
+                            yield {"type": "token", "text": "\n\n[turn budget exhausted after 4 tool rounds — no final answer was produced]"}
 
                         return
 
@@ -5474,11 +6321,11 @@ class PRCChatAssistant:
 
                     final = ""
 
+                    any_tool_calls = False
+
                     for _turn in range(4):
 
-                        resp = _call_gemini_with_retry(
-
-                            client, active_model, current_contents, cfg
+                        resp = chat_generate_with_retry(current_contents, cfg
 
                         )
 
@@ -5497,21 +6344,36 @@ class PRCChatAssistant:
                             if part.function_call:
 
                                 raw = ""
+                                tool_ok = True
 
-                                for is_final, data in self._execute_tool(part.function_call):
+                                try:
 
-                                    if not is_final:
+                                    for is_final, ok, data in self._execute_tool(part.function_call):
 
-                                        # In non-streaming mode, we can't really yield, but let's at least capture it
+                                        if not is_final:
 
-                                        pass
+                                            # In non-streaming mode, we can't really yield, but let's at least capture it
 
-                                    else:
+                                            pass
 
-                                        raw = data
+                                        else:
 
-                                
+                                            raw, tool_ok = data, ok
 
+                                except Exception as tool_exc:
+
+                                    # A crash inside dispatch becomes a counted, model-visible
+                                    # failure payload instead of killing the whole turn.
+                                    _record_tool_failure(part.function_call.name,
+                                                         f"Unhandled exception: {tool_exc}")
+                                    raw = _json.dumps({
+                                        "status": "error",
+                                        "error": f"Tool execution crashed: {type(tool_exc).__name__}: {tool_exc}",
+                                    })
+                                    tool_ok = False
+
+                                # Failed steps skip the plot formatter; failure reaches the
+                                # model via _tool_result_summary instead.
                                 fmt = self._format_tool_response(
 
                                     part.function_call.name,
@@ -5520,31 +6382,34 @@ class PRCChatAssistant:
 
                                     raw,
 
-                                )
+                                ) if tool_ok else ""
 
-                                tool_calls_in_turn.append((part.function_call, raw, fmt))
+                                if tool_ok and isinstance(fmt, str) and fmt.lstrip().startswith("⚠"):
+                                    # Refused during formatting: tell the model a failure (D2).
+                                    tool_ok = False
+                                    raw = _json.dumps({"status": "error", "error": fmt.strip()[:500]})
+
+                                tool_calls_in_turn.append((part.function_call, raw, fmt, tool_ok))
 
                             elif part.text:
 
                                 final += part.text
 
-                        for _, _, fmt in tool_calls_in_turn:
+                        for _, _, fmt, _ in tool_calls_in_turn:
 
                             final += fmt
 
                         if not tool_calls_in_turn:
 
-                            # Save to cache
-
-                            try:
-
-                                db("INSERT INTO response_cache (query_hash, response, created_at) VALUES (?, ?, ?)",
-
-                                   (query_hash, final, time.time()))
-
-                            except Exception: pass
+                            if final.strip() and not any_tool_calls:
+                                try:
+                                    db("INSERT INTO response_cache (query_hash, response, created_at) VALUES (?, ?, ?)",
+                                       (query_hash, final, time.time()))
+                                except Exception: pass
 
                             break
+
+                        any_tool_calls = True
 
                         if model_parts_in_turn:
 
@@ -5562,13 +6427,13 @@ class PRCChatAssistant:
 
                                     name=fc.name,
 
-                                    response=self._tool_result_summary(fc.name, raw),
+                                    response=self._tool_result_summary(fc.name, raw, ok, rendered=fmt),
 
                                 )
 
                             )
 
-                            for fc, raw, _ in tool_calls_in_turn
+                            for fc, raw, fmt, ok in tool_calls_in_turn
 
                         ]
 
@@ -5578,11 +6443,25 @@ class PRCChatAssistant:
 
                         )
 
-                    yield {"type": "token", "text": final or "Unable to generate a response. Please rephrase your query."}
+                    else:
+                        note_degradation("turn-budget", "4 tool rounds without a final answer")
+                        final += "\n\n[turn budget exhausted after 4 tool rounds — no final answer was produced]"
+
+                    if not final.strip():
+                        # The provider answered with nothing: a failed request, reported as such.
+                        _tls.request_failed = "empty provider response"
+                        final = "[!] The AI provider returned an empty response — nothing was generated. Please retry."
+
+                    yield {"type": "token", "text": final}
 
                     return
 
 
+
+                except retry_budget.BudgetExhausted as _be:
+                    _tls.request_failed = str(_be)
+                    yield {"type": "token", "text": str(_be)}
+                    return
 
                 except Exception as e:
 
@@ -5594,9 +6473,7 @@ class PRCChatAssistant:
 
                     is_overload = any(x in err for x in ["503","unavailable","overloaded","capacity"])
 
-                    if (is_auth or is_rate or is_overload) and attempt < len(self._keys) - 1:
-
-                        self.rotate_key(is_hard_fail=is_auth)
+                    if (is_auth or is_rate or is_overload) and attempt < _CHAT_TURN_RETRIES - 1:
 
                         if stream:
                             yield {"type": "progress", "text": "PRC Node Rotating - retrying..."}
@@ -5607,8 +6484,11 @@ class PRCChatAssistant:
                         # All keys exhausted on 503 - yield a user-facing message instead of crashing
 
                         _logger.warning(f"[Hviel] All keys returned 503 (overload): {e}")
+                        # A failed request, not an answer: the route reports status:error /
+                        # done.failed instead of wrapping this text in status:success.
+                        _tls.request_failed = f"provider overloaded: {str(e)[:200]}"
 
-                        yield {"type": "token", "text": "[!]� Gemini is currently under high demand (503). Please retry in a few seconds."}
+                        yield {"type": "token", "text": "[!] The AI provider is under high demand (503). Please retry in a few seconds."}
 
                         return
 
@@ -5620,7 +6500,7 @@ class PRCChatAssistant:
 
         if stream:
 
-            return _generate()
+            return _finishing(_generate())
 
         else:
 
@@ -5638,7 +6518,15 @@ class PRCChatAssistant:
 
                     final_resp += str(c)
 
-            return final_resp or "Error generating response."
+            # Answer assembly is the enforcement point: a fitted parameter may only
+            # survive here if the tool-call ledger shows a successful fit for it.
+            # Applied inside chat() so every caller is covered, not just the routes.
+            # Provenance tokens resolve here for the same reason (D2): they used to
+            # resolve only in the HTTP routes, so in-process callers received raw
+            # `{{val:…}}` tokens — B0.1 saw them in 3 of 10 runs.
+            final_resp = process_provenance_tokens(final_resp, sid)
+            gated = enforce_citation_gate(final_resp, sid) or "Error generating response."
+            return _end_request(gated + _degradation_trailer())
 
 
 
@@ -5736,21 +6624,27 @@ class PRCChatAssistant:
                     # Sor_Lab, threshold_pressure, max_hg_sat, etc.) that file_reader.py
                     # does not pre-compute. These are required for table row population.
                     try:
-                        scal_res = extract_file_data(tmp_path)
+                        scal_res = extract_file_data(tmp_path, original_filename=fname)
                         if scal_res.get("data_type") not in (None, "UNKNOWN") and scal_res.get("extracted"):
                             _summary = _scal_doc_summary(scal_res["extracted"])
                             if _summary:
                                 file_context += f"\n{_summary}\n"
                                 _logger.info(f"[DocGen] SCAL summary added for {fname} ({scal_res['data_type']})")
                     except Exception as _se:
-                        _logger.warning(f"[DocGen] SCAL extraction failed for {fname}: {_se}")
+                        note_degradation("docgen-scal-extraction", f"{fname}: {type(_se).__name__}: {_se}")
+                        file_context += (f"\n[SCAL SUMMARY UNAVAILABLE for {fname}: the per-sample scalar extraction "
+                                         f"failed ({type(_se).__name__}: {str(_se)[:200]}). State this failure in the "
+                                         f"document; a missing scalar here is an extraction failure, not absent data.]\n")
                 finally:
                     try:
                         Path(tmp_path).unlink(missing_ok=True)
                     except Exception:
                         pass
             except Exception as _fe:
-                _logger.warning(f"[DocGen] File read failed for {fname}: {_fe}")
+                note_degradation("docgen-file-read", f"{fname}: {type(_fe).__name__}: {_fe}")
+                file_context += (f"\n\n[FILE READ FAILED: {fname} — {type(_fe).__name__}: {str(_fe)[:200]}. "
+                                 f"State this failure in the document; do not write 'data not available' as if "
+                                 f"the file were absent.]\n")
 
         _logger.info(f"[DocGen] file_context length: {len(file_context)} chars; kb_context length: {len(kb_context or '')} chars")
 
@@ -5761,30 +6655,40 @@ class PRCChatAssistant:
         # document generation request.
         if not file_context and sid and email:
             try:
-                fname_rows = db(
-                    "SELECT DISTINCT fname FROM (SELECT fname FROM m WHERE sid=? AND user_email=? AND fname IS NOT NULL ORDER BY id DESC) sub",
+                file_rows = db(
+                    "SELECT DISTINCT fname, file_hash FROM (SELECT fname, file_hash FROM m WHERE sid=? AND user_email=? AND fname IS NOT NULL ORDER BY id DESC) sub",
                     (sid, email),
                 )
-                # fname values may be semicolon-delimited (multiple files uploaded
-                # in one message) — split and de-duplicate while preserving order.
                 _seen_fn: set = set()
-                session_fnames: list = []
-                for _raw_fn in [r[0] for r in (fname_rows or []) if r[0]]:
-                    for _fn in _raw_fn.split(";"):
-                        _fn = _fn.strip()
-                        if _fn and _fn not in _seen_fn:
-                            session_fnames.append(_fn)
-                            _seen_fn.add(_fn)
-                for _sfname in session_fnames[:10]:
-                    stored = db(
-                        "SELECT extracted_text FROM user_files WHERE user_email=? AND filename=?",
-                        (email, _sfname),
-                    )
+                session_files: list = []
+                for row in (file_rows or []):
+                    _raw_fn = row[0]
+                    _fhash = row[1]
+                    if _raw_fn:
+                        for _fn in _raw_fn.split(";"):
+                            _fn = _fn.strip()
+                            if _fn and _fn not in _seen_fn:
+                                session_files.append((_fn, _fhash))
+                                _seen_fn.add(_fn)
+                for _sfname, _sfhash in session_files[:10]:
+                    if _sfhash:
+                        stored = db(
+                            "SELECT extracted_text FROM user_files WHERE user_email=? AND file_hash=?",
+                            (email, _sfhash),
+                        )
+                    else:
+                        stored = db(
+                            "SELECT extracted_text FROM user_files WHERE user_email=? AND filename=?",
+                            (email, _sfname),
+                        )
                     if stored and stored[0][0]:
                         file_context += f"\n\n[UPLOADED FILE: {_sfname}]\n{stored[0][0]}\n"
                         _logger.info(f"[DocGen] Recovered stored extracted_text for {_sfname} ({len(stored[0][0])} chars)")
             except Exception as _dbe:
-                _logger.warning(f"[DocGen] Could not retrieve stored file context: {_dbe}")
+                note_degradation("docgen-stored-files", f"{type(_dbe).__name__}: {_dbe} - stored file text unavailable")
+                file_context += (f"\n\n[STORED FILE DATA UNAVAILABLE — this session's uploaded files could not be "
+                                 f"read back ({type(_dbe).__name__}: {str(_dbe)[:200]}). State this failure in the "
+                                 f"document; do not write 'data not available' as if no file had been uploaded.]\n")
 
         _logger.info(f"[DocGen] file_context after fallback: {len(file_context)} chars")
 
@@ -5867,7 +6771,6 @@ class PRCChatAssistant:
 
         _logger.debug(f"[DocGen] Prompt built: system_doc={len(system_doc)} chars, user_content={len(user_content)} chars")
 
-        active_model = "gemini-2.5-flash"
 
         # Dynamic document prompt construction with corrections
         dynamic_system_doc = system_doc
@@ -5881,7 +6784,9 @@ class PRCChatAssistant:
                         dynamic_system_doc += f"- [Issue]: {orig}  -->  [Correction]: {corr}\n"
                     dynamic_system_doc += "======================================================\n\n"
             except Exception as e_corr:
-                _logger.warning(f"[LearningLoop] Failed to fetch corrections for docgen: {e_corr}")
+                note_degradation("user-corrections", f"{type(e_corr).__name__}: {e_corr} - corrections not applied")
+                dynamic_system_doc += ("\n\n[user corrections unavailable: the recorded corrections for this "
+                                       "session could not be read and are NOT applied]\n")
 
         cfg = genai_types.GenerateContentConfig(temperature=0.1, system_instruction=dynamic_system_doc)
 
@@ -5889,19 +6794,13 @@ class PRCChatAssistant:
 
         _logger.debug(f"[DocGen] Pre-call context: kw={bool(_debug_kw_data)} micp={bool(_debug_micp_data)} imbi={bool(_debug_imbi_data)}")
 
-        with self._client_lock:
-
-            client = self._client
 
 
-
-        for attempt in range(len(self._keys)):
+        for attempt in range(_CHAT_TURN_RETRIES):
 
             try:
 
-                resp = _call_gemini_with_retry(
-
-                    client, active_model, contents, cfg
+                resp = chat_generate_with_retry(contents, cfg, max_tokens=8192
 
                 )
 
@@ -5915,7 +6814,38 @@ class PRCChatAssistant:
 
                     if raw.strip():
 
-                        return raw.strip()
+                        raw = raw.strip()
+
+                        # JSON-robustness gate: gpt-oss-120b occasionally fences the
+                        # JSON or wraps it in prose. Verify parseability here and do
+                        # ONE corrective re-prompt on failure so build_from_json never
+                        # silently degrades to an empty document.
+                        try:
+                            parse_llm_json(raw)
+                            return raw
+                        except LLMJsonParseError as _pe:
+                            _logger.warning(f"[DocGen] LLM JSON unparseable ({_pe}); one corrective retry...")
+                            retry_contents = list(contents) + [
+                                genai_types.Content(role="model", parts=[genai_types.Part(text=raw[:4000])]),
+                                genai_types.Content(role="user", parts=[genai_types.Part(text=CORRECTIVE_JSON_PROMPT)]),
+                            ]
+                            resp2 = chat_generate_with_retry(retry_contents, cfg,
+                                                            max_retries=2, max_tokens=8192)
+                            raw2 = ""
+                            if resp2 and resp2.candidates and resp2.candidates[0].content:
+                                raw2 = "".join(p.text for p in (resp2.candidates[0].content.parts or []) if p.text).strip()
+                            if raw2:
+                                try:
+                                    parse_llm_json(raw2)
+                                    return raw2
+                                except LLMJsonParseError:
+                                    pass
+                            # Still unparseable after the corrective retry: fail here.
+                            # Returning the raw text let build_from_json salvage {} and
+                            # the route claim "export compiled" for an empty document.
+                            raise LLMJsonParseError(
+                                f"document JSON unparseable after corrective retry ({_pe}); "
+                                f"reply started: {raw[:120]!r}")
 
                 raise ValueError("Empty response from model")
 
@@ -5927,19 +6857,13 @@ class PRCChatAssistant:
 
                 is_rate = any(x in err for x in ["429","resource_exhausted"])
 
-                if (is_auth or is_rate) and attempt < len(self._keys) - 1:
-
-                    self.rotate_key(is_hard_fail=is_auth)
-
-                    with self._client_lock:
-
-                        client = self._client
+                if (is_auth or is_rate) and attempt < _CHAT_TURN_RETRIES - 1:
 
                     continue
 
                 raise
 
-        raise ValueError("Gemini document generation failed after all retries")
+        raise ValueError("Document generation LLM call (NVIDIA NIM) failed after all retries")
 
 
 
@@ -6010,6 +6934,9 @@ class KnowledgeBase:
 
     def _embed(text: str) -> "np.ndarray | None":
 
+        if not _real_embedding_key_configured():
+            return None            # no key → no embedding and no socket (DUMMY_KEY used to be sent)
+
         try:
 
             result = _get_embed_client().models.embed_content(model=EMBED_MODEL, contents=text)
@@ -6018,7 +6945,9 @@ class KnowledgeBase:
 
         except Exception as e:
 
-            _logger.warning(f"[RAG] Embed error: {e}")
+            # None is also "no key" to callers; the request channel keeps the
+            # difference (search adds its own marker, ingest counts embedded chunks).
+            note_degradation("kb-embed", f"{type(e).__name__}: {e}")
 
             return None
 
@@ -6036,11 +6965,14 @@ class KnowledgeBase:
 
     @staticmethod
 
-    def ingest_transactional(name: str, chunks: list[tuple[str, str]], sid: str = None, email: str = None) -> None:
+    def ingest_transactional(name: str, chunks: list[tuple[str, str]], sid: str = None, email: str = None) -> tuple[int, int]:
 
-        """Embed and store chunks. Expects already chunked data."""
+        """Embed and store chunks. Expects already chunked data.
+        Returns (stored, embedded): a chunk stored without a vector is only
+        keyword-searchable, and that shortfall is reported, not swallowed. A DB
+        failure rolls back and re-raises (the BackgroundTask log then shows it)."""
 
-        if not chunks: return
+        if not chunks: return (0, 0)
 
         chunk_data = []
         valid_chunks = []
@@ -6059,9 +6991,14 @@ class KnowledgeBase:
                         vec = None
                     chunk_data.append((source, chunk, vec))
 
-        if not chunk_data: return
+        if not chunk_data: return (0, 0)
 
-
+        embedded = sum(1 for _, _, v in chunk_data if v is not None)
+        if embedded < len(chunk_data) and _real_embedding_key_configured():
+            # Pool threads carry their own context, so _embed's note never reaches
+            # this request; report the shortfall from the counts instead.
+            note_degradation("kb-ingest-unembedded",
+                             f"{name}: {len(chunk_data) - embedded}/{len(chunk_data)} chunks stored without a vector (keyword search only)")
 
         with _get_conn() as (conn, ph):
 
@@ -6111,11 +7048,21 @@ class KnowledgeBase:
 
                 conn.rollback()
 
+                raise
+
+        return (len(chunk_data), embedded)
+
 
 
     @staticmethod
 
     def search(query: str, top_k: int = 15, sid: str = None, email: str = None) -> str:
+
+        # Failures are reported IN the returned text as "[KB DEGRADED: kind: detail]"
+        # lines: the routes treat "" as "no context", and chat() turns these markers
+        # into request degradations (it clears the channel on entry, and search may
+        # run on a thread whose context the route's list never reaches).
+        markers: list[str] = []
 
         try:
 
@@ -6153,9 +7100,15 @@ class KnowledgeBase:
             scored_parts: list[tuple[float, str]] = []
             q_vec = None
 
+            if vec_count >= 5000:
+                markers.append(f"[KB DEGRADED: keyword-fallback: corpus too large ({vec_count} vectors); session vector search skipped]")
+
             if 0 < vec_count < 5000:
 
                 q_vec = KnowledgeBase._embed(clean_q)
+
+                if q_vec is None and _real_embedding_key_configured():
+                    markers.append("[KB DEGRADED: embed-failed: query embedding failed; vector search skipped, keyword fallback only]")
 
                 if q_vec is not None:
 
@@ -6209,17 +7162,20 @@ class KnowledgeBase:
                             if lib_scores[i] > 0.35:
                                 scored_parts.append((float(lib_scores[i]), f"[Library: {lib_sources[i]}]\n{lib_texts[i]}"))
             except Exception as _le:
-                _logger.debug(f"[RAG] Library search error: {_le}")
+                _logger.warning(f"[RAG] Library search error: {_le}")
+                markers.append(f"[KB DEGRADED: library-search: {type(_le).__name__}: {str(_le)[:150]}; library hits absent]")
+
+            prefix = "\n".join(markers) + ("\n\n" if markers else "")
 
             if scored_parts:
                 scored_parts.sort(key=lambda x: x[0], reverse=True)
-                return "\n\n".join(t for _, t in scored_parts[:top_k])
+                return prefix + "\n\n".join(t for _, t in scored_parts[:top_k])
 
             # Fallback to keyword search with session filtering
 
             words = [w.lower() for w in re.split(r"\W+", clean_q) if len(w) > 3][:5]
 
-            if not words: return ""
+            if not words: return prefix.strip()
 
 
 
@@ -6234,13 +7190,14 @@ class KnowledgeBase:
                 params,
             )
 
-            return "\n\n".join([f"[From: {r[0]}]\n{r[1]}" for r in rows])
+            return (prefix + "\n\n".join([f"[From: {r[0]}]\n{r[1]}" for r in rows])).strip()
 
         except Exception as e:
 
             _logger.error(f"[RAG] Search error: {e}")
 
-            return ""
+            # Not "": the caller must be able to tell an outage from no matches.
+            return "\n".join(markers + [f"[KB DEGRADED: search-error: {type(e).__name__}: {str(e)[:150]}; knowledge base unavailable]"])
 
 
 
@@ -6286,6 +7243,8 @@ class KnowledgeBase:
 
                 conn.rollback()
 
+                raise   # the delete route must not answer {status: ok} over rows that persist
+
 
 
 
@@ -6296,7 +7255,7 @@ def init_db() -> None:
 
     base_stmts = [
 
-        "CREATE TABLE IF NOT EXISTS m (id INTEGER PRIMARY KEY AUTOINCREMENT, sid TEXT, role TEXT, text TEXT, url TEXT, ts REAL, user_email TEXT, fname TEXT)",
+        "CREATE TABLE IF NOT EXISTS m (id INTEGER PRIMARY KEY AUTOINCREMENT, sid TEXT, role TEXT, text TEXT, url TEXT, ts REAL, user_email TEXT, fname TEXT, file_hash TEXT)",
 
         "CREATE TABLE IF NOT EXISTS sessions (sid TEXT PRIMARY KEY, title TEXT NOT NULL DEFAULT 'New Study', user_email TEXT, created_at REAL, updated_at REAL)",
 
@@ -6326,21 +7285,30 @@ def init_db() -> None:
         "CREATE TABLE IF NOT EXISTS user_files (id INTEGER PRIMARY KEY AUTOINCREMENT, user_email TEXT NOT NULL, filename TEXT NOT NULL, file_hash TEXT NOT NULL, extracted_text TEXT, data_type TEXT, key_params TEXT, created_at REAL, UNIQUE(user_email, file_hash))",
 
         "CREATE TABLE IF NOT EXISTS api_metrics (id INTEGER PRIMARY KEY AUTOINCREMENT, session_id TEXT, timestamp REAL, model TEXT, prompt_tokens INTEGER, completion_tokens INTEGER, cost_usd REAL)",
-
         "CREATE TABLE IF NOT EXISTS user_corrections (id INTEGER PRIMARY KEY AUTOINCREMENT, session_id TEXT, user_email TEXT, original_issue TEXT, corrected_value TEXT, timestamp REAL)",
         "CREATE TABLE IF NOT EXISTS session_cache (sid TEXT PRIMARY KEY, ground_truth TEXT, labeled_values TEXT, flat_vectors TEXT, raw_excel_data TEXT, updated_at REAL)",
-
+        "CREATE TABLE IF NOT EXISTS basin_physics_rules (basin_name TEXT, rule_key TEXT, min_limit REAL, max_limit REAL, PRIMARY KEY (basin_name, rule_key))",
     ]
 
     if _PG_AVAILABLE:
-
         base_stmts = [s.replace("INTEGER PRIMARY KEY AUTOINCREMENT", "SERIAL PRIMARY KEY").replace("BLOB", "BYTEA") for s in base_stmts]
 
     for s in base_stmts:
-
-        try: db(s)
-
-        except Exception: pass
+        # Every statement is CREATE TABLE IF NOT EXISTS — a failure here is a
+        # real problem (bad DDL, connectivity, permissions, schema drift), not
+        # idempotent re-run noise: fail closed at boot (lifespan calls this).
+        try:
+            db(s)
+        except Exception as _e:
+            raise RuntimeError(f"[DB] schema init failed: {s[:70]}... — {_e}") from _e
+    # Seed default basin rules (idempotent; a failure is a real DB problem)
+    try:
+        db("INSERT INTO basin_physics_rules (basin_name, rule_key, min_limit, max_limit) VALUES "
+           "('Default', 'm', 1.3, 2.5), "
+           "('Default', 'a', 0.5, 1.5) "
+           "ON CONFLICT (basin_name, rule_key) DO NOTHING")
+    except Exception as _e:
+        raise RuntimeError(f"[DB] basin rules seed failed — {_e}") from _e
 
     try: db("CREATE INDEX IF NOT EXISTS idx_query_hash ON response_cache(query_hash)")
     except Exception: pass
@@ -6384,6 +7352,14 @@ def init_db() -> None:
         except Exception: 
             pass
 
+    try:
+        with _get_conn() as (conn, ph):
+            cur = conn.cursor()
+            cur.execute("ALTER TABLE m ADD COLUMN file_hash TEXT")
+            conn.commit()
+    except Exception:
+        pass
+
     # Backfill existing m rows  ->  sessions table (migration for pre-existing installs)
 
     try:
@@ -6402,32 +7378,56 @@ def init_db() -> None:
 
                "SELECT sid,'New Study',MAX(user_email),MIN(ts),MAX(ts) FROM m GROUP BY sid")
 
-    except Exception:
+    except Exception as _bf:
 
-        pass
+        # Pre-existing sessions then stay out of the sidebar: say so at boot AND on /health.
+        _boot_warning(f"[DB] sessions backfill from m failed — pre-existing sessions will be missing from the sidebar: {_bf}")
 
+
+# Boot-time fallbacks that did not stop startup; /health reports them as "boot_warnings".
+_BOOT_WARNINGS: list = []
+
+
+def _boot_warning(msg: str) -> None:
+    _logger.warning(msg)
+    _BOOT_WARNINGS.append(msg)
+
+
+# The TTL monitor thread, for /health: None = never started, else alive/dead.
+_TTL_MONITOR: "threading.Thread | None" = None
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    global _TTL_MONITOR
     global GLOBAL_EVENT_LOOP
     GLOBAL_EVENT_LOOP = asyncio.get_running_loop()
-    # API key validation on startup with clear error (Crash Issue 6)
+    # Enforced invariant: the pytest auth bypass must never be live under a real
+    # ASGI server. Fail fast before serving a single request.
+    assert_auth_bypass_disabled_in_production()
+    # D0: cloud provider + reachable private database never coexist.
+    assert_no_cloud_llm_with_private_db()
+    # Embedding key validation on startup with clear error (Crash Issue 6). No
+    # key at all is a legitimate air-gapped configuration: embeddings are off.
     if not is_testing():
-        try:
-            validate_gemini_api_keys()
-        except ValueError as ve:
-            _logger.critical(f"[STARTUP-CRITICAL] {ve}")
-            os._exit(1)
+        if _real_embedding_key_configured():
+            try:
+                validate_gemini_api_keys()
+            except ValueError as ve:
+                _logger.critical(f"[STARTUP-CRITICAL] {ve}")
+                os._exit(1)
+        else:
+            _logger.warning("[STARTUP-VAL] No GEMINI_API_KEY configured — Gemini "
+                            "embeddings disabled; KB vector search returns no hits.")
     init_db()
     try:
         purge_all_historical_assets()
     except Exception as pe:
-        _logger.error(f"Startup purge failed: {pe}")
+        _boot_warning(f"Startup purge failed — stale uploads/session caches may persist: {pe}")
     try:
-        start_session_ttl_monitor()
+        _TTL_MONITOR = start_session_ttl_monitor()
     except Exception as me:
-        _logger.error(f"Failed to start TTL monitor: {me}")
+        _boot_warning(f"Failed to start TTL monitor: {me}")   # /health also reports it 'not started'
     # Increase default thread pool size to support 50+ concurrent engineers (blocking I/O)
     loop = asyncio.get_running_loop()
     executor = ThreadPoolExecutor(max_workers=100)
@@ -6438,6 +7438,37 @@ async def lifespan(app: FastAPI):
         limiter.total_tokens = 100
     except Exception as e:
         _logger.warning(f"Failed to set AnyIO thread limit: {e}")
+        
+    # Write openapi.json on startup
+    try:
+        from fastapi.openapi.utils import get_openapi
+        openapi_schema = get_openapi(
+            title=app.title,
+            version=app.version,
+            openapi_version=app.openapi_version,
+            description=app.description,
+            routes=app.routes,
+        )
+        written = False
+        try:
+            vault_dir = Path(settings.PRC_AI_VAULT)
+            vault_dir.mkdir(parents=True, exist_ok=True)
+            openapi_path = vault_dir / "openapi.json"
+            with open(openapi_path, "w", encoding="utf-8") as f:
+                _json.dump(openapi_schema, f, indent=2)
+            _logger.info(f"OpenAPI schema successfully written to vault: {openapi_path}")
+            written = True
+        except Exception as vault_err:
+            _logger.warning(f"Could not write OpenAPI schema to vault ({vault_err}). Trying fallback to current directory.")
+            
+        if not written:
+            openapi_path = Path("openapi.json")
+            with open(openapi_path, "w", encoding="utf-8") as f:
+                _json.dump(openapi_schema, f, indent=2)
+            _logger.info(f"OpenAPI schema successfully written to fallback: {openapi_path.resolve()}")
+    except Exception as oe:
+        _logger.error(f"Failed to export OpenAPI schema: {oe}")
+
     try:
         yield
     finally:
@@ -6445,24 +7476,113 @@ async def lifespan(app: FastAPI):
 
 
 
-app = FastAPI(lifespan=lifespan)
+is_prod = not (settings.DEBUG or settings.TESTING)
+docs_url = None if is_prod else "/docs"
+redoc_url = None if is_prod else "/redoc"
+openapi_url = None if is_prod else "/openapi.json"
+
+app = FastAPI(
+    lifespan=lifespan,
+    docs_url=docs_url,
+    redoc_url=redoc_url,
+    openapi_url=openapi_url
+)
 
 if _RATE_LIMIT:
-
     app.state.limiter = _limiter
+    # Without this middleware the default_limits above never apply and only
+    # @_limiter.limit-decorated routes are throttled. Wiring it in makes the
+    # 60/min per-IP default cover every endpoint.
+    from slowapi.middleware import SlowAPIMiddleware
+    app.add_middleware(SlowAPIMiddleware)
 
-    app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
+# Global Exception Handlers
+from fastapi.exceptions import RequestValidationError
+from starlette.exceptions import HTTPException as StarletteHTTPException
+import traceback
+import alerting
 
+@app.exception_handler(RateLimitExceeded)
+async def rate_limit_handler(request: Request, exc: RateLimitExceeded):
+    req_id = request_id_var.get("-")
+    headers = {"Retry-After": "60"}
+    content = {
+        "error": f"Rate limit exceeded: {exc.detail or str(exc)}",
+        "code": 429,
+        "request_id": req_id
+    }
+    _logger.warning(f"Rate limit exceeded for client {request.client.host if request.client else 'unknown'}: {exc.detail}")
+    return JSONResponse(status_code=429, content=content, headers=headers)
 
+@app.exception_handler(StarletteHTTPException)
+async def http_exception_handler(request: Request, exc: StarletteHTTPException):
+    req_id = request_id_var.get("-")
+    content = {
+        "error": exc.detail,
+        "code": exc.status_code,
+        "request_id": req_id
+    }
+    _logger.error(f"HTTPException status={exc.status_code} detail={exc.detail} request_id={req_id}")
+    return JSONResponse(status_code=exc.status_code, content=content)
+
+@app.exception_handler(RequestValidationError)
+async def validation_exception_handler(request: Request, exc: RequestValidationError):
+    req_id = request_id_var.get("-")
+    errors_detail = str(exc.errors())
+    content = {
+        "error": f"Validation failed: {errors_detail}",
+        "code": 422,
+        "request_id": req_id
+    }
+    _logger.error(f"Validation error: {errors_detail} request_id={req_id}")
+    return JSONResponse(status_code=422, content=content)
 
 @app.exception_handler(Exception)
-async def _global_exception_handler(request: Request, exc: Exception):
-    import traceback
-    _logger.error(f"UNHANDLED ERROR {request.method} {request.url.path}: {traceback.format_exc()}")
-    return JSONResponse(
-        status_code=500,
-        content={"error": "Internal server error. Please try again.", "detail": str(exc)},
-    )
+async def unhandled_exception_handler(request: Request, exc: Exception):
+    req_id = request_id_var.get("-")
+    _logger.error(f"Unhandled exception: {str(exc)}\n{traceback.format_exc()} request_id={req_id}")
+    
+    try:
+        alerting.trigger_500_alert(request.url.path, exc)
+    except Exception as alert_err:
+        _logger.error(f"Failed to send alert for unhandled exception: {alert_err}")
+
+    is_prod_env = not (settings.DEBUG or settings.TESTING)
+    if is_prod_env:
+        error_msg = "Internal server error. Please try again."
+    else:
+        error_msg = f"Internal server error: {str(exc)}"
+        
+    content = {
+        "error": error_msg,
+        "code": 500,
+        "request_id": req_id
+    }
+    return JSONResponse(status_code=500, content=content)
+
+# Request ID & Duration Alerting Middleware
+@app.middleware("http")
+async def add_request_id_and_timer(request: Request, call_next):
+    req_id = request.headers.get("X-Request-ID") or request.headers.get("x-request-id") or str(uuid.uuid4())
+    token = request_id_var.set(req_id)
+    start_time = time.time()
+    try:
+        response = await call_next(request)
+        duration = time.time() - start_time
+        
+        # Check if response took > 30s and is not SSE
+        if duration > 30.0:
+            content_type = response.headers.get("content-type", "")
+            if "text/event-stream" not in content_type:
+                try:
+                    alerting.trigger_latency_alert(request.url.path, duration)
+                except Exception as alert_err:
+                    _logger.error(f"Failed to send alert for slow response: {alert_err}")
+                    
+        response.headers["X-Request-ID"] = req_id
+        return response
+    finally:
+        request_id_var.reset(token)
 
 
 
@@ -6478,7 +7598,7 @@ app.add_middleware(
 
     allow_origins=_CORS_ORIGINS,
 
-    allow_origin_regex=r"https?://.*",
+    allow_origin_regex=r"^https?://(localhost|127\.0\.0\.1)(:\d+)?$",
 
     allow_credentials=True,
 
@@ -6489,18 +7609,30 @@ app.add_middleware(
 )
 
 
+@app.middleware("http")
+async def _security_headers(request, call_next):
+    resp = await call_next(request)
+    resp.headers["X-Content-Type-Options"] = "nosniff"
+    resp.headers["X-Frame-Options"] = "DENY"
+    resp.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
+    # frame-ancestors defends against clickjacking without restricting the
+    # SPA's own resource loading (a full default-src CSP would need per-asset
+    # testing against the committed dist first).
+    resp.headers.setdefault("Content-Security-Policy", "frame-ancestors 'none'")
+    return resp
 
-assistant = PRCChatAssistant(GEMINI_KEY_POOL)
 
-try:
 
-    hviel_engine = HvielDocEngine(output_dir=".")
+assistant = PRCChatAssistant()
 
-except Exception as _he:
+# Central shared PRC vault — all exported decks/spreadsheets/Word/PDF reports
+# from BOTH Hviel (SCAL) and Aviel (PVT) are written here. Overridable via env.
+PRC_VAULT = Path(settings.PRC_AI_VAULT)          # one source for the vault path: config (repo-anchored), never a developer default
+PRC_VAULT.mkdir(parents=True, exist_ok=True)
 
-    _logger.error(f"[SYSTEM] HvielDocEngine failed: {_he}")
-
-    hviel_engine = None
+# Fail closed at import: with a None engine every document request was silently
+# handled as ordinary chat (the only consumer is `_detect_type(...) if hviel_engine`).
+hviel_engine = HvielDocEngine(output_dir=str(PRC_VAULT))
 
 
 
@@ -6524,11 +7656,77 @@ def _verify_session_owner(sid: str, email: str):
 
         raise HTTPException(status_code=403, detail="Unauthorized: You do not own this session.")
 
+    if row and not row[0][0]:
+        # A row with no owner (legacy backfill of anonymous m rows) used to pass
+        # for every caller forever. The first authenticated caller claims it;
+        # from then on the check above derives from the row. A missing row still
+        # passes: /title and GET /session create it for the caller.
+        db("UPDATE sessions SET user_email=? WHERE sid=? AND (user_email IS NULL OR user_email='')",
+           (email.lower().strip(), sid))
+        _logger.info(f"[SECURITY] Unowned session {sid} claimed by {email}")
+
 
 
 @app.get("/health")
+def health():
+    db_ok = False
+    db_err = ""
+    try:
+        db("SELECT 1")
+        db_ok = True
+    except Exception as e:
+        db_ok = False
+        db_err = str(e)
 
-def health(): return {"status": "ok", "db": "postgres" if _PG_AVAILABLE else "sqlite"}
+    # Chat credential pool, as the adapter sees it (provider-neutral).
+    keys_degraded = CHAT.keys_degraded()
+
+    # Chat-LLM liveness from the same success/failure signal the chat path feeds
+    # (alerting.record_llm_success/failure at every provider call). A non-empty
+    # key pool no longer implies a working provider — this catches an outage the
+    # old check could not. Provider logic is NOT reimplemented here (that is what
+    # would break at C2); we only read the signal.
+    llm = alerting.llm_health()
+    llm_degraded = not llm["healthy"]
+
+    # Session TTL monitor liveness: a started-then-died monitor means the session
+    # cache grows unbounded — degraded. Never started (tests, startup failure) is
+    # reported, not treated as an outage.
+    ttl_monitor = ("not started" if _TTL_MONITOR is None
+                   else "alive" if _TTL_MONITOR.is_alive() else "dead")
+    ttl_dead = ttl_monitor == "dead"
+
+    if not db_ok or keys_degraded or llm_degraded or ttl_dead:
+        details = []
+        if not db_ok:
+            details.append(f"Database connectivity failed: {db_err}")
+        if ttl_dead:
+            details.append("Session TTL monitor thread died: idle session caches are no longer evicted.")
+        if keys_degraded:
+            details.append(f"Chat provider '{CHAT.config.provider}' key pool degraded "
+                           f"({CHAT.keys_in_cooldown()}/{len(CHAT.config.api_keys)} keys in cooldown or pool empty).")
+        if llm_degraded:
+            details.append(f"Chat LLM degraded: {llm['consecutive_failures']} consecutive provider "
+                           f"failures (last error: {llm['last_error'] or 'n/a'}).")
+
+        try:
+            alerting.send_alert(
+                subject="Degraded Health Check Alert (SCAL Pipeline)",
+                message="\n".join(details)
+            )
+        except Exception as alert_err:
+            _logger.error(f"Failed to send alert for degraded health: {alert_err}")
+
+        return JSONResponse(
+            status_code=503,
+            content={"status": "degraded", "db": "ok" if db_ok else "fail",
+                     "api_keys": "degraded" if keys_degraded else "ok",
+                     "llm": "degraded" if llm_degraded else "ok",
+                     "ttl_monitor": ttl_monitor, "boot_warnings": list(_BOOT_WARNINGS)}
+        )
+
+    return {"status": "ok", "db": "postgres" if _PG_AVAILABLE else "sqlite", "llm": "ok",
+            "ttl_monitor": ttl_monitor, "boot_warnings": list(_BOOT_WARNINGS)}
 
 
 
@@ -6538,13 +7736,10 @@ def diag(
     token: Optional[str] = Query(None),
 ):
     verify_user_or_admin(authorization=authorization, token=token)
-    with _FAILED_KEYS_LOCK: snap = dict(_FAILED_KEYS)
-
-    now = time.time(); cooldown = sum(1 for v in snap.values() if (now - v.get("ts",0)) < v.get("wait",0))
-
-    with assistant._idx_lock: idx = assistant._current_idx
-
-    return {"version": "PRC-HUB-VER-14-PROD-READY", "node_pool_size": len(GEMINI_KEY_POOL), "active_node_idx": idx, "nodes_in_cooldown": cooldown}
+    st = CHAT.state()
+    return {"version": "PRC-HUB-VER-14-PROD-READY", "chat_provider": st["provider"],
+            "chat_model": st["model"], "node_pool_size": st["keys"],
+            "nodes_in_cooldown": st["keys_in_cooldown"]}
 
 
 
@@ -6576,19 +7771,21 @@ async def get_telemetry_metrics(
         latencies = list(_REPORT_LATENCY_LIST)
     avg_latency = sum(latencies) / len(latencies) if latencies else 0.0
     
-    # Fetch cumulative API costs
+    # A metric the DB could not produce is null and named in `errors` — never $0 / 0.
+    errors: list[str] = []
     try:
         cost_res = db("SELECT SUM(cost_usd) FROM api_metrics")
-        cumulative_cost_usd = float(cost_res[0][0]) if cost_res and cost_res[0][0] is not None else 0.0
-    except Exception:
-        cumulative_cost_usd = 0.0
-        
-    # Fetch total volume of processed petrophysical datasets
+        cumulative_cost_usd = round(float(cost_res[0][0]), 6) if cost_res and cost_res[0][0] is not None else 0.0
+    except Exception as _ce:
+        cumulative_cost_usd = None
+        errors.append(f"cumulative cost unavailable: {type(_ce).__name__}: {str(_ce)[:150]}")
+
     try:
         dataset_res = db("SELECT COUNT(*) FROM physics_audits")
         total_processed_datasets = int(dataset_res[0][0]) if dataset_res and dataset_res[0][0] is not None else 0
-    except Exception:
-        total_processed_datasets = 0
+    except Exception as _de:
+        total_processed_datasets = None
+        errors.append(f"processed datasets count unavailable: {type(_de).__name__}: {str(_de)[:150]}")
         
     db_metrics = {}
     if _PG_AVAILABLE and _PG_POOL is not None:
@@ -6632,23 +7829,34 @@ async def get_telemetry_metrics(
             wal_path_obj = db_path_obj.with_name(db_path_obj.name + "-wal")
             db_metrics["sqlite_wal_size_kb"] = wal_path_obj.stat().st_size / 1024.0 if wal_path_obj.exists() else 0.0
             
-            # SQLite health check
-            db_metrics["db_pool_health"] = "healthy" if db_path_obj.exists() else "uninitialized"
+            # SQLite health: a probe, as /health does — a locked or corrupt file exists too.
+            if not db_path_obj.exists():
+                db_metrics["db_pool_health"] = "uninitialized"
+            else:
+                db("SELECT 1")
+                db_metrics["db_pool_health"] = "healthy"
         except Exception as e:
             _logger.error(f"Error fetching sqlite metrics: {e}")
             db_metrics["db_pool_health"] = "error"
+            errors.append(f"sqlite probe failed: {type(e).__name__}: {str(e)[:150]}")
 
     metrics_payload = {
         "average_document_compilation_latency_seconds": round(avg_latency, 2),
-        "cumulative_api_token_cost_usd": round(cumulative_cost_usd, 6),
+        "cumulative_api_token_cost_usd": cumulative_cost_usd,
         "total_processed_datasets_volume": total_processed_datasets,
         "cached_report_runs_count": len(latencies)
     }
     metrics_payload.update(db_metrics)
 
+    # Tool-failure ledger: per-tool failed-step counts from _record_tool_failure,
+    # so trajectory step-success rates are scrapeable.
+    metrics_payload["tool_failure_total"] = int(sum(TOOL_FAILURE_COUNTS.values()))
+    metrics_payload["tool_failure_counts"] = dict(TOOL_FAILURE_COUNTS)
+
     return {
         "status": "success",
-        "metrics": metrics_payload
+        "metrics": metrics_payload,
+        "errors": errors,
     }
 
 
@@ -6675,36 +7883,60 @@ def verify_admin(authorization: str = Header(None)):
 
 
 @app.post("/api/auth")
+@_limiter.limit("5/minute")
+async def user_login(request: Request, pin: str = Form(...), name: str = Form(""), email: str = Form("")):
 
-async def user_login(pin: str = Form(...)):
+    # Auth against USER_PIN (distinct from ADMIN_PIN so a user credential never
+    # yields an admin token). Hard per-IP limit above blocks PIN brute force.
 
-    # Auth against configured ADMIN_PIN (must be set in environment)
+    if not hmac.compare_digest(str(pin), str(USER_PIN)):
 
-    target_pin = ADMIN_PIN
-
-    if pin != target_pin:
-
-        _logger.warning(f"[AUTH] Failed user login attempt with code: {pin}")
+        _logger.warning("[AUTH] Failed user login attempt")
 
         await asyncio.sleep(0.5)
 
         raise HTTPException(status_code=401, detail="Invalid Access Code")
 
-    return {"status": "success"}
+    # Register/refresh the engineer profile (replaces the old /api/register)
+
+    if email:
+
+        try:
+
+            db("INSERT INTO users (email, name, created_at) VALUES (?, ?, ?)",
+               (normalize_email(email), name.strip(), time.time()))
+
+        except Exception:
+
+            pass  # already registered
+
+    # Issue a session token BOUND to the login email so user-facing endpoints
+    # can enforce identity (verify_user_or_admin rejects cross-user email params).
+
+    now = time.time()
+    for _t in [k for k, v in _USER_TOKENS.items()
+               if now > (v["exp"] if isinstance(v, dict) else v)]:
+        _USER_TOKENS.pop(_t, None)
+
+    token = _secrets.token_hex(16)
+
+    _USER_TOKENS[token] = {"exp": now + _USER_TOKEN_TTL,
+                           "email": normalize_email(email) or None}
+
+    return {"status": "success", "token": token}
 
 
 
 @app.post("/api/admin/auth")
+@_limiter.limit("5/minute")
+async def admin_login(request: Request, pin: str = Form(...)):
 
-async def admin_login(pin: str = Form(...)):
+    # Auth against configured ADMIN_PIN (must be set in environment).
+    # Hard per-IP limit above blocks PIN brute force.
 
-    # Auth against configured ADMIN_PIN (must be set in environment)
+    if not hmac.compare_digest(str(pin), str(ADMIN_PIN)):
 
-    target_pin = ADMIN_PIN
-
-    if pin != target_pin:
-
-        _logger.warning(f"[ADMIN] Failed login attempt with PIN: {pin}")
+        _logger.warning("[ADMIN] Failed login attempt")
 
         await asyncio.sleep(1) # Throttling
 
@@ -6751,8 +7983,9 @@ def get_summary(admin: bool = Depends(verify_admin)):
         t_engineers_res = db("SELECT COUNT(DISTINCT user_email) FROM m WHERE user_email IS NOT NULL AND role = 'user'")
         t_engineers = t_engineers_res[0][0] if t_engineers_res and t_engineers_res[0][0] is not None else 0
 
-        # Usage breakdown by engineer
-        eng_breakdown = []
+        # A breakdown the DB could not produce is null and named in `errors`, not [].
+        errors: list[str] = []
+        eng_breakdown = None
         try:
             eng_rows = db("""
                 SELECT COALESCE(s.user_email, 'anonymous') as email, 
@@ -6766,15 +7999,15 @@ def get_summary(admin: bool = Depends(verify_admin)):
             """)
             eng_breakdown = [{"email": r[0], "tokens": r[1], "cost": r[2], "sessions": r[3]} for r in eng_rows]
         except Exception as e_eng:
-            _logger.warning(f"[AdminSummary] Failed to query engineer breakdown: {e_eng}")
+            errors.append(f"engineer breakdown unavailable: {type(e_eng).__name__}: {str(e_eng)[:150]}")
 
         # Usage breakdown by model
-        mod_breakdown = []
+        mod_breakdown = None
         try:
             mod_rows = db("SELECT model, SUM(prompt_tokens + completion_tokens) as tokens, SUM(cost_usd) as cost FROM api_metrics GROUP BY model")
             mod_breakdown = [{"model": r[0], "tokens": r[1], "cost": r[2]} for r in mod_rows]
         except Exception as e_mod:
-            _logger.warning(f"[AdminSummary] Failed to query model breakdown: {e_mod}")
+            errors.append(f"model breakdown unavailable: {type(e_mod).__name__}: {str(e_mod)[:150]}")
 
         return {
 
@@ -6791,6 +8024,8 @@ def get_summary(admin: bool = Depends(verify_admin)):
             "engineer_breakdown": eng_breakdown,
             
             "model_breakdown": mod_breakdown,
+
+            "errors": errors,
 
             "storage_type": "PostgreSQL" if _PG_AVAILABLE else "SQLite"
 
@@ -6935,8 +8170,11 @@ def delete_session(
 ):
     verify_user_or_admin(authorization=authorization, token=token, email_query=email)
     _verify_session_owner(sid, email)
-    
-    # Retrieve and delete files associated with this session
+    _tls.degradations = []
+
+    # Retrieve and delete files associated with this session. A leftover
+    # user_files row keeps feeding get_user_file_history_context into later
+    # chats, so a failed cleanup is reported as a partial delete, not "ok".
     try:
         rows = db("SELECT DISTINCT fname FROM m WHERE sid=? AND user_email=?", (sid, email))
         fnames = []
@@ -6950,13 +8188,14 @@ def delete_session(
             db("DELETE FROM user_files WHERE user_email=? AND filename=?", (email, fn))
             _logger.info(f"[DeleteSession] Cleared file record {fn} from user_files")
     except Exception as _fe:
-        _logger.warning(f"[DeleteSession] Failed to clear user_files: {_fe}")
+        note_degradation("user-files", f"cleanup failed: {type(_fe).__name__}: {_fe}")
 
     db("DELETE FROM m WHERE sid=?", (sid,))
     db("DELETE FROM sessions WHERE sid=?", (sid,))
     db("DELETE FROM physics_audits WHERE session_id=?", (sid,))
     KnowledgeBase.delete_session_data(sid)
-    return {"status": "ok"}
+    d = degradations()
+    return {"status": "partial" if d else "ok", "degradations": d}
 
 
 
@@ -6965,6 +8204,7 @@ def parse_q0_questions(text: str) -> list[tuple[str, str]]:
     questions = []
     lines = text.split('\n')
     in_q0_sheet = False
+    dropped = 0
     for line in lines:
         lstrip = line.strip()
         if 'Sheet:' in line:
@@ -6972,17 +8212,20 @@ def parse_q0_questions(text: str) -> list[tuple[str, str]]:
                 in_q0_sheet = True
             else:
                 in_q0_sheet = False
-        
+
         if in_q0_sheet or not any('Sheet:' in l for l in lines):
             try:
                 row = list(csv.reader([lstrip]))[0]
-                if len(row) >= 2 and row[0].strip().startswith('Q') and row[0].strip()[1:].isdigit():
-                    q_num = row[0].strip()
-                    q_text = row[-1].strip()
-                    if q_text and q_text.lower() not in ("question", "topic"):
-                        questions.append((q_num, q_text))
-            except Exception:
-                pass
+            except csv.Error:
+                dropped += 1          # a dropped line silently shrinks the question set: count it
+                continue
+            if len(row) >= 2 and row[0].strip().startswith('Q') and row[0].strip()[1:].isdigit():
+                q_num = row[0].strip()
+                q_text = row[-1].strip()
+                if q_text and q_text.lower() not in ("question", "topic"):
+                    questions.append((q_num, q_text))
+    if dropped:
+        note_degradation("q0-parse", f"{dropped} question line(s) dropped (csv error)")
     seen = set()
     unique_qs = []
     for q_num, q_text in questions:
@@ -7032,14 +8275,19 @@ def detect_multi_question(message: str, sid: str, email: str) -> list[tuple[str,
     # 2. Check if the message is a trigger to answer Q0 questions
     is_trigger = any(x in message.lower() for x in ["solve all", "answer all", "q0", "comprehensive report", "advanced report"])
     if is_trigger and sid and email:
-        rows = db("SELECT fname FROM m WHERE sid=? AND role='user' AND fname IS NOT NULL ORDER BY id DESC LIMIT 1", (sid,))
+        rows = db("SELECT fname, file_hash FROM m WHERE sid=? AND role='user' AND fname IS NOT NULL ORDER BY id DESC LIMIT 1", (sid,))
         fname = rows[0][0] if rows else None
+        fhash = rows[0][1] if rows else None
         if not fname:
-            rows = db("SELECT filename FROM user_files WHERE user_email=? ORDER BY created_at DESC LIMIT 1", (email,))
+            rows = db("SELECT filename, file_hash FROM user_files WHERE user_email=? ORDER BY created_at DESC LIMIT 1", (email,))
             fname = rows[0][0] if rows else None
+            fhash = rows[0][1] if rows else None
         if fname:
             for f in fname.split(';'):
-                row = db("SELECT extracted_text FROM user_files WHERE user_email=? AND filename=?", (email, f))
+                if fhash:
+                    row = db("SELECT extracted_text FROM user_files WHERE user_email=? AND file_hash=?", (email, fhash))
+                else:
+                    row = db("SELECT extracted_text FROM user_files WHERE user_email=? AND filename=?", (email, f))
                 if row and row[0][0]:
                     qs = parse_q0_questions(row[0][0])
                     if qs:
@@ -7047,19 +8295,24 @@ def detect_multi_question(message: str, sid: str, email: str) -> list[tuple[str,
     return []
 
 
-@app.get("/api/chat/stream")
-
+@app.get(
+    "/api/chat/stream",
+    description="Stream chat responses from the SCAL AI Assistant.",
+    responses={
+        429: {"description": "Rate limit exceeded"},
+        500: {"description": "Internal server error"}
+    }
+)
+@_limiter.limit("10/minute")
 async def chat_stream(
-
+    request: Request,
     message:       str,
-
     background_tasks: BackgroundTasks,
-
     session_id:    Optional[str]   = None,
-
     user_email:    Optional[str]   = None,
-
+    auth:          bool            = Depends(verify_user_or_admin),
 ):
+    message = sanitize_prompt(message)
 
     if session_id in ("null", "undefined", "", None):
         sid = str(uuid.uuid4())
@@ -7067,6 +8320,9 @@ async def chat_stream(
         sid = session_id
 
     email = user_email.lower().strip() if user_email else None
+    # Fresh degradation list for this request, created before the worker thread
+    # starts so the thread's context copy shares it (chat() clears it in place).
+    _tls.degradations = []
 
     # Synchronously insert session row before starting producer/threads
     if _PG_AVAILABLE:
@@ -7082,7 +8338,7 @@ async def chat_stream(
         )
         await async_db("UPDATE sessions SET updated_at=? WHERE sid=?", (time.time(), sid))
 
-    
+
 
     # â"€â"€ SSE PRODUCER WITH HEARTBEAT â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€
 
@@ -7101,11 +8357,18 @@ async def chat_stream(
                     return i
             return 0
 
+        dropped = [0]
+
         def _enqueue(item):
-            """Put an item on the queue only if the consumer is still alive."""
-            if q.qsize() < 1900:
+            """Put an item on the queue only if the consumer is still alive.
+
+            Terminal events (done/error) and the KB hand-off always go through:
+            a dropped 'done' left a still-connected consumer pinging forever.
+            Dropped tokens are counted so the worker can report the truncation."""
+            if q.qsize() < 1900 or item.get("type") in ("done", "error", "__PENDING_KB__"):
                 loop.call_soon_threadsafe(q.put_nowait, item)
-            # else: consumer (_producer) has gone away; silently drop to stop memory growth
+            else:
+                dropped[0] += 1       # consumer backlog: drop to stop memory growth, but count it
 
 
 
@@ -7162,6 +8425,7 @@ async def chat_stream(
                 # 5. Gemini Chat Logic
                 _tls.current_session_id = sid
                 qs = detect_multi_question(message, sid, email)
+                carried = _carry_degradations([])      # e.g. q0-parse, before chat() clears it
                 if qs:
                     _logger.info(f"[SSE Worker] Detected multi-question streaming ({len(qs)} sub-questions).")
                     
@@ -7174,7 +8438,9 @@ async def chat_stream(
                             answered_qnums.add(q_val)
                     
                     combined_answers = []
+                    failed_questions = []
                     for q_num, q_text in qs:
+                        _carry_degradations(carried)
                         if q_num in answered_qnums:
                             chk_row = db("SELECT text FROM m WHERE sid=? AND role='model' AND text LIKE ?", (sid, f"%<!-- CHECKPOINT {q_num} -->%"))
                             if chk_row and chk_row[0][0]:
@@ -7197,43 +8463,35 @@ async def chat_stream(
                             
                             _enqueue({"type": "token", "text": f"\n\n### {q_num}: {q_text}\n\n"})
                             
-                            max_attempts = 5
-                            attempt_delay = 1.0
-                            success_gen = False
+                            # D3.3: the request's retry budget lives inside chat(); no loop on top.
+                            # Success is derived from the outcome: a full stream, a non-empty
+                            # reply, and a request the budget did not end.
+                            truncated = False
                             sub_reply = ""
-                            for attempt in range(max_attempts):
-                                try:
-                                    sub_reply = ""
-                                    for chunk in assistant.chat(sub_history, sub_msg, kb_context=kb_ctx, stream=True, sid=sid, email=email):
-                                        if q.qsize() >= 1900:
-                                            break
-                                        if isinstance(chunk, dict):
-                                            if chunk.get("type") == "token":
-                                                sub_reply += chunk.get("text", "")
-                                            _enqueue(chunk)
-                                        else:
-                                            sub_reply += str(chunk)
-                                            _enqueue({"type": "token", "text": str(chunk)})
-                                    success_gen = True
+                            for chunk in assistant.chat(sub_history, sub_msg, kb_context=kb_ctx, stream=True, sid=sid, email=email):
+                                if q.qsize() >= 1900:
+                                    truncated = True
                                     break
-                                except Exception as ex:
-                                    err_l = str(ex).lower()
-                                    is_trans = any(x in err_l for x in ["503", "429", "resource_exhausted", "unavailable", "timeout", "overload", "rate_limit"])
-                                    if is_trans and attempt < max_attempts - 1:
-                                        _logger.warning(f"[SSE Worker] API error on {q_num} attempt {attempt+1}: {ex}. Retrying in {attempt_delay}s...")
-                                        import time as _time
-                                        _time.sleep(attempt_delay)
-                                        attempt_delay *= 2.0
-                                    else:
-                                        raise ex
-                            
-                            if not success_gen or not sub_reply:
+                                if isinstance(chunk, dict):
+                                    if chunk.get("type") == "token":
+                                        sub_reply += chunk.get("text", "")
+                                    _enqueue(chunk)
+                                else:
+                                    sub_reply += str(chunk)
+                                    _enqueue({"type": "token", "text": str(chunk)})
+                            if truncated:
+                                raise ValueError("stream truncated: consumer backlog (client disconnected?)")
+                            if not sub_reply:
                                 raise ValueError("Empty response generated or max attempts reached.")
-                                
+                            if getattr(_tls, "request_failed", None):
+                                raise ValueError(f"request failed: {_tls.request_failed}")
+
                             sub_reply = strip_thinking_blocks(sub_reply)
                             sub_reply = strip_placeholder_artifacts(sub_reply)
                             sub_reply = process_provenance_tokens(sub_reply, sid)
-                            sub_reply = compress_traceability_ledger(sub_reply)
+                            sub_reply = enforce_citation_gate(sub_reply, sid)
+                            filenames = get_filenames_from_cache(sid)
+                            sub_reply = compress_traceability_ledger(sub_reply, filenames)
                             sub_reply = _extract_and_log_corrections(sid, email, sub_reply)
                             
                             sub_reply += f"\n<!-- CHECKPOINT {q_num} -->"
@@ -7245,56 +8503,65 @@ async def chat_stream(
                             _logger.info(f"[SSE Worker] Successfully completed and checkpointed {q_num}.")
                         except Exception as q_ex:
                             _logger.error(f"[SSE Worker] Permanent failure generating {q_num}: {q_ex}")
-                            err_msg = f"\n\n[ERROR] {q_num} failed: Unable to generate a response. This may be due to an API timeout, context window limit, or temporary model overload. Please retry with a shorter query, or try asking the model to process a specific sheet.\n<!-- CHECKPOINT {q_num} -->"
+                            # No CHECKPOINT marker on a failure row: the marker is what the
+                            # replay scan treats as "answered", and a retry must regenerate
+                            # instead of serving the stored failure as a cached analysis.
+                            err_msg = f"\n\n[ERROR] {q_num} failed: Unable to generate a response. This may be due to an API timeout, context window limit, or temporary model overload. Please retry with a shorter query, or try asking the model to process a specific sheet.\n"
+                            failed_questions.append(q_num)
+                            note_degradation("sub-question", f"{q_num}: {q_ex}")
                             _enqueue({"type": "token", "text": err_msg})
                             db("INSERT INTO m (sid,role,text,ts,user_email) VALUES (?,?,?,?,?)",
                                (sid, "model", err_msg, time.time(), email))
                             combined_answers.append(err_msg)
-                
-                else:
-                    full_reply = ""
-                    max_attempts = 5
-                    attempt_delay = 1.0
-                    for attempt in range(max_attempts):
-                        try:
-                            full_reply = ""
-                            for chunk in assistant.chat(history, message, kb_context=kb_ctx, stream=True, sid=sid, email=email):
-                                if q.qsize() >= 1900:
-                                    _logger.warning("[SSE Worker] Queue near-full — client likely disconnected, aborting.")
-                                    break
-                                if isinstance(chunk, dict):
-                                    if chunk.get("type") == "token":
-                                        full_reply += chunk.get("text", "")
-                                    _enqueue(chunk)
-                                else:
-                                    full_reply += str(chunk)
-                                    _enqueue({"type": "token", "text": str(chunk)})
-                            break
-                        except Exception as ex:
-                            err_l = str(ex).lower()
-                            is_trans = any(x in err_l for x in ["503", "429", "resource_exhausted", "unavailable", "timeout", "overload", "rate_limit"])
-                            if is_trans and attempt < max_attempts - 1:
-                                _logger.warning(f"[SSE Worker] API error on attempt {attempt+1}: {ex}. Retrying in {attempt_delay}s...")
-                                import time as _time
-                                _time.sleep(attempt_delay)
-                                attempt_delay *= 2.0
-                            else:
-                                raise ex
+                    if failed_questions:
+                        _tls.request_failed = f"{len(failed_questions)} of {len(qs)} sub-question(s) failed"
 
-                    # 6. Finalization — strip LLM artifacts before persistence
-                    if full_reply:
+                else:
+                    # D3.3: the request's retry budget lives inside chat(); no loop on top.
+                    full_reply = ""
+                    truncated = False
+                    for chunk in assistant.chat(history, message, kb_context=kb_ctx, stream=True, sid=sid, email=email):
+                        if q.qsize() >= 1900:
+                            _logger.warning("[SSE Worker] Queue near-full — client likely disconnected, aborting.")
+                            truncated = True
+                            break
+                        if isinstance(chunk, dict):
+                            if chunk.get("type") == "token":
+                                full_reply += chunk.get("text", "")
+                            _enqueue(chunk)
+                        else:
+                            full_reply += str(chunk)
+                            _enqueue({"type": "token", "text": str(chunk)})
+
+                    # 6. Finalization — strip LLM artifacts before persistence. A truncated
+                    # or empty stream is a failed request, not an answer: nothing is
+                    # persisted and the client gets an error event (the POST path has
+                    # the same substitution for an empty reply).
+                    if truncated:
+                        _tls.request_failed = "stream truncated: consumer backlog (client disconnected?)"
+                        note_degradation("stream", _tls.request_failed)
+                        _enqueue({"type": "error", "msg": _tls.request_failed})
+                    elif not full_reply.strip():
+                        _tls.request_failed = "model returned no text"
+                        _enqueue({"type": "error", "msg": _tls.request_failed})
+                    else:
                         full_reply = strip_thinking_blocks(full_reply)
                         full_reply = strip_placeholder_artifacts(full_reply)
                         full_reply = process_provenance_tokens(full_reply, sid)
-                        full_reply = compress_traceability_ledger(full_reply)
+                        full_reply = enforce_citation_gate(full_reply, sid)
+                        filenames = get_filenames_from_cache(sid)
+                        full_reply = compress_traceability_ledger(full_reply, filenames)
                         full_reply = _extract_and_log_corrections(sid, email, full_reply)
                         db("INSERT INTO m (sid,role,text,ts,user_email) VALUES (?,?,?,?,?)",
                            (sid, "model", full_reply, time.time(), email))
 
+                _renote_degradations(_carry_degradations(carried))
                 if getattr(_tls, 'pending_kb', None):
                     _enqueue({"type": "__PENDING_KB__", "data": list(_tls.pending_kb)})
 
-                _enqueue({"type": "done"})
+                if dropped[0]:
+                    note_degradation("stream", f"{dropped[0]} event(s) dropped: consumer backlog (truncated)")
+                _enqueue({"type": "done", "degradations": degradations(), "failed": bool(getattr(_tls, "request_failed", None))})
 
             except Exception as e:
 
@@ -7302,7 +8569,7 @@ async def chat_stream(
 
                 _enqueue({"type": "error", "msg": str(e)})
 
-                _enqueue({"type": "done"})
+                _enqueue({"type": "done", "degradations": degradations(), "failed": bool(getattr(_tls, "request_failed", None))})
 
 
 
@@ -7443,37 +8710,48 @@ def verify_file_signature(file_bytes: bytes, filename: str) -> bool:
     if not file_bytes:
         return True
     
-    ext = Path(filename.lower()).suffix
-    
-    if ext in ('.xlsx', '.xlsm', '.docx'):
-        # ZIP magic bytes: 'PK\x03\x04'
-        return file_bytes.startswith(b'PK\x03\x04')
+    ext = filename.split(".")[-1].lower() if "." in filename else ""
+    if not ext:
+        return False
         
-    elif ext in ('.xls', '.doc'):
-        # OLE magic bytes: d0 cf 11 e0 a1 b1 1a e1
-        return file_bytes.startswith(b'\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1')
+    # Enforce magic bytes for PDF
+    if ext == "pdf":
+        return file_bytes.startswith(b"%PDF")
         
-    elif ext == '.pdf':
-        # PDF magic bytes: '%PDF-'
-        return file_bytes.startswith(b'%PDF-')
+    # Enforce magic bytes for ZIP/DOCX/PPTX/XLSX/XLSM
+    if ext in ["docx", "pptx", "xlsx", "xlsm", "zip"]:
+        return file_bytes.startswith(b"PK\x03\x04")
         
-    elif ext in ('.csv', '.txt'):
-        # Must not contain dangerous binary executable signatures
-        if file_bytes.startswith(b'MZ') or file_bytes.startswith(b'\x7fELF'):
+    # Enforce magic bytes for legacy OLE formats XLS/DOC
+    if ext in ["xls", "doc"]:
+        return file_bytes.startswith(b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1")
+        
+    # For text, csv, md, markdown, json, xml, check that they do not contain binary header markers or null bytes
+    if ext in ["txt", "csv", "md", "markdown", "json", "xml"]:
+        # Ensure no executable headers
+        if file_bytes.startswith(b"MZ") or file_bytes.startswith(b"\x7fELF"):
             return False
-        # Avoid files with null bytes (binary indicators) in the first kilobyte
-        chunk = file_bytes[:1024]
-        if b'\x00' in chunk:
+        # Ensure no null bytes in the first 1024 bytes (indicates binary data)
+        sample = file_bytes[:1024]
+        if b"\x00" in sample:
             return False
         return True
+        
+    return False
 
-    return True
 
 
-@app.post("/api/chat")
-
+@app.post(
+    "/api/chat",
+    description="Handle POST request chat messages with optional file attachments.",
+    responses={
+        429: {"description": "Rate limit exceeded"},
+        500: {"description": "Internal server error"}
+    }
+)
+@_limiter.limit("10/minute")
 async def handle(
-
+    request: Request,
     background_tasks: BackgroundTasks,
 
     message:       Optional[str]    = Form(None),
@@ -7486,10 +8764,14 @@ async def handle(
 
     files:         list[UploadFile] = File(default=[]),
 
+    auth:          bool             = Depends(verify_user_or_admin),
+
 ):
     try:
         _tls.breadcrumbs = []
+        _tls.degradations = []      # fresh per request; the chat thread shares this list
         _add_breadcrumb("Chat request received")
+        message = sanitize_prompt(message) if message else message
 
         sid      = session_id or str(uuid.uuid4())
 
@@ -7534,14 +8816,18 @@ async def handle(
 
         _tls.current_session_id = sid
 
-        _MAX_UPLOAD_BYTES = 20 * 1024 * 1024  # 20 MB
-
         for file in valid_files:
-
-            b = await file.read(_MAX_UPLOAD_BYTES + 1)
-
-            if len(b) > _MAX_UPLOAD_BYTES:
-                raise HTTPException(status_code=413, detail=f"File '{file.filename}' exceeds the 20 MB limit.")
+            max_bytes = settings.SCAL_MAX_UPLOAD_MB * 1024 * 1024
+            chunk_size = 64 * 1024
+            content = bytearray()
+            while True:
+                chunk = await file.read(chunk_size)
+                if not chunk:
+                    break
+                content.extend(chunk)
+                if len(content) > max_bytes:
+                    raise HTTPException(status_code=413, detail=f"File '{file.filename}' exceeds the {settings.SCAL_MAX_UPLOAD_MB} MB limit.")
+            b = bytes(content)
 
             if b:
 
@@ -7565,7 +8851,7 @@ async def handle(
                             (email, file.filename, fhash, ftype, time.time()),
                         )
                 except Exception as _ufe:
-                    _logger.warning(f"[UserFiles] Could not record file for {email}: {_ufe}")
+                    note_degradation("user-files", f"{file.filename}: record failed: {type(_ufe).__name__}: {_ufe}")
 
         if f_parts:
             # Synchronously extract file text and populate database/cache
@@ -7585,15 +8871,16 @@ async def handle(
                         tmp_path = tf.name
                     try:
                         mandatory_ground_truth = extract_absolute_file_truth([(tmp_path, fname)])
+                        _fhash_store = hashlib.sha256(data_bytes).hexdigest()
                         if sid:
                             with SESSION_DATA_CACHE_LOCK:
-                                SESSION_DATA_CACHE[sid] = {
+                                SESSION_DATA_CACHE[_fhash_store] = {
                                     "ground_truth": mandatory_ground_truth,
                                     "timestamp": time.time()
                                 }
-                            populate_cache_from_ground_truth(sid, mandatory_ground_truth)
+                            populate_cache_from_ground_truth(_fhash_store, mandatory_ground_truth)
                             if is_spreadsheet:
-                                cache_excel_data_vectors(sid, tmp_path)
+                                cache_excel_data_vectors(_fhash_store, tmp_path)
                         
                         fr_data = read_file(tmp_path, target_identifier=None)
                         fr_text, _ = to_prompt_string(fr_data)
@@ -7609,10 +8896,13 @@ async def handle(
                                 (email, fname, _fhash_store, fr_text, "SCAL", time.time()),
                             )
                     except Exception as ex:
-                        _logger.error(f"[Bootstrap Extract] Failed to extract text for {fname}: {ex}")
+                        # Cache, labeled values, vectors and extracted_text all skipped:
+                        # the model still gets raw bytes, but Q0 detection and provenance
+                        # cannot see this file — say so on the request channel.
+                        note_degradation("bootstrap-extract", f"{fname}: {type(ex).__name__}: {ex}")
                     finally:
                         try: Path(tmp_path).unlink(missing_ok=True)
-                        except: pass
+                        except OSError: pass
                 elif "pdf" in safe_mime:
                     try:
                         text = _sfh_extract_pdf(data_bytes)
@@ -7628,7 +8918,7 @@ async def handle(
                                 (email, fname, _fhash_store, text, "PDF", time.time()),
                             )
                     except Exception as e:
-                        _logger.warning(f"[PDF Bootstrap Extract] {fname}: {e}")
+                        note_degradation("bootstrap-extract", f"{fname}: PDF: {type(e).__name__}: {e}")
                 elif "text/plain" in safe_mime or ext in (".txt", ".text"):
                     try:
                         content = data_bytes.decode("utf-8", errors="ignore")
@@ -7644,7 +8934,7 @@ async def handle(
                                 (email, fname, _fhash_store, content, "TXT", time.time()),
                             )
                     except Exception as e:
-                        _logger.warning(f"[TXT Bootstrap Extract] {fname}: {e}")
+                        note_degradation("bootstrap-extract", f"{fname}: TXT: {type(e).__name__}: {e}")
 
 
 
@@ -7663,9 +8953,12 @@ async def handle(
         # file, not just the first one in a multi-file upload.
         fname = ";".join(f.filename for f in valid_files) if valid_files else None
 
-        await async_db("INSERT INTO m (sid,role,text,ts,user_email,fname) VALUES (?,?,?,?,?,?)",
+        primary_fhash = None
+        if valid_files and f_parts:
+            primary_fhash = hashlib.sha256(f_parts[0][0]).hexdigest()
 
-           (sid, "user", message, time.time(), email, fname))
+        await async_db("INSERT INTO m (sid,role,text,ts,user_email,fname,file_hash) VALUES (?,?,?,?,?,?,?)",
+           (sid, "user", message, time.time(), email, fname, primary_fhash))
 
 
 
@@ -7769,6 +9062,8 @@ async def handle(
 
                     "doc_type":        "excel" if file_type == "xlsx" else file_type,
 
+                    "degradations":    degradations(),
+
                 }
 
             except Exception as e:
@@ -7780,7 +9075,7 @@ async def handle(
                     "503", "unavailable", "resource_exhausted", "overload", "retries"
                 ])
                 reply = (
-                    " Gemini is currently unavailable after 5 attempts. "
+                    " The AI provider is currently unavailable after 5 attempts. "
                     "Please try again in a few minutes or contact PRC support."
                     if is_overload else
                     f" Document generation failed: {str(e)[:200]}. "
@@ -7792,7 +9087,7 @@ async def handle(
                    (sid, "model", reply, time.time(), email))
 
                 return {"status": "error", "session_id": sid, "reply": reply,
-                        "is_doc_error": True}
+                        "is_doc_error": True, "degradations": degradations()}
 
 
 
@@ -7812,6 +9107,7 @@ async def handle(
         def _chat_capture():
             import time as _time
             qs = detect_multi_question(message, sid, email)
+            carried = _carry_degradations([])      # e.g. q0-parse, before chat() clears it
             if qs:
                 _logger.info(f"[CheckpointLoop] Detected multi-question query ({len(qs)} sub-questions).")
                 
@@ -7826,7 +9122,9 @@ async def handle(
                 _logger.info(f"[CheckpointLoop] Found already completed: {answered_qnums}")
                 
                 combined_answers = []
+                failed_questions = []
                 for q_num, q_text in qs:
+                    _carry_degradations(carried)
                     if q_num in answered_qnums:
                         chk_row = db("SELECT text FROM m WHERE sid=? AND role='model' AND text LIKE ?", (sid, f"%<!-- CHECKPOINT {q_num} -->%"))
                         if chk_row and chk_row[0][0]:
@@ -7834,41 +9132,30 @@ async def handle(
                             combined_answers.append(ans_text)
                             _logger.info(f"[CheckpointLoop] Loaded {q_num} from DB.")
                             continue
-                    
+
                     try:
                         _logger.info(f"[CheckpointLoop] Generating {q_num}...")
                         sub_msg = f"Solve and provide a detailed analysis for this specific question:\n\n**{q_num}: {q_text}**"
-                        
+
                         hist_rows = db("SELECT role, text FROM m WHERE sid=? AND user_email=? ORDER BY id DESC LIMIT 4", (sid, email))
                         sub_history = list(reversed([{"role": r, "text": t} for r, t in hist_rows]))
-                        
-                        max_attempts = 5
-                        attempt_delay = 1.0
-                        resp_obj = None
-                        for attempt in range(max_attempts):
-                            try:
-                                resp_obj = assistant.chat(sub_history, sub_msg, kb_ctx, f_parts, sid=sid, email=email)
-                                break
-                            except Exception as ex:
-                                err_l = str(ex).lower()
-                                is_trans = any(x in err_l for x in ["503", "429", "resource_exhausted", "unavailable", "timeout", "overload", "rate_limit"])
-                                if is_trans and attempt < max_attempts - 1:
-                                    _logger.warning(f"[CheckpointLoop] API error on {q_num} attempt {attempt+1}: {ex}. Retrying in {attempt_delay}s...")
-                                    _time.sleep(attempt_delay)
-                                    attempt_delay *= 2.0
-                                else:
-                                    raise ex
-                        
+
+                        resp_obj = assistant.chat(sub_history, sub_msg, kb_ctx, f_parts, sid=sid, email=email)   # D3.3: budget inside chat()
+
                         ans_text = resp_obj if isinstance(resp_obj, str) else str(resp_obj) if resp_obj is not None else ""
                         if not ans_text:
                             raise ValueError("Empty response generated or max attempts reached.")
-                            
+                        if getattr(_tls, "request_failed", None):
+                            # The budget ended this sub-request: its statement is not an answer.
+                            raise ValueError(f"request failed: {_tls.request_failed}")
+
                         ans_text = strip_thinking_blocks(ans_text)
                         ans_text = strip_placeholder_artifacts(ans_text)
                         ans_text = process_provenance_tokens(ans_text, sid)
+                        ans_text = enforce_citation_gate(ans_text, sid)
                         filenames = get_filenames_from_cache(sid)
                         ans_text = clean_citation_clutter(ans_text, filenames)
-                        ans_text = compress_traceability_ledger(ans_text)
+                        ans_text = compress_traceability_ledger(ans_text, filenames)
                         ans_text = _extract_and_log_corrections(sid, email, ans_text)
                         
                         ans_text += f"\n<!-- CHECKPOINT {q_num} -->"
@@ -7880,46 +9167,57 @@ async def handle(
                         _logger.info(f"[CheckpointLoop] Successfully completed and checkpointed {q_num}.")
                     except Exception as q_ex:
                         _logger.error(f"[CheckpointLoop] Permanent failure generating {q_num}: {q_ex}")
-                        err_msg = f"\n\n[ERROR] {q_num} failed: Unable to generate a response. This may be due to an API timeout, context window limit, or temporary model overload. Please retry with a shorter query, or try asking the model to process a specific sheet.\n<!-- CHECKPOINT {q_num} -->"
+                        # No CHECKPOINT marker on a failure row (see the SSE worker): the
+                        # next request must regenerate, not replay the failure as done.
+                        err_msg = f"\n\n[ERROR] {q_num} failed: Unable to generate a response. This may be due to an API timeout, context window limit, or temporary model overload. Please retry with a shorter query, or try asking the model to process a specific sheet.\n"
+                        failed_questions.append(q_num)
+                        note_degradation("sub-question", f"{q_num}: {q_ex}")
                         db("INSERT INTO m (sid,role,text,ts,user_email) VALUES (?,?,?,?,?)",
                            (sid, "model", err_msg, _time.time(), email))
                         combined_answers.append(err_msg)
-                
+
                 full_report = "\n\n---\n\n".join(combined_answers)
+                _renote_degradations(_carry_degradations(carried))
                 _post_kb.extend(getattr(_tls, 'pending_kb', []))
-                return {"is_multi": True, "reply": full_report}
+                return {"is_multi": True, "reply": full_report, "failed_questions": failed_questions,
+                        "total_questions": len(qs)}
             
             else:
-                max_attempts = 5
-                attempt_delay = 1.0
-                resp_obj = None
-                for attempt in range(max_attempts):
-                    try:
-                        resp_obj = assistant.chat(history, message, kb_ctx, f_parts, sid=sid, email=email)
-                        break
-                    except Exception as ex:
-                        err_l = str(ex).lower()
-                        is_trans = any(x in err_l for x in ["503", "429", "resource_exhausted", "unavailable", "timeout", "overload", "rate_limit"])
-                        if is_trans and attempt < max_attempts - 1:
-                            _logger.warning(f"[Chat] API error on attempt {attempt+1}: {ex}. Retrying in {attempt_delay}s...")
-                            _time.sleep(attempt_delay)
-                            attempt_delay *= 2.0
-                        else:
-                            raise ex
+                resp_obj = assistant.chat(history, message, kb_ctx, f_parts, sid=sid, email=email)   # D3.3: budget inside chat()
                 
+                _renote_degradations(carried)
                 _post_kb.extend(getattr(_tls, 'pending_kb', []))
                 return resp_obj
+
+        # chat() clears the request's degradation list on entry; what the bootstrap
+        # above noted (file record / extraction failures) must still reach the
+        # response, so re-note it once the chat thread is done.
+        _pre_chat_degradations = degradations()
+
+        def _restore_pre_chat_degradations():
+            _renote_degradations(_pre_chat_degradations)
 
         try:
             resp = await anyio.to_thread.run_sync(_chat_capture)
         except Exception as e:
-            _logger.error(f"[Chat] Gemini/file processing error: {e}")
+            _logger.error(f"[Chat] LLM/file processing error: {e}")
+            _restore_pre_chat_degradations()
             reply = f"Processing error: {str(e)[:300]}. Please retry or contact PRC support."
             await async_db("INSERT INTO m (sid,role,text,ts,user_email) VALUES (?,?,?,?,?)",
                (sid, "model", reply, time.time(), email))
-            return {"status": "error", "session_id": sid, "reply": reply}
+            return {"status": "error", "session_id": sid, "reply": reply, "degradations": degradations()}
+        _restore_pre_chat_degradations()
+
+        if getattr(_tls, "request_failed", None) and not (isinstance(resp, dict) and resp.get("is_multi")):
+            # The budget ended the request: report it plainly as an error, with the
+            # statement chat() produced and nothing added.
+            reply = resp if isinstance(resp, str) else str(resp)
+            await async_db("INSERT INTO m (sid,role,text,ts,user_email) VALUES (?,?,?,?,?)",
+                           (sid, "model", reply, time.time(), email))
+            return {"status": "error", "session_id": sid, "reply": reply, "degradations": degradations()}
 
         is_multi = isinstance(resp, dict) and resp.get("is_multi")
+        failed_questions = list(resp.get("failed_questions") or []) if is_multi else []
         if is_multi:
             resp_text = resp["reply"]
         else:
@@ -7929,8 +9227,19 @@ async def handle(
             resp_text = process_provenance_tokens(resp_text, sid)
             filenames = get_filenames_from_cache(sid)
             resp_text = clean_citation_clutter(resp_text, filenames)
-            resp_text = compress_traceability_ledger(resp_text)
+            resp_text = compress_traceability_ledger(resp_text, filenames)
             resp_text = _extract_and_log_corrections(sid, email, resp_text)
+            if not resp_text.strip():
+                # Empty after post-processing almost always means the model's mandated
+                # <thinking> block consumed the output-token budget on a very large file,
+                # leaving no visible answer. Surface a clear, actionable message instead of
+                # returning a silent blank reply.
+                resp_text = (
+                    "⚠️ I read the file, but the answer came back empty — this usually happens "
+                    "when an uploaded document is very large and the response gets cut off. "
+                    "Please ask about a specific part (e.g. \"summarize the conclusions\" or "
+                    "\"show me the porosity table\") and I'll pull it directly."
+                )
             await async_db("INSERT INTO m (sid,role,text,ts,user_email) VALUES (?,?,?,?,?)",
                (sid, "model", resp_text, time.time(), email))
 
@@ -7958,7 +9267,13 @@ async def handle(
             except Exception as ge:
                 _logger.warning(f"[AutoGrader] Failed to execute console grade: {ge}")
 
-        return {"status": "success", "session_id": sid, "reply": resp_text}
+        payload = {"status": "success", "session_id": sid, "reply": resp_text, "degradations": degradations()}
+        if failed_questions:
+            # Status derives from the outcome: every sub-question failed -> error,
+            # some -> partial; the list names them.
+            payload["status"] = "error" if len(failed_questions) >= resp.get("total_questions", 0) else "partial"
+            payload["failed_questions"] = failed_questions
+        return payload
     except Exception as e:
         import traceback
         tb = traceback.format_exc()
@@ -7968,15 +9283,18 @@ async def handle(
             "traceback": tb,
             "breadcrumbs": getattr(_tls, "breadcrumbs", [])
         }
+        saved = False
         try:
             Path("outputs").mkdir(parents=True, exist_ok=True)
             with open("outputs/crash_diagnostics.json", "w", encoding="utf-8") as diag_f:
                 import json as _json_diag
                 _json_diag.dump(diag, diag_f, indent=2)
+            saved = True
         except Exception as save_err:
             _logger.warning(f"[AppCrash] Failed to save crash diagnostics: {save_err}")
-        _logger.error(f"[AppCrash] Diagnostic report saved: {e}")
-        raise HTTPException(status_code=500, detail=f"Request crashed. Diagnostics stored. Error: {str(e)}")
+        stored = "Diagnostics stored" if saved else "Diagnostics NOT stored (save failed)"
+        _logger.error(f"[AppCrash] {stored}: {e}")
+        raise HTTPException(status_code=500, detail=f"Request crashed. {stored}. Error: {str(e)}")
 
 
 
@@ -7993,7 +9311,17 @@ async def library_ingest(
     if not KB_INGEST_SECRET or not hmac.compare_digest(x_ingest_secret.strip(), KB_INGEST_SECRET):
         raise HTTPException(status_code=403, detail="Invalid ingest secret")
     file.filename = sanitize_filename(file.filename)
-    file_bytes = await file.read()
+    max_bytes = settings.SCAL_MAX_UPLOAD_MB * 1024 * 1024
+    chunk_size = 64 * 1024
+    content = bytearray()
+    while True:
+        chunk = await file.read(chunk_size)
+        if not chunk:
+            break
+        content.extend(chunk)
+        if len(content) > max_bytes:
+            raise HTTPException(status_code=413, detail=f"File '{file.filename}' exceeds the {settings.SCAL_MAX_UPLOAD_MB} MB limit.")
+    file_bytes = bytes(content)
     if not file_bytes:
         raise HTTPException(status_code=400, detail="Empty file")
     if not verify_file_signature(file_bytes, file.filename):
@@ -8064,13 +9392,13 @@ def _parse_skill_md(file_path: str) -> dict:
                             else:
                                 metadata["description"] = v.strip('"\'')
                     idx += 1
-    except Exception as e:
-        _logger.warning(f"[Skills] Failed to parse skill metadata from {file_path}: {e}")
+    except (OSError, UnicodeError, ValueError) as e:
+        metadata["parse_error"] = f"{type(e).__name__}: {e}"     # the caller substitutes the dir name; say why
     return metadata
 
 
 @app.get("/api/kb/status")
-async def kb_status():
+async def kb_status(auth: bool = Depends(verify_user_or_admin)):
     try:
         # Aggregate global chunks from library_docs and library_chunks
         global_rows = await async_db(
@@ -8112,7 +9440,17 @@ async def kb_ingest(
     if not is_valid:
         raise HTTPException(status_code=403, detail="Invalid admin pin")
     file.filename = sanitize_filename(file.filename)
-    file_bytes = await file.read()
+    max_bytes = settings.SCAL_MAX_UPLOAD_MB * 1024 * 1024
+    chunk_size = 64 * 1024
+    content = bytearray()
+    while True:
+        chunk = await file.read(chunk_size)
+        if not chunk:
+            break
+        content.extend(chunk)
+        if len(content) > max_bytes:
+            raise HTTPException(status_code=413, detail=f"File '{file.filename}' exceeds the {settings.SCAL_MAX_UPLOAD_MB} MB limit.")
+    file_bytes = bytes(content)
     if not file_bytes:
         raise HTTPException(status_code=400, detail="Empty file")
     if not verify_file_signature(file_bytes, file.filename):
@@ -8131,20 +9469,21 @@ async def kb_ingest(
     if result.get("error"):
         raise HTTPException(status_code=500, detail=result["error"])
 
-    # Calculate words count
-    words_count = 0
-    try:
-        text = _extract_text_for_library(file_bytes, file.filename)
-        words_count = len(text.split())
-    except Exception:
-        words_count = result.get("chunks", 0) * 150
-
-    return {
+    # Word count: measured from the text, or null with an explicit estimate —
+    # never an estimate in the measured field.
+    payload = {
         "status": "success",
         "book": file.filename,
         "chunks_stored": result.get("chunks", 0),
-        "words": words_count
     }
+    try:
+        text = _extract_text_for_library(file_bytes, file.filename)
+        payload["words"] = len(text.split())
+    except Exception as e:
+        payload["words"] = None
+        payload["words_estimated"] = result.get("chunks", 0) * 150
+        payload["words_error"] = f"{type(e).__name__}: {e}"[:200]
+    return payload
 
 
 @app.post("/api/kb/delete")
@@ -8161,6 +9500,16 @@ async def kb_delete(
         raise HTTPException(status_code=403, detail="Invalid admin pin")
 
     clean_name = filename.replace("File: ", "").strip()
+
+    # db() exposes no rowcount, so check existence first: "Successfully deleted"
+    # for a name that matched nothing was a signal that could not be false.
+    existing = await async_db(
+        "SELECT 1 FROM library_docs WHERE filename = ? OR filename = ? "
+        "UNION ALL SELECT 1 FROM kb WHERE source = ? OR source = ? LIMIT 1",
+        (clean_name, f"File: {clean_name}", clean_name, f"File: {clean_name}"),
+    )
+    if not existing:
+        raise HTTPException(status_code=404, detail=f"No library document or KB source named '{clean_name}'")
 
     try:
         await async_db(
@@ -8183,7 +9532,7 @@ async def kb_delete(
 
 
 @app.get("/api/skills/list")
-async def list_skills_endpoint():
+async def list_skills_endpoint(auth: bool = Depends(verify_user_or_admin)):
     skills_dir = Path(__file__).parent / "hermes_skills_library"
     skills_list = []
     
@@ -8204,7 +9553,8 @@ async def list_skills_endpoint():
                             skills_list.append({
                                 "category": cat_dir.name.replace("-", " ").title(),
                                 "name": name,
-                                "desc": desc
+                                "desc": desc,
+                                "parse_error": meta.get("parse_error"),
                             })
     except Exception as e:
         _logger.error(f"[Skills List] Failed to list skills: {e}")
@@ -8213,11 +9563,12 @@ async def list_skills_endpoint():
     return {"skills": skills_list}
 
 
-# Resolved once at startup; files are written to CWD by HvielDocEngine(output_dir=".")
+# Resolved once at startup; chat-generated docs are written to the shared PRC vault
+# by HvielDocEngine(output_dir=str(PRC_VAULT)) and served from here.
 
 import pathlib as _pathlib
 
-_DOWNLOAD_ROOT = _pathlib.Path(".").resolve()
+_DOWNLOAD_ROOT = PRC_VAULT.resolve()
 
 
 
@@ -8251,7 +9602,29 @@ SESSION_DATA_CACHE_LOCK: threading.Lock = threading.Lock()
 SESSION_DATA_CACHE: dict[str, dict] = {}
 
 
-def evict_session(session_id: str) -> None:
+def get_session_active_hash(session_id: str) -> Optional[str]:
+    """Latest file hash uploaded in the session, or None when the session has no
+    file. A DB failure raises (db() has already retried): None must never be
+    ambiguous between "no file" and "could not look" — resolve_cache_key would
+    silently fall back to the sid and every cache lookup would miss."""
+    if not session_id:
+        return None
+    rows = db("SELECT file_hash FROM m WHERE sid=? AND file_hash IS NOT NULL ORDER BY id DESC LIMIT 1", (session_id,))
+    if rows and rows[0][0]:
+        return rows[0][0]
+    return None
+
+
+def resolve_cache_key(key: str) -> str:
+    if not key:
+        return ""
+    if len(key) == 64 and all(c in "0123456789abcdefABCDEF" for c in key):
+        return key
+    active_hash = get_session_active_hash(key)
+    return active_hash or key
+
+
+def evict_session(session_id: str) -> dict:
     """Single source of truth for destructive session eviction.
 
     Clears the session's cache dict in place (dropping ground truth, labeled
@@ -8259,33 +9632,51 @@ def evict_session(session_id: str) -> None:
     explicit garbage-collection pass so no ghost memory survives across sessions.
     Wired into chat init, file upload, and the explicit /api/clear-session route
     so eviction logic can never drift between call sites again.
+
+    The session's data lives under the FILE HASH (resolve_cache_key(sid)), both
+    in memory and in the session_cache row, so that key is evicted alongside the
+    raw sid. Returns what actually happened: {"evicted": [keys], "db_deleted":
+    bool}; a failed DB delete is noted on the request degradation channel.
     """
     if not session_id:
-        return
+        return {"evicted": [], "db_deleted": False}
     import gc
+    keys = [session_id]
+    resolved = resolve_cache_key(session_id)
+    if resolved and resolved != session_id:
+        keys.append(resolved)
     with SESSION_DATA_CACHE_LOCK:
-        if session_id not in SESSION_DATA_CACHE:
-            SESSION_DATA_CACHE[session_id] = {}
-        SESSION_DATA_CACHE[session_id].clear()
-        SESSION_DATA_CACHE[session_id]["labeled_values"] = {}
+        for key in keys:
+            if key not in SESSION_DATA_CACHE:
+                SESSION_DATA_CACHE[key] = {}
+            SESSION_DATA_CACHE[key].clear()
+            SESSION_DATA_CACHE[key]["labeled_values"] = {}
+    db_deleted = True
     try:
-        db("DELETE FROM session_cache WHERE sid=?", (session_id,))
+        for key in keys:
+            db("DELETE FROM session_cache WHERE sid=?", (key,))
     except Exception as _ev_err:
-        _logger.warning(f"[SessionCacheDB] Delete failed during eviction: {_ev_err}")
+        db_deleted = False
+        note_degradation("session-cache", f"eviction delete failed: {type(_ev_err).__name__}: {_ev_err}")
     gc.collect()
+    return {"evicted": keys, "db_deleted": db_deleted}
 
 
-def save_session_cache_to_db(sid: str) -> None:
+def save_session_cache_to_db(sid: str) -> bool:
     """Serializes and persists the in-memory session cache dictionary to the database
     to support multi-process, multi-worker, or stateless container deployments (like Render).
+
+    Returns True only when the row was written; False (with a request
+    degradation) when there was nothing to save or the write failed.
     """
     if not sid:
-        return
+        return False
+    sid = resolve_cache_key(sid)
     try:
         with SESSION_DATA_CACHE_LOCK:
             cache_data = SESSION_DATA_CACHE.get(sid)
             if not cache_data:
-                return
+                return False
             gt = cache_data.get("ground_truth", "")
             lv = _json.dumps(cache_data.get("labeled_values", {}))
             fv = _json.dumps(cache_data.get("flat_vectors", {}))
@@ -8302,39 +9693,48 @@ def save_session_cache_to_db(sid: str) -> None:
             "  updated_at = EXCLUDED.updated_at",
             (sid, gt, lv, fv, re_data, time.time())
         )
+        return True
     except Exception as e:
-        _logger.warning(f"[SessionCacheDB] Save failed for {sid}: {e}")
+        note_degradation("session-cache", f"save failed for {sid[:12]}: {type(e).__name__}: {e}")
+        return False
 
 
-def load_session_cache_from_db(sid: str) -> None:
+def load_session_cache_from_db(sid: str) -> Optional[bool]:
     """Restores the session cache from the SQLite database if it's missing from the in-memory dict.
     Ensures that any Gunicorn/Uvicorn worker process has access to the uploaded file's extracted data.
+
+    Returns True when the cache is populated (already in memory, or restored),
+    False when there is no stored row, None when the load FAILED (noted on the
+    request degradation channel) — a failure is never the same as "no row".
+    A corrupt JSON column is restored as {} and listed under cache["degraded"].
     """
     if not sid:
-        return
+        return False
+    sid = resolve_cache_key(sid)
     try:
         with SESSION_DATA_CACHE_LOCK:
             if sid in SESSION_DATA_CACHE and SESSION_DATA_CACHE[sid] and SESSION_DATA_CACHE[sid].get("ground_truth"):
-                return
-                
+                return True
+
         rows = db("SELECT ground_truth, labeled_values, flat_vectors, raw_excel_data FROM session_cache WHERE sid=?", (sid,))
         if not rows:
-            return
-            
+            return False
+
         gt, lv_json, fv_json, re_json = rows[0]
-        try:
-            lv = _json.loads(lv_json) if lv_json else {}
-        except Exception:
-            lv = {}
-        try:
-            fv = _json.loads(fv_json) if fv_json else {}
-        except Exception:
-            fv = {}
-        try:
-            re_data = _json.loads(re_json) if re_json else {}
-        except Exception:
-            re_data = {}
-            
+        degraded = []
+
+        def _col(name, raw):
+            try:
+                return _json.loads(raw) if raw else {}
+            except (ValueError, TypeError) as je:
+                degraded.append(name)
+                note_degradation("session-cache", f"{name} column corrupt for {sid[:12]}: {je}")
+                return {}
+
+        lv = _col("labeled_values", lv_json)
+        fv = _col("flat_vectors", fv_json)
+        re_data = _col("raw_excel_data", re_json)
+
         with SESSION_DATA_CACHE_LOCK:
             if sid not in SESSION_DATA_CACHE:
                 SESSION_DATA_CACHE[sid] = {}
@@ -8343,10 +9743,14 @@ def load_session_cache_from_db(sid: str) -> None:
             SESSION_DATA_CACHE[sid]["flat_vectors"] = fv
             SESSION_DATA_CACHE[sid]["raw_excel_data"] = re_data
             SESSION_DATA_CACHE[sid]["timestamp"] = time.time()
-            
+            if degraded:
+                SESSION_DATA_CACHE[sid]["degraded"] = degraded
+
         _logger.info(f"[SessionCacheDB] Restored cache for {sid} from DB: {len(gt)} chars ground truth, {len(lv)} labeled values.")
+        return True
     except Exception as e:
-        _logger.warning(f"[SessionCacheDB] Load failed for {sid}: {e}")
+        note_degradation("session-cache", f"load failed for {sid[:12]}: {type(e).__name__}: {e}")
+        return None
 
 
 def auto_rename_session_if_new(sid: str, email: str, filename: str = None, message: str = None):
@@ -8369,7 +9773,7 @@ def auto_rename_session_if_new(sid: str, email: str, filename: str = None, messa
         _logger.info(f"[AutoRename] Session exists={exists}, current title: '{current_title}'")
             
         if current_title != "New Study" and current_title.strip() != "":
-            _logger.info(f"[AutoRename] Title already customized, bypassing auto-rename.")
+            _logger.info("[AutoRename] Title already customized, bypassing auto-rename.")
             return
             
         # Determine new title
@@ -8406,25 +9810,32 @@ def auto_rename_session_if_new(sid: str, email: str, filename: str = None, messa
                        (sid, new_title, const_email, time.time(), time.time()))
                 _logger.info(f"[AutoRename] Inserted session row with title '{new_title}' successfully.")
         else:
-            _logger.info(f"[AutoRename] No descriptive title could be determined.")
+            _logger.info("[AutoRename] No descriptive title could be determined.")
     except Exception as e:
         _logger.warning(f"[AutoRename] Failed to auto-rename session {sid}: {e}")
 
 
 @app.post("/api/clear-session")
-async def clear_session(session_id: str = Form(...)):
+async def clear_session(session_id: str = Form(...),
+                        auth: bool = Depends(verify_user_or_admin)):
     """Explicit destructive eviction of a session's cached SCAL data.
     Enforces absolute isolation: clears the dict and forces gc.collect()."""
     import re as _re
     if not _re.match(r"^(report-)?[a-zA-Z0-9\-]+$", session_id):
         raise HTTPException(status_code=400, detail="Invalid session_id format")
-    evict_session(session_id)
-    return {"status": "cleared", "session_id": session_id}
+    _tls.degradations = []
+    result = evict_session(session_id)
+    return {"status": "cleared" if result["db_deleted"] else "partial", "session_id": session_id,
+            "evicted": result["evicted"], "degradations": degradations()}
 
 
 @app.post("/api/clear-user-files")
-async def clear_user_files(email: str = Form(...)):
-    """Wipes all user uploaded files from user_files to prevent cross-session AI confusion."""
+async def clear_user_files(email: str = Form(...),
+                           authorization: Optional[str] = Header(None),
+                           token: Optional[str] = Query(None)):
+    """Wipes all user uploaded files from user_files to prevent cross-session AI confusion.
+    Identity-bound: a user token may only clear its OWN files; admin tokens may clear any."""
+    verify_user_or_admin(authorization=authorization, token=token, email_query=email)
     try:
         email_clean = email.lower().strip()
         db("DELETE FROM user_files WHERE user_email=?", (email_clean,))
@@ -8498,7 +9909,15 @@ def start_session_ttl_monitor():
                 
                 with SESSION_DATA_CACHE_LOCK:
                     for sid, cache_item in list(SESSION_DATA_CACHE.items()):
-                        last_act = cache_item.get("last_activity") or cache_item.get("timestamp") or now
+                        # Untouched sessions used to fall back to `now`, so they
+                        # never aged and the cache grew unbounded until OOM.
+                        # setdefault stamps created_at the first time the monitor
+                        # sees a session, so every session ages from creation.
+                        # This only pops the in-memory copy; the session_cache DB
+                        # row remains and re-loads on the next access.
+                        last_act = (cache_item.get("last_activity")
+                                    or cache_item.get("timestamp")
+                                    or cache_item.setdefault("created_at", now))
                         if now - last_act > 15 * 60:  # 15 minutes idle
                             evicted_sessions.append(sid)
                             SESSION_DATA_CACHE.pop(sid, None)
@@ -8532,14 +9951,16 @@ def start_session_ttl_monitor():
                 
     t = threading.Thread(target=monitor_loop, daemon=True)
     t.start()
+    return t   # /health reads its liveness
 
 
 def get_filenames_from_cache(sid: Optional[str]) -> list[str]:
     """Helper to extract original filenames from the ground truth in the session cache."""
     if not sid:
         return []
+    fhash = resolve_cache_key(sid)
     with SESSION_DATA_CACHE_LOCK:
-        cached = SESSION_DATA_CACHE.get(sid)
+        cached = SESSION_DATA_CACHE.get(fhash)
         if not cached:
             return []
         gt = cached.get("ground_truth", "")
@@ -8551,7 +9972,9 @@ def get_filenames_from_cache(sid: Optional[str]) -> list[str]:
 
 _REPORT_LATENCY_LIST: list[float] = []
 _REPORT_LATENCY_LOCK: threading.Lock = threading.Lock()
-_MAX_UPLOAD_BYTES = 20 * 1024 * 1024
+# Upload cap for large lab reports. Default 75 MB on the sovereign on-prem box;
+# override via SCAL_MAX_UPLOAD_MB. Streaming guard still enforces the limit.
+_MAX_UPLOAD_BYTES = int(os.getenv("SCAL_MAX_UPLOAD_MB", "75")) * 1024 * 1024
 
 import tempfile
 
@@ -8582,6 +10005,14 @@ def sync_document_generation_task(
     email: str = None,
     message: str = None
 ):
+    def _warn(kind: str, detail) -> None:
+        """A skipped gate must leave a trace where the poller can see it:
+        TASKS_DB[sid]['warnings'] is returned verbatim by /api/v1/tasks/{sid}
+        and turns the final status into 'partial'."""
+        entry = f"{kind}: {str(detail)[:200]}"
+        _logger.warning("[BgTask %s] %s", session_id, entry)
+        TASKS_DB[session_id].setdefault("warnings", []).append(entry)
+
     try:
         # Progress 0-10%
         TASKS_DB[session_id].update({"status": "processing", "progress": 5})
@@ -8601,6 +10032,10 @@ def sync_document_generation_task(
         phase0b_inventory = None
         phase0b_inventory_text = ""
         mandatory_ground_truth = ""
+        # Calculate file content hash
+        with open(temp_file_path, "rb") as f:
+            fhash = hashlib.sha256(f.read()).hexdigest()
+
         if is_spreadsheet or is_docx:
             try:
                 # Deterministic pre-parser: raw pd.ExcelFile, zero SCALFileHandler dependency
@@ -8609,17 +10044,23 @@ def sync_document_generation_task(
                 )
                 if session_id:
                     with SESSION_DATA_CACHE_LOCK:
-                        SESSION_DATA_CACHE[session_id] = {
+                        SESSION_DATA_CACHE[fhash] = {
                             "ground_truth": mandatory_ground_truth,
                             "timestamp": time.time()
                         }
-                    populate_cache_from_ground_truth(session_id, mandatory_ground_truth)
+                    _tls.degradations = []
+                    populate_cache_from_ground_truth(fhash, mandatory_ground_truth)
                     if is_spreadsheet:
-                        cache_excel_data_vectors(session_id, temp_file_path)
-                _logger.info(f"[Phase 0b BG] Deterministic MANDATORY_GROUND_TRUTH_INVENTORY generated for {filename}")
+                        cache_excel_data_vectors(fhash, temp_file_path)
+                    # The cache helpers report on the request channel (session-cache
+                    # save failed, cache-vectors, ...), which no poller reads: forward.
+                    for _entry in degradations():
+                        _warn(*_entry.partition(": ")[::2])
+                _logger.info(f"[Phase 0b BG] Deterministic MANDATORY_GROUND_TRUTH_INVENTORY generated for {filename} with hash {fhash}")
             except Exception as mgt_err:
-                _logger.warning(f"[Phase 0b BG] extract_absolute_file_truth failed for {filename}: {mgt_err}")
-        
+                # No inventory RULES reach the extraction prompt for this run.
+                _warn("ground-truth", f"extract_absolute_file_truth failed, inventory rules not injected: {mgt_err}")
+
         if is_spreadsheet:
             try:
                 _handler = SCALFileHandler(temp_file_path)
@@ -8632,7 +10073,8 @@ def sync_document_generation_task(
                     _logger.warning(f"[Phase 0b BG] MULTI-WELL ALERT in {filename}: "
                                     f"{phase0b_inventory['multi_well_alert']}")
             except Exception as inv_err:
-                _logger.warning(f"[Phase 0b BG] Inventory generation failed for {filename}: {inv_err}")
+                # phase0b_inventory stays None: the Python-side structural halt is skipped.
+                _warn("inventory", f"structural inventory failed, Python-side structural validation skipped: {inv_err}")
         
         # Progress 10-30%: Extract structure from Gemini with HA client
         extraction_prompt_path = str(Path(__file__).parent / "prompts" / "extraction_system_prompt.md")
@@ -8706,28 +10148,20 @@ def sync_document_generation_task(
         )
         
         TASKS_DB[session_id].update({"progress": 20})
-        
-        client = assistant._client or genai_new.Client(api_key=GEMINI_KEY_POOL[0])
-        try:
-            response = _call_gemini_with_retry(
-                client=client,
-                model="gemini-2.5-flash",
-                contents=contents,
-                config=config,
-                max_retries=3,
-                base_delay=2
+
+        if not CHAT.config.api_keys:
+            raise RuntimeError(
+                f"No API key configured for chat provider '{CHAT.config.provider}' "
+                "(set LLM_API_KEYS / LLM_API_KEY); document generation needs one."
             )
-        except Exception as e:
-            _logger.warning(f"[Background Task Fallback] gemini-2.5-flash overloaded (503): {e}. Falling back to gemini-2.5-pro...")
-            response = _call_gemini_with_retry(
-                client=client,
-                model="gemini-2.5-pro",
-                contents=contents,
-                config=config,
-                max_retries=3,
-                base_delay=2
-            )
-            
+        response = chat_generate_with_retry(
+            contents=contents,
+            config=config,
+            max_retries=3,
+            base_delay=2,
+            max_tokens=8192,
+        )
+
         response_text = response.text or ""
         clean_text = response_text.strip()
         if clean_text.startswith("```"):
@@ -8761,9 +10195,17 @@ def sync_document_generation_task(
                             parsed = _json.loads(clean_t[:last_brace + 1] + ']')
                         except Exception:
                             pass
-            
+
             if parsed is None:
-                raise ValueError("Could not parse or salvage valid JSON from LLM extraction response.")
+                # Lenient fallback: tolerate ```json fences / prose around the JSON
+                # (gpt-oss-120b habit) before declaring a parse failure.
+                try:
+                    parsed = parse_llm_json(text_to_parse)
+                except LLMJsonParseError:
+                    parsed = None
+
+            if parsed is None:
+                raise LLMJsonParseError("Could not parse or salvage valid JSON from LLM extraction response.")
             
             # Phase 0b: Check for STRUCTURAL_HALT from LLM
             if isinstance(parsed, dict) and "STRUCTURAL_HALT" in parsed:
@@ -8807,16 +10249,52 @@ def sync_document_generation_task(
                                     elif ok.lower() == "sor":
                                         row["explicit_Sor"] = float(ov)
                 return data_list
-            return parsed if isinstance(parsed, list) else []
+            if isinstance(parsed, list):
+                return parsed
+            # A dict without extracted_data used to become [] -> zero rows -> "PASS 100%".
+            raise ValueError("LLM extraction JSON has no 'extracted_data' array")
 
         try:
             extracted_json = salvage_and_clean_json(clean_text)
+        except LLMJsonParseError as je:
+            # Pure parse failure (NOT a structural/permeability halt): re-prompt
+            # ONCE with a corrective instruction, then parse again.
+            _logger.warning(f"[BgTask] Extraction JSON unparseable ({je}); one corrective retry...")
+            retry_contents = list(contents) + [
+                genai_types.Content(role="model", parts=[genai_types.Part.from_text(text=response_text[:4000])]),
+                genai_types.Content(role="user", parts=[genai_types.Part.from_text(text=CORRECTIVE_JSON_PROMPT)]),
+            ]
+            try:
+                response = chat_generate_with_retry(
+                    contents=retry_contents,
+                    config=config,
+                    max_retries=2,
+                    base_delay=2,
+                    max_tokens=8192,
+                )
+                response_text = response.text or ""
+                clean_text = response_text.strip()
+                if clean_text.startswith("```"):
+                    _lines = clean_text.splitlines()
+                    if _lines and _lines[0].startswith("```"):
+                        _lines = _lines[1:]
+                    if _lines and _lines[-1].startswith("```"):
+                        _lines = _lines[:-1]
+                    clean_text = "\n".join(_lines).strip()
+                clean_text = strip_thinking_blocks(clean_text)
+                extracted_json = salvage_and_clean_json(clean_text)
+            except Exception as je2:
+                raise ValueError(f"Failed to parse LLM extraction output as JSON (after one corrective retry): {je2}")
         except Exception as je:
-            raise ValueError(f"Failed to parse Gemini extraction output as JSON: {je}")
+            raise ValueError(f"Failed to parse LLM extraction output as JSON: {je}")
                 
         def merge_and_deduplicate_sweeps(samples):
-            if not samples or not isinstance(samples, list): return []
-            samples = [s for s in samples if isinstance(s, dict)]
+            if not isinstance(samples, list):
+                raise ValueError(f"extracted data is {type(samples).__name__}, not a list of rows")
+            kept = [s for s in samples if isinstance(s, dict)]
+            if len(kept) != len(samples):
+                _warn("extraction", f"{len(samples) - len(kept)} non-object row(s) dropped from extracted_data")
+            samples = kept
             if not samples: return []
             sweeps = []
             current_sweep = []
@@ -8857,41 +10335,66 @@ def sync_document_generation_task(
             return result
 
         extracted_json = merge_and_deduplicate_sweeps(extracted_json)
+        if not extracted_json:
+            # validate_scal_data() passes an empty list; a report of nothing must not
+            # be audited as "PASS 100%".
+            raise ValueError("extraction produced zero data rows — nothing to audit or report")
         TASKS_DB[session_id].update({"progress": 30})
-        
+
         # Progress 30-70%: Physics Audit, DB Inserts, isolated geomech md, dashboard and plots
         validation_result = data_validator.validate_scal_data(extracted_json)
         physics_score = 100
         physics_status = "PASS"
         violations = []
-        
+        physics_warnings = list(validation_result.get("warnings") or [])
+
         if validation_result.get("status") == "error":
             physics_status = "FAIL"
             physics_score = max(0, 100 - 15 * len(validation_result.get("errors", [])))
             violations = validation_result.get("errors", [])
-            
+        elif physics_warnings:
+            physics_status = "PASS_WITH_WARNINGS"
+            _warn("physics", f"{len(physics_warnings)} validation warning(s): {'; '.join(physics_warnings[:3])}")
+
         detected_type = detect_test_type(extracted_json)
-        _log_physics_audit(
+        if not _log_physics_audit(
             sid=session_id,
             data_type=detected_type,
-            audit_res={"score": physics_score, "violations": violations},
+            audit_res={"score": physics_score, "violations": violations, "warnings": physics_warnings},
             file_name=filename
-        )
+        ):
+            _warn("physics-audit-not-logged", f"{detected_type}: ledger insert failed")
         
         TASKS_DB[session_id].update({"progress": 40})
         
-        from prc_physics import calculate_compressibility_sweep, enrich_json_with_brooks_corey
+        from prc_physics import (EndpointProvenanceError, calculate_compressibility_sweep,
+                                 enrich_json_with_brooks_corey, fit_brooks_corey,
+                                 provenance_notice)
         try:
             extracted_json = calculate_compressibility_sweep(extracted_json)
-            extracted_json = enrich_json_with_brooks_corey(extracted_json)
+            try:
+                extracted_json = enrich_json_with_brooks_corey(extracted_json)
+                _bc_notice = provenance_notice(fit_brooks_corey(extracted_json))
+            except EndpointProvenanceError as bc_exc:
+                # Endpoints could not be measured or fitted. Refuse to attach numbers,
+                # and record why so the notice reaches the LLM context and the .docx.
+                _logger.error("[BrooksCorey] refusing to substitute endpoints: %s", bc_exc)
+                _bc_notice = (
+                    "BROOKS-COREY PARAMETER PROVENANCE:\n"
+                    "  REFUSED: Brooks-Corey parameters were NOT computed for this upload. "
+                    f"{bc_exc}"
+                )
+            db("INSERT INTO m (sid,role,text,ts,user_email) VALUES (?,?,?,?,?)",
+               (session_id, "model", _bc_notice, time.time() - 1.5, email))
         except Exception as pe:
-            _logger.warning(f"Error during deterministic physics calculation in bg: {pe}")
-            
+            # Compressibility sweep / Brooks-Corey enrichment / notice row skipped.
+            _warn("physics", f"deterministic enrichment skipped: {type(pe).__name__}: {pe}")
+
         TASKS_DB[session_id].update({"progress": 45})
         
         # Insert consecutively in DB
-        db("INSERT INTO m (sid,role,text,ts,user_email,fname) VALUES (?,?,?,?,?,?)",
-           (session_id, "user", msg, time.time() - 2.0, email, filename))
+        db("INSERT INTO m (sid,role,text,ts,user_email,fname,file_hash) VALUES (?,?,?,?,?,?,?)",
+           (session_id, "user", msg, time.time() - 2.0, email, filename, fhash))
            
         violations_str = "\n".join(f"- {v}" for v in violations) if violations else "No physical violations found."
         audit_text = f"PHYSICS HEALTH AUDIT: {physics_score}% | STATUS: {physics_status}\n{violations_str}"
@@ -8926,13 +10429,17 @@ def sync_document_generation_task(
            (session_id, "model", plot_text, time.time(), email))
            
         TASKS_DB[session_id].update({"progress": 55})
-        
+
+        import os as _os
         base_dir = _os.path.dirname(_os.path.abspath(__file__))
         outputs_dir = _os.path.join(base_dir, "outputs", session_id)
         _os.makedirs(outputs_dir, exist_ok=True)
         
-        active_key = GEMINI_KEY_POOL[0]
-        master_eng = MasterEngineerNode(api_key=active_key)
+        # Master Engineer analysis runs on NVIDIA NIM via the injected llm_call
+        # (sovereign path). The Gemini key is only kept as a legacy fallback
+        # client inside the node; with DUMMY_KEY the node degrades to its
+        # offline analysis text instead of crashing.
+        master_eng = MasterEngineerNode(llm_call=chat_text_generate)
         engineer_report = master_eng.analyze_scal_data(extracted_json)
         
         report_path = _os.path.join(outputs_dir, "reservoir_report.md")
@@ -8970,22 +10477,23 @@ def sync_document_generation_task(
                 (email, filename, _fhash_store, fr_text, "SCAL", time.time()),
             )
         except Exception as _ufe:
-            _logger.warning(f"Could not log file to user_files in bg task: {_ufe}")
-            
+            _warn("user-files", f"file history record not written: {type(_ufe).__name__}: {_ufe}")
+
         TASKS_DB[session_id].update({"progress": 70})
-        
+
         start_time = time.time()
-        filename_report = PRCReportEngine().generate(session_id, well_name)
+        filename_report = PRCReportEngine(db_path=DB_PATH).generate(session_id, well_name, output_dir=str(PRC_VAULT))
         duration = time.time() - start_time
         with _REPORT_LATENCY_LOCK:
             _REPORT_LATENCY_LIST.append(duration)
-            
+
+        # 'success' only when every gate ran; a skipped gate makes the run 'partial'.
         TASKS_DB[session_id].update({
-            "status": "success",
+            "status": "partial" if TASKS_DB[session_id].get("warnings") else "success",
             "progress": 100,
             "result": f"/api/report/download/{filename_report}"
         })
-        
+
     except Exception as e:
         _logger.error(f"[BgTask] Failed document generation task for {session_id}: {e}", exc_info=True)
         if session_id in TASKS_DB:
@@ -9005,7 +10513,7 @@ def async_report_compile_task(session_id: str, well_name: str):
     try:
         TASKS_DB[session_id]["progress"] = 30
         start_time = time.time()
-        filename = PRCReportEngine().generate(session_id, well_name)
+        filename = PRCReportEngine(db_path=DB_PATH).generate(session_id, well_name, output_dir=str(PRC_VAULT))
         duration = time.time() - start_time
         with _REPORT_LATENCY_LOCK:
             _REPORT_LATENCY_LIST.append(duration)
@@ -9024,11 +10532,21 @@ def async_report_compile_task(session_id: str, well_name: str):
         })
 
 
-@app.post("/api/report/generate")
+@app.post(
+    "/api/report/generate",
+    description="Generate petrophysical conclusion and interpret SCAL report insights.",
+    responses={
+        429: {"description": "Rate limit exceeded"},
+        500: {"description": "Internal server error"}
+    }
+)
+@_limiter.limit("10/minute")
 async def generate_report(
+    request: Request,
     background_tasks: BackgroundTasks,
     session_id: str = Form(...),
     well_name:  str = Form("UNKNOWN WELL"),
+    auth:       bool = Depends(verify_user_or_admin),
 ):
     # Path traversal prevention using regex
     if not re.match(r"^(report-)?[a-zA-Z0-9\-]+$", session_id):
@@ -9055,8 +10573,17 @@ async def generate_report(
     )
 
 
-@app.post("/api/v1/analyze-scal")
+@app.post(
+    "/api/v1/analyze-scal",
+    description="Analyze uploaded SCAL spreadsheet or file, returning parameters and starting session.",
+    responses={
+        429: {"description": "Rate limit exceeded"},
+        500: {"description": "Internal server error"}
+    }
+)
+@_limiter.limit("10/minute")
 async def analyze_scal(
+    request: Request,
     background_tasks: BackgroundTasks,
     file: UploadFile = File(...),
     session_id: Optional[str] = Form(None),
@@ -9065,6 +10592,7 @@ async def analyze_scal(
     authorization: Optional[str] = Header(None),
     token: Optional[str] = Query(None),
 ):
+    temp_file_path = None
     try:
         verify_user_or_admin(authorization=authorization, token=token, user_email=user_email)
         sid = session_id or str(uuid.uuid4())
@@ -9072,51 +10600,13 @@ async def analyze_scal(
         # Destructive memory eviction protocol on new file ingestion
         evict_session(sid)
 
-        # Save the incoming UploadFile to a temporary location safely
-        import tempfile
-        from pathlib import Path
-        
-        with tempfile.NamedTemporaryFile(delete=False, suffix=Path(file.filename).suffix) as tmp:
-            tmp.write(await file.read())
-            tmp_path = tmp.name
-            
-        # Run the absolute truth extractor to convert spreadsheet rows into string context
-        from scal_file_handler import extract_absolute_file_truth
-        loop = asyncio.get_running_loop()
-        ground_truth_string = await loop.run_in_executor(None, extract_absolute_file_truth, [(tmp_path, file.filename)])
-        
-        # HYDRATE THE ACTIVE CHAT CACHE NATIVELY BEFORE ANY UTILITY RUNS
-        with SESSION_DATA_CACHE_LOCK:
-            if sid not in SESSION_DATA_CACHE:
-                SESSION_DATA_CACHE[sid] = {}
-            SESSION_DATA_CACHE[sid]["ground_truth"] = ground_truth_string
-            # Initialize labeled values if missing to ensure completeness gate passes
-            if "labeled_values" not in SESSION_DATA_CACHE[sid]:
-                SESSION_DATA_CACHE[sid]["labeled_values"] = {}
-                
-        # Also populate labeled values and flat vectors synchronously to prevent fitters from aborting
-        populate_cache_from_ground_truth(sid, ground_truth_string)
-        ext_lower = Path(file.filename).suffix.lower()
-        if ext_lower in ('.xlsx', '.xlsm', '.xls', '.ods', '.csv'):
-            await loop.run_in_executor(None, cache_excel_data_vectors, sid, tmp_path)
-                
-        # Clean up the temporary file from the disk
-        try:
-            import os
-            os.unlink(tmp_path)
-        except Exception:
-            pass
-
-        # Reset file stream pointer so subsequent reads work perfectly
-        await file.seek(0)
-
+        filename = sanitize_filename(file.filename)
         email = normalize_email(user_email)
         if not email and sid:
             row = db("SELECT user_email FROM sessions WHERE sid=?", (sid,))
             if row and row[0][0]:
                 email = row[0][0].lower().strip()
         msg = (message or "Analyze petrophysical data from uploaded file.").strip()
-        filename = sanitize_filename(file.filename)
 
         # Synchronously insert session row before report generation
         if _PG_AVAILABLE:
@@ -9137,29 +10627,48 @@ async def analyze_scal(
         # Path traversal prevention using regex
         if not re.match(r"^(report-)?[a-zA-Z0-9\-]+$", sid):
             raise HTTPException(status_code=400, detail="Invalid session_id format.")
-            
-        # Signature verification (prevent invalid files)
-        sig_bytes = await file.read(1024)
-        await file.seek(0)
-        if not verify_file_signature(sig_bytes, filename):
-            raise HTTPException(status_code=400, detail=f"File signature mismatch or invalid format for extension: {filename}")
-            
+
         # Setup isolated temp file paths
+        import tempfile
+        from pathlib import Path
         ext = Path(filename.lower()).suffix
         temp_file = tempfile.NamedTemporaryFile(delete=False, suffix=ext)
         temp_file_path = temp_file.name
         temp_file.close()
-        
+
         # Safe streaming of file chunked to temp path
-        try:
-            await process_large_file_stream(file, temp_file_path, _MAX_UPLOAD_BYTES)
-        except Exception as se:
-            try:
-                Path(temp_file_path).unlink(missing_ok=True)
-            except Exception:
-                pass
-            raise se
-            
+        await process_large_file_stream(file, temp_file_path, _MAX_UPLOAD_BYTES)
+
+        # Signature verification (prevent invalid files) from temp file
+        with open(temp_file_path, "rb") as f:
+            sig_bytes = f.read(1024)
+        if not verify_file_signature(sig_bytes, filename):
+            raise HTTPException(status_code=400, detail=f"File signature mismatch or invalid format for extension: {filename}")
+
+        # Run the absolute truth extractor to convert spreadsheet rows into string context
+        from scal_file_handler import extract_absolute_file_truth
+        loop = asyncio.get_running_loop()
+        ground_truth_string = await loop.run_in_executor(None, extract_absolute_file_truth, [(temp_file_path, file.filename)])
+        
+        # Calculate file content hash
+        with open(temp_file_path, "rb") as f:
+            fhash = hashlib.sha256(f.read()).hexdigest()
+
+        # HYDRATE THE ACTIVE CHAT CACHE NATIVELY BEFORE ANY UTILITY RUNS
+        with SESSION_DATA_CACHE_LOCK:
+            if fhash not in SESSION_DATA_CACHE:
+                SESSION_DATA_CACHE[fhash] = {}
+            SESSION_DATA_CACHE[fhash]["ground_truth"] = ground_truth_string
+            # Initialize labeled values if missing to ensure completeness gate passes
+            if "labeled_values" not in SESSION_DATA_CACHE[fhash]:
+                SESSION_DATA_CACHE[fhash]["labeled_values"] = {}
+                
+        # Also populate labeled values and flat vectors synchronously to prevent fitters from aborting
+        populate_cache_from_ground_truth(fhash, ground_truth_string)
+        ext_lower = Path(file.filename).suffix.lower()
+        if ext_lower in ('.xlsx', '.xlsm', '.xls', '.ods', '.csv'):
+            await loop.run_in_executor(None, cache_excel_data_vectors, fhash, temp_file_path)
+
         # Initialize task record in TASKS_DB
         TASKS_DB[sid] = {
             "status": "queued",
@@ -9188,8 +10697,14 @@ async def analyze_scal(
             }
         )
     except HTTPException as he:
+        if temp_file_path:
+            try: Path(temp_file_path).unlink(missing_ok=True)
+            except Exception: pass
         raise he
     except Exception as e:
+        if temp_file_path:
+            try: Path(temp_file_path).unlink(missing_ok=True)
+            except Exception: pass
         _logger.error(f"[AnalyzeSCAL] Failed: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -9201,22 +10716,19 @@ async def get_task_status(
     authorization: Optional[str] = Header(None),
     token: Optional[str] = Query(None),
 ):
-    try:
-        verify_user_or_admin(authorization=authorization, token=token, email_query=user_email)
-        if "\x00" in session_id:
-            raise HTTPException(status_code=400, detail="Null bytes are strictly prohibited.")
-        # Path traversal prevention using regex check
-        if not re.match(r"^(report-)?[a-zA-Z0-9\-]+$", session_id):
-            raise HTTPException(status_code=400, detail="Invalid session_id format.")
-            
-        if session_id not in TASKS_DB:
-            raise HTTPException(status_code=404, detail="Task not found or expired.")
-            
-        return TASKS_DB[session_id]
-    except HTTPException as he:
-        raise he
-    except Exception as e:
-        raise HTTPException(status_code=400, detail=f"Invalid session identifier: {str(e)}")
+    # No catch-all: a server-side failure (auth helper crash, ...) is a 500,
+    # not a 400 "Invalid session identifier" blamed on the caller.
+    verify_user_or_admin(authorization=authorization, token=token, email_query=user_email)
+    if "\x00" in session_id:
+        raise HTTPException(status_code=400, detail="Null bytes are strictly prohibited.")
+    # Path traversal prevention using regex check
+    if not re.match(r"^(report-)?[a-zA-Z0-9\-]+$", session_id):
+        raise HTTPException(status_code=400, detail="Invalid session_id format.")
+
+    if session_id not in TASKS_DB:
+        raise HTTPException(status_code=404, detail="Task not found or expired.")
+
+    return TASKS_DB[session_id]
 
 
 @app.get("/api/report/download/{filename}")
@@ -9226,32 +10738,37 @@ async def download_report(
     authorization: Optional[str] = Header(None),
     token: Optional[str] = Query(None),
 ):
-    try:
-        verify_user_or_admin(authorization=authorization, token=token, email_query=user_email)
-        # Clean null bytes immediately (CWE-22)
-        if "\x00" in filename:
-            raise HTTPException(status_code=400, detail="Null bytes are strictly prohibited.")
-            
-        # Serve from the reports/ subdirectory with path-containment guard (CWE-22)
-        reports_root = Path.cwd() / "reports"
-        target = (reports_root / Path(filename).name).resolve()
+    # No catch-all: filesystem/auth failures are 500s, not 400 "Invalid path parameters".
+    verify_user_or_admin(authorization=authorization, token=token, email_query=user_email)
+    # Clean null bytes immediately (CWE-22)
+    if "\x00" in filename:
+        raise HTTPException(status_code=400, detail="Null bytes are strictly prohibited.")
 
-        if not str(target).startswith(str(reports_root.resolve())):
-            raise HTTPException(status_code=403, detail="Access denied")
+    # Serve from the shared PRC vault with path-containment guard (CWE-22)
+    reports_root = PRC_VAULT
+    target = (reports_root / Path(filename).name).resolve()
 
-        if not target.is_file():
-            raise HTTPException(status_code=404, detail="Report not found")
+    if not str(target).startswith(str(reports_root.resolve())):
+        raise HTTPException(status_code=403, detail="Access denied")
 
-        return FileResponse(str(target), filename=Path(filename).name)
-    except HTTPException as he:
-        raise he
-    except Exception as e:
-        raise HTTPException(status_code=400, detail=f"Invalid path parameters: {str(e)}")
+    if not target.is_file():
+        raise HTTPException(status_code=404, detail="Report not found")
+
+    return FileResponse(str(target), filename=Path(filename).name)
 
 # -- GRADER ------------------------------------------------------------------
 
-@app.post("/api/grade")
+@app.post(
+    "/api/grade",
+    description="Grade AI responses against authoritative documents uploaded.",
+    responses={
+        429: {"description": "Rate limit exceeded"},
+        500: {"description": "Internal server error"}
+    }
+)
+@_limiter.limit("10/minute")
 async def api_grade_response(
+    request: Request,
     file:        UploadFile = File(...),
     ai_response: str        = Form(...),
     user_email:  Optional[str] = Form(None),
@@ -9261,7 +10778,17 @@ async def api_grade_response(
     verify_user_or_admin(authorization=authorization, token=token, user_email=user_email)
     import tempfile
     file.filename = sanitize_filename(file.filename)
-    file_bytes = await file.read()
+    max_bytes = _MAX_UPLOAD_BYTES
+    chunk_size = 64 * 1024
+    content = bytearray()
+    while True:
+        chunk = await file.read(chunk_size)
+        if not chunk:
+            break
+        content.extend(chunk)
+        if len(content) > max_bytes:
+            raise HTTPException(status_code=413, detail="File size exceeds maximum allowed limit.")
+    file_bytes = bytes(content)
     if not verify_file_signature(file_bytes, file.filename):
         raise HTTPException(status_code=400, detail=f"File signature mismatch or invalid format for extension: {file.filename}")
     ext = Path(file.filename).suffix.lower() or ".xlsx"
@@ -9280,14 +10807,141 @@ async def api_grade_response(
     except Exception as e:
         _logger.error(f"[Grader] {e}")
         raise HTTPException(status_code=500, detail=str(e))
-    finally:
-        try: Path(tmp_path).unlink(missing_ok=True)
-        except Exception: pass
+# Calibrate is a public-facing compute route (C1 puts it on the front line).
+# A real SCAL Kr/Archie sweep is tens of points; cap the arrays well above that
+# so an oversized paste is rejected at the request boundary (before np.array /
+# the fit) rather than allocating/fitting a huge vector — the B3 pattern.
+MAX_SCAL_CALIBRATION_POINTS = 500
 
 
+class ScalCalibrateRequest(BaseModel):
+    # Brooks-Corey points
+    sw: Optional[list[float]] = Field(None, max_length=MAX_SCAL_CALIBRATION_POINTS)
+    krw: Optional[list[float]] = Field(None, max_length=MAX_SCAL_CALIBRATION_POINTS)
+    kro: Optional[list[float]] = Field(None, max_length=MAX_SCAL_CALIBRATION_POINTS)
+    swi: float = 0.15
+    sor: float = 0.2
+    krw_max: float = 0.5
+    kro_max: float = 0.8
+
+    # Archie points
+    porosity: Optional[list[float]] = Field(None, max_length=MAX_SCAL_CALIBRATION_POINTS)
+    formation_factor: Optional[list[float]] = Field(None, max_length=MAX_SCAL_CALIBRATION_POINTS)
+
+    basin_name: Optional[str] = "Default"
 
 
-# â"€â"€ FRONTEND SERVING (SPA) â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€
+@app.post("/api/scal/calibrate")
+def scal_calibrate(req: ScalCalibrateRequest,
+                   auth: bool = Depends(verify_user_or_admin_bearer)):
+    import numpy as np
+    from petrophysical_curves import Endpoints, KrCurveFitter
+    from physics_validator import PhysicsGuard
+    
+    # Check if we are calibrating Archie
+    if req.porosity is not None and req.formation_factor is not None:
+        phi_arr = np.array(req.porosity)
+        ff_arr = np.array(req.formation_factor)
+        # Avoid zeros/negatives
+        valid = (phi_arr > 0) & (ff_arr > 0)
+        if np.sum(valid) < 2:
+            # A default (a=1, m=2) returned as a fit — and audited as one — is a
+            # signal that cannot be false; refuse instead.
+            raise HTTPException(
+                status_code=400,
+                detail=f"Archie fit needs at least 2 points with porosity > 0 and formation factor > 0 (got {int(np.sum(valid))})",
+            )
+        x = np.log(phi_arr[valid])
+        y = np.log(ff_arr[valid])
+        slope, intercept = np.polyfit(x, y, 1)
+        m_fit = -slope
+        a_fit = np.exp(intercept)
+
+        guard = PhysicsGuard()
+        guard.validate_archie_parameters(a=a_fit, m=m_fit, b=1.0, n=2.0, basin_name=req.basin_name)
+        audit = guard.generate_health_score()
+        
+        # Build coordinates for the fitted line
+        phi_line = np.linspace(0.01, 0.4, 50)
+        ff_line = a_fit * (phi_line ** -m_fit)
+        
+        return {
+            "type": "archie",
+            "a": float(a_fit),
+            "m": float(m_fit),
+            "phi_line": phi_line.tolist(),
+            "ff_line": ff_line.tolist(),
+            "physics_audit": audit
+        }
+        
+    # Relative permeability calibration
+    if req.sw is not None and req.krw is not None and req.kro is not None:
+        sw_arr = np.array(req.sw)
+        krw_arr = np.array(req.krw)
+        kro_arr = np.array(req.kro)
+        
+        ep = Endpoints(
+            Swi=req.swi,
+            Sor=req.sor,
+            Krw_max=req.krw_max,
+            Kro_max=req.kro_max
+        )
+        
+        fitter = KrCurveFitter(ep)
+        bc_res = fitter.fit_brooks_corey(sw_arr, krw_arr, kro_arr)
+        plot_data = fitter.to_plot_json(sw_arr, krw_arr, kro_arr, model="brooks_corey", fit_result=bc_res)
+        
+        guard = PhysicsGuard()
+        guard.validate_kr(sw_arr, krw_arr, kro_arr)
+        audit = guard.generate_health_score()
+        
+        plot_data["metadata"] = plot_data.get("metadata", {})
+        plot_data["metadata"]["physics_audit"] = audit
+        # Provenance of nw/no: the fitter returns the default (2.0, 2.0) when no
+        # point lies strictly inside (Swi, 1-Sor); derive that from the same
+        # check, and carry the r2 so a caller can see how good a real fit was.
+        # The fitter substitutes its log-linear estimate when curve_fit fails and
+        # exposes no flag for that, so the label must not claim curve_fit alone.
+        fitted = bool(np.any((sw_arr > ep.Swi) & (sw_arr < ep.Sw_max)))
+        plot_data["metadata"].setdefault("fit_params", {}).update({
+            "fitted": fitted,
+            "source": ("interior-point fit (curve_fit, or the log-linear estimate when curve_fit fails)"
+                       if fitted else "default (no interior Sw points)"),
+            "r2_krw": bc_res.r2_krw,
+            "r2_kro": bc_res.r2_kro,
+        })
+        plot_data["type"] = "kr"
+
+        return plot_data
+
+    raise HTTPException(status_code=400, detail="Missing coordinate inputs for calibration.")
+
+
+class BasinRuleModel(BaseModel):
+    basin_name: str
+    rule_key: str
+    min_limit: float
+    max_limit: float
+
+
+@app.get("/api/admin/rules")
+def get_admin_rules(auth: bool = Depends(verify_admin)):
+    rows = db("SELECT basin_name, rule_key, min_limit, max_limit FROM basin_physics_rules")
+    return [{"basin_name": r[0], "rule_key": r[1], "min_limit": r[2], "max_limit": r[3]} for r in rows]
+
+
+@app.post("/api/admin/rules")
+def post_admin_rule(req: BasinRuleModel, auth: bool = Depends(verify_admin)):
+    db(
+        "INSERT INTO basin_physics_rules (basin_name, rule_key, min_limit, max_limit) "
+        "VALUES (?, ?, ?, ?) "
+        "ON CONFLICT(basin_name, rule_key) DO UPDATE SET min_limit=excluded.min_limit, max_limit=excluded.max_limit",
+        (req.basin_name, req.rule_key, req.min_limit, req.max_limit)
+    )
+    return {"status": "success"}
+
+
+# ── FRONTEND SERVING (SPA) ──â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€
 
 _DIST_DIR = str(Path(__file__).parent / "frontend" / "dist")
 
@@ -9337,7 +10991,7 @@ async def serve_spa(full_path: str):
 
     # This prevents returning index.html (200 OK) for ../app.py or other system files.
 
-    if "." in _pathlib.Path(full_path).name:
+    if "." in Path(full_path).name:
 
         raise HTTPException(status_code=404, detail="File not found")
 
@@ -9359,8 +11013,13 @@ if __name__ == "__main__":
 
     import uvicorn
 
+    # `python app.py` is a real server launch (its launcher is app.py, not
+    # uvicorn), so force the auth-bypass invariant here too.
+    assert_auth_bypass_disabled_in_production(force=True)
+    assert_no_cloud_llm_with_private_db()
+
     init_db()
 
-    uvicorn.run(app, host="0.0.0.0", port=8001)
+    uvicorn.run(app, host="0.0.0.0", port=8000)
 
 

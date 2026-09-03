@@ -1,0 +1,12 @@
+{
+  "name": "timeout_no_fallback",
+  "description": "C1's no-fallback path, offline: the model times out on every attempt. scal must produce NO answer — chat() raises after its 5 attempts; the /api/chat route (which retries transient errors 5x on top, so 25 provider attempts per request — a retry budget this scenario exposes) returns status 'error' with a processing-error reply and zero fitted-parameter shapes — and must not try another provider or invent anything.",
+  "on_exhausted": "error",
+  "steps": [
+    {"timeout": {"after": 300.0}}, {"timeout": {"after": 300.0}}, {"timeout": {"after": 300.0}}, {"timeout": {"after": 300.0}}, {"timeout": {"after": 300.0}},
+    {"timeout": {"after": 300.0}}, {"timeout": {"after": 300.0}}, {"timeout": {"after": 300.0}}, {"timeout": {"after": 300.0}}, {"timeout": {"after": 300.0}},
+    {"timeout": {"after": 300.0}}, {"timeout": {"after": 300.0}}, {"timeout": {"after": 300.0}}, {"timeout": {"after": 300.0}}, {"timeout": {"after": 300.0}},
+    {"timeout": {"after": 300.0}}, {"timeout": {"after": 300.0}}, {"timeout": {"after": 300.0}}, {"timeout": {"after": 300.0}}, {"timeout": {"after": 300.0}},
+    {"timeout": {"after": 300.0}}, {"timeout": {"after": 300.0}}, {"timeout": {"after": 300.0}}, {"timeout": {"after": 300.0}}, {"timeout": {"after": 300.0}}
+  ]
+}

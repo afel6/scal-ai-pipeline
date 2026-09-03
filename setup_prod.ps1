@@ -48,11 +48,9 @@ Write-Host "      Build successful." -ForegroundColor Green
 # ── 4. Print git commands ──────────────────────────────────────────────────────
 Write-Host "`n[4/4] Ready to push. Run the following git commands:" -ForegroundColor Yellow
 Write-Host ""
-Write-Host "  git add app.py simulation_core.py requirements.txt render.yaml setup_prod.ps1" -ForegroundColor White
-Write-Host "  git add hermes_skills_library/petroleum/simulator/simulation_core.py" -ForegroundColor White
 Write-Host "  git add frontend/dist/" -ForegroundColor White
 Write-Host "  git status" -ForegroundColor White
-Write-Host "  git commit -m 'chore: production hardening + fresh frontend build'" -ForegroundColor White
-Write-Host "  git push origin main" -ForegroundColor White
+Write-Host "  git commit -m 'chore: fresh frontend build'" -ForegroundColor White
+Write-Host "  git push origin master" -ForegroundColor White
 Write-Host ""
 Write-Host "Render will auto-deploy on push. Monitor at: https://dashboard.render.com" -ForegroundColor Cyan

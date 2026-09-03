@@ -15,6 +15,7 @@ __pycache__/
 
 # Database files — keep local only
 *.db
+*.sqlite
 *.sqlite3
 
 # Generated reports
@@ -27,8 +28,17 @@ frontend/node_modules/
 
 # Temp files
 *.log
+logs/
+backups/
 .DS_Store
 Thumbs.db
+
+# Tool caches / editors
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.vscode/
+.idea/
 
 .vercel
 .env*.local
@@ -46,6 +56,7 @@ venv_313/
 scratch/
 outputs/
 startup_*.txt
+frontend/studio-verification.png
 hermes_skills_library/
 # But the runtime petroleum skill scripts (executed by skills_engine.py) MUST stay tracked.
 # Git will not descend into an ignored DIRECTORY, so re-including files inside it requires
@@ -70,3 +81,10 @@ PRC_XLSX_*
 *.bak
 *.original.bak
 
+# Generated reports and local uploads
+uploads/
+vault_backups/
+test_generated/
+reports/
+# report/deck export directory (PRC_AI_VAULT default)
+vault/

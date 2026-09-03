@@ -27,7 +27,7 @@
 import json
 import os
 import textwrap
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional
 
 # ── SCAL Test Type Detection ─────────────────────────────────────────────────
 
@@ -461,26 +461,26 @@ class UniversalDashboardArchitect:
                 # If we have a range, emit a gauge
                 if safe_range and isinstance(val, (int, float)):
                     lo, hi = safe_range
-                    lines.append(f'    try:')
-                    lines.append(f'        fig_g = go.Figure(go.Indicator(')
-                    lines.append(f'            mode="gauge+number",')
+                    lines.append('    try:')
+                    lines.append('        fig_g = go.Figure(go.Indicator(')
+                    lines.append('            mode="gauge+number",')
                     lines.append(f'            value={val},')
                     lines.append(f'            title={{"text": "{label} ({unit})"}},')
-                    lines.append(f'            gauge={{')
+                    lines.append('            gauge={')
                     lines.append(f'                "axis": {{"range": [{lo}, {hi}]}},')
-                    lines.append(f'                "bar": {{"color": "#0F4C81"}},')
-                    lines.append(f'                "steps": [')
+                    lines.append('                "bar": {"color": "#0F4C81"},')
+                    lines.append('                "steps": [')
                     # Tri-color gauge segments
                     third = (hi - lo) / 3
                     lines.append(f'                    {{"range": [{lo}, {lo + third}], "color": "#d4edda"}},')
                     lines.append(f'                    {{"range": [{lo + third}, {lo + 2 * third}], "color": "#fff3cd"}},')
                     lines.append(f'                    {{"range": [{lo + 2 * third}, {hi}], "color": "#f8d7da"}},')
-                    lines.append(f'                ],')
-                    lines.append(f'            }},')
-                    lines.append(f'        ))')
-                    lines.append(f'        fig_g.update_layout(height=250, margin=dict(t=50, b=10, l=30, r=30))')
-                    lines.append(f'        st.plotly_chart(fig_g, use_container_width=True)')
-                    lines.append(f'    except Exception as _e:')
+                    lines.append('                ],')
+                    lines.append('            },')
+                    lines.append('        ))')
+                    lines.append('        fig_g.update_layout(height=250, margin=dict(t=50, b=10, l=30, r=30))')
+                    lines.append('        st.plotly_chart(fig_g, use_container_width=True)')
+                    lines.append('    except Exception as _e:')
                     lines.append(f'        st.metric("{label}", "{val} {unit}")')
                 else:
                     # Simple st.metric for non-gauge values
@@ -499,29 +499,29 @@ class UniversalDashboardArchitect:
                 if val is not None:
                     meta = _get_meta(wett_col)
                     lines.append(f'\n# Wettability Gauge: {meta["label"]}')
-                    lines.append(f'try:')
-                    lines.append(f'    fig_wett = go.Figure(go.Indicator(')
-                    lines.append(f'        mode="gauge+number+delta",')
+                    lines.append('try:')
+                    lines.append('    fig_wett = go.Figure(go.Indicator(')
+                    lines.append('        mode="gauge+number+delta",')
                     lines.append(f'        value={val},')
                     lines.append(f'        title={{"text": "{meta["label"]}"}},')
-                    lines.append(f'        gauge={{')
-                    lines.append(f'            "axis": {{"range": [-1, 1]}},')
-                    lines.append(f'            "bar": {{"color": "#0F4C81"}},')
-                    lines.append(f'            "steps": [')
-                    lines.append(f'                {{"range": [-1, -0.3], "color": "#f8d7da"}},')
-                    lines.append(f'                {{"range": [-0.3, 0.3], "color": "#fff3cd"}},')
-                    lines.append(f'                {{"range": [0.3, 1.0], "color": "#d4edda"}},')
-                    lines.append(f'            ],')
-                    lines.append(f'            "threshold": {{')
-                    lines.append(f'                "line": {{"color": "red", "width": 3}},')
-                    lines.append(f'                "thickness": 0.8,')
-                    lines.append(f'                "value": 0,')
-                    lines.append(f'            }},')
-                    lines.append(f'        }},')
-                    lines.append(f'    ))')
-                    lines.append(f'    fig_wett.update_layout(height=300, margin=dict(t=60, b=20, l=30, r=30))')
-                    lines.append(f'    st.plotly_chart(fig_wett, use_container_width=True)')
-                    lines.append(f'except Exception as _e:')
+                    lines.append('        gauge={')
+                    lines.append('            "axis": {"range": [-1, 1]},')
+                    lines.append('            "bar": {"color": "#0F4C81"},')
+                    lines.append('            "steps": [')
+                    lines.append('                {"range": [-1, -0.3], "color": "#f8d7da"},')
+                    lines.append('                {"range": [-0.3, 0.3], "color": "#fff3cd"},')
+                    lines.append('                {"range": [0.3, 1.0], "color": "#d4edda"},')
+                    lines.append('            ],')
+                    lines.append('            "threshold": {')
+                    lines.append('                "line": {"color": "red", "width": 3},')
+                    lines.append('                "thickness": 0.8,')
+                    lines.append('                "value": 0,')
+                    lines.append('            },')
+                    lines.append('        },')
+                    lines.append('    ))')
+                    lines.append('    fig_wett.update_layout(height=300, margin=dict(t=60, b=20, l=30, r=30))')
+                    lines.append('    st.plotly_chart(fig_wett, use_container_width=True)')
+                    lines.append('except Exception as _e:')
                     lines.append(f'    st.warning(f"Could not render {meta["label"]} gauge: {{_e}}")')
 
         return "\n".join(lines)

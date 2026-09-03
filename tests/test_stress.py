@@ -2,9 +2,7 @@ import sys
 import os
 import json
 import numpy as np
-import time
 import subprocess
-import pytest
 
 def test_history_matching_noisy_data():
     """TEST 1: Agentic History Matching with Massive Noisy Data"""

@@ -1,0 +1,9 @@
+{
+  "name": "table_cell_fitted_value_success",
+  "description": "A4 defect 2 control: the cache-path RI fit SUCCEEDS (true n = 1.85) and the model reports the matching value in the mandated table cell ('| Archie Saturation Exponent n | 1.850 | - |'). A correct table value must survive the table-aware gate - stripping it would be collateral damage of the '|' separator fix.",
+  "on_exhausted": "error",
+  "steps": [
+    {"assistant": {"text": "", "tool_calls": [{"name": "fit_petrophysical_curve", "args": {"model": "ri", "sample_name": "D2-1"}}]}},
+    {"assistant": {"text": "## 📊 Verified Petrophysical Parameters\n\n| Parameter | Value | Source |\n|---|---|---|\n| Archie Saturation Exponent n | 1.850 | - |\n"}}
+  ]
+}

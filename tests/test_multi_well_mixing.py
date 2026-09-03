@@ -1,4 +1,3 @@
-import pytest
 import pandas as pd
 import numpy as np
 from scal_file_handler import detect_multi_well_mixing

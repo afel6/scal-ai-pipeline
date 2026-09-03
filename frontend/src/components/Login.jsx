@@ -14,19 +14,21 @@ export default function Login({ onLogin, setShowPrivacy, setShowTerms }) {
     try {
       const fd = new FormData();
       fd.append('pin', id);
+      fd.append('name', name);
+      fd.append('email', email);
       const resp = await fetch((import.meta.env.VITE_API_URL || '') + '/api/auth', {
         method: 'POST',
         body: fd
       });
-      
+
       if (resp.ok) {
-        // Track login event
-        const regFd = new FormData();
-        regFd.append('email', email);
-        regFd.append('name', name);
-        fetch((import.meta.env.VITE_API_URL || '') + '/api/register', {method:'POST', body: regFd}).catch(()=>{});
-        
-        onLogin({ name, id, email });
+        const data = await resp.json().catch(() => ({}));
+        if (!data.token) {
+          setError('Invalid MFA Credentials. Access Denied.');
+          setId('');
+          return;
+        }
+        onLogin({ name, id, email, token: data.token });
       } else {
         setError('Invalid MFA Credentials. Access Denied.');
         setId('');

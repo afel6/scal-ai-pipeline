@@ -7,11 +7,9 @@ the critical salvage_and_clean_json override loop fix.
 """
 import os
 import sys
-import json
 import tempfile
 import pytest
 import pandas as pd
-import numpy as np
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 

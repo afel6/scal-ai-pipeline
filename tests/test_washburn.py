@@ -1,7 +1,5 @@
 import pytest
 from prc_physics import calculate_washburn_radius
-from scal_file_handler import SCALFileHandler
-import os
 
 def test_washburn_calculation():
     # Test a typical reservoir pressure of 100 psia
@@ -22,14 +20,13 @@ def test_washburn_calculation():
 
 def test_washburn_boundaries():
     # Test negative pressure raises ValueError
-    with pytest.raises(ValueError, match="Capillary pressure cannot be negative"):
+    with pytest.raises(ValueError, match="positive"):
         calculate_washburn_radius(-5.0)
         
-    # Test zero pressure is handled safely without division by zero crash
-    # 0 is replaced by 1e-9, which results in a huge but safe radius value
-    radius_zero = calculate_washburn_radius(0.0)
-    assert radius_zero > 0
-    assert isinstance(radius_zero, float)
+    # Zero pressure has no pore radius (D3.1): a refusal, not a 1e-9 substitution
+    # that returned a ~10^12 micron "radius".
+    with pytest.raises(ValueError):
+        calculate_washburn_radius(0.0)
 
 def test_washburn_custom_parameters():
     # Test with custom contact angle and IFT

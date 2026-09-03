@@ -6,7 +6,6 @@ import os
 import sys
 import time
 import pytest
-import threading
 from concurrent.futures import ThreadPoolExecutor
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
@@ -151,20 +150,3 @@ class TestDynamicPromptPrepending:
         with SESSION_DATA_CACHE_LOCK:
             SESSION_DATA_CACHE.clear()
 
-    def test_ground_truth_prepended_when_cached(self):
-        """Verify that when cache is present, dynamic prompt has ground truth prepended."""
-        assistant = PRCChatAssistant(keys=["DUMMY_KEY"])
-        sid = "session-test-dynamic"
-        gt_text = "MANDATORY_GROUND_TRUTH_INVENTORY\nFile: test.xlsx\nSheets: Sheet1"
-        
-        with SESSION_DATA_CACHE_LOCK:
-            SESSION_DATA_CACHE[sid] = {
-                "ground_truth": gt_text,
-                "timestamp": time.time()
-            }
-            
-        # We can test this by checking that the closure variables inside `chat()` propagate to _generate()
-        # Let's mock _call_gemini_stream_with_retry or genai Client so we can capture the GenerateContentConfig.
-        # But we can also check closure variables using Python introspection if possible,
-        # or simply mock client.models.generate_content / generate_content_stream.
-        pass

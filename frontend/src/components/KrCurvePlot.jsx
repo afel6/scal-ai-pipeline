@@ -135,6 +135,24 @@ const ValidationBadge = ({ validation }) => {
 const ParamPanel = ({ fit_params, endpoints, archie, jfunction }) => {
   // Archie params (RI / FF)
   if (archie) {
+    // Corrected (unfitted) fit: the backend sends { n: null, fitted: false,
+    // note } — the panel must declare that state visibly, never vanish into a
+    // blank where a number used to be (A3's report_generator lesson).
+    if (archie.fitted === false) {
+      return (
+        <div className="mt-6">
+          <div className="bg-[#0a0a0f] border border-red-900/40 rounded-2xl p-4 max-w-xs">
+            <p className="text-[9px] font-black text-slate-500 uppercase tracking-[0.3em] mb-2">Archie Parameters</p>
+            <p className="text-[11px] font-mono font-black" style={{ color: 'var(--prc-red, #dc2626)' }}>
+              not fitted — outside physical range
+            </p>
+            {archie.note && (
+              <p className="text-[10px] font-mono text-slate-500 mt-2">{archie.note}</p>
+            )}
+          </div>
+        </div>
+      );
+    }
     const rows = [
       archie.n != null && ['n (saturation exp.)', archie.n?.toFixed(4)],
       archie.m != null && ['m (cementation exp.)', archie.m?.toFixed(4)],
@@ -249,20 +267,147 @@ const ParamPanel = ({ fit_params, endpoints, archie, jfunction }) => {
   );
 };
 
+const InteractivePoint = (props) => {
+  const { cx, cy, fill, r, index, curveIdx, onPointDrag, xScale, yScale } = props;
+  
+  const handleMouseDown = (e) => {
+    e.stopPropagation();
+    e.preventDefault();
+    
+    const chartWrapper = document.querySelector('.recharts-wrapper');
+    const svgElement = chartWrapper ? chartWrapper.querySelector('svg') : null;
+    if (!svgElement) return;
+    
+    const onMouseMove = (moveEvent) => {
+      const rect = svgElement.getBoundingClientRect();
+      const xPx = moveEvent.clientX - rect.left;
+      const yPx = moveEvent.clientY - rect.top;
+      
+      try {
+        const domainX = xScale.invert(xPx);
+        const domainY = yScale.invert(yPx);
+        onPointDrag(curveIdx, index, domainX, domainY, false);
+      } catch (err) {
+        console.error("Scale invert failed:", err);
+      }
+    };
+    
+    const onMouseUp = () => {
+      window.removeEventListener('mousemove', onMouseMove);
+      window.removeEventListener('mouseup', onMouseMove);
+      onPointDrag(curveIdx, index, null, null, true);
+    };
+    
+    window.addEventListener('mousemove', onMouseMove);
+    window.addEventListener('mouseup', onMouseUp);
+  };
+
+  return (
+    <circle
+      cx={cx}
+      cy={cy}
+      r={r || 5}
+      fill={fill}
+      stroke="#000"
+      strokeWidth={1.5}
+      onMouseDown={handleMouseDown}
+      style={{ cursor: 'move', pointerEvents: 'all' }}
+    />
+  );
+};
+
+
 // ── MAIN COMPONENT ─────────────────────────────────────────────────────────────
 export default function KrCurvePlot({ plotData }) {
   const [hiddenCurves, setHiddenCurves] = useState(new Set());
   const [isMounted, setIsMounted] = useState(false);
+  const [currentData, setCurrentData] = useState(null);
+  const [seededFrom, setSeededFrom] = useState(undefined);
 
   useEffect(() => {
     const id = requestAnimationFrame(() => setIsMounted(true));
     return () => cancelAnimationFrame(id);
   }, []);
 
-  const data = useMemo(() => {
-    try { return typeof plotData === 'string' ? JSON.parse(plotData) : plotData; }
-    catch { return null; }
-  }, [plotData]);
+  // Seed the editable chart state from the plotData prop during render (React's
+  // "adjusting state on a prop change" pattern) instead of in an effect: an
+  // effect here forces an extra commit + re-render and trips
+  // react-hooks/set-state-in-effect. Drag and calibration edits still update
+  // currentData freely below; re-seeding happens only when plotData changes.
+  if (plotData !== seededFrom) {
+    setSeededFrom(plotData);
+    try {
+      setCurrentData(typeof plotData === 'string' ? JSON.parse(plotData) : plotData);
+    } catch (e) {
+      console.error(e);
+    }
+  }
+
+  const data = currentData;
+
+  const handlePointDrag = (curveIdx, ptIdx, newX, newY, isDragEnd) => {
+    if (!currentData) return;
+
+    if (isDragEnd) {
+      const targetCurve = currentData.curves[curveIdx];
+      const payload = {
+        basin_name: currentData.metadata?.basin_name || 'Default'
+      };
+
+      if (currentData.metadata?.archie) {
+        payload.porosity = targetCurve.data.map(d => d.x);
+        payload.formation_factor = targetCurve.data.map(d => d.y);
+      } else {
+        const krwCurve = currentData.curves.find(c => c.name.toLowerCase().includes('krw') || c.name.toLowerCase().includes('water'));
+        const kroCurve = currentData.curves.find(c => c.name.toLowerCase().includes('kro') || c.name.toLowerCase().includes('oil'));
+        if (krwCurve) {
+          payload.sw = krwCurve.data.map(d => d.x);
+          payload.krw = krwCurve.data.map(d => d.y);
+        }
+        if (kroCurve) {
+          payload.kro = kroCurve.data.map(d => d.y);
+          if (!payload.sw) payload.sw = kroCurve.data.map(d => d.x);
+        }
+      }
+
+      const port = window.location.port === '5174' ? '8000' : window.location.port;
+      fetch(`http://${window.location.hostname}:${port}/api/scal/calibrate`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload)
+      })
+      .then(r => r.json())
+      .then(resData => {
+        setCurrentData(prev => {
+          const next = { ...prev };
+          next.curves = resData.curves || next.curves;
+          if (resData.metadata) {
+            next.metadata = { ...next.metadata, ...resData.metadata };
+          }
+          return next;
+        });
+      })
+      .catch(err => console.error("Calibration error:", err));
+
+      return;
+    }
+
+    // Clamp saturation to [0, 1]
+    const clampedX = Math.max(0, Math.min(1, newX));
+    const clampedY = Math.max(0, newY); // allow FF to go high
+
+    setCurrentData(prev => {
+      const next = { ...prev };
+      const curves = [...next.curves];
+      const curve = { ...curves[curveIdx] };
+      const dataPts = [...curve.data];
+      dataPts[ptIdx] = { ...dataPts[ptIdx], x: clampedX, y: clampedY };
+      curve.data = dataPts;
+      curves[curveIdx] = curve;
+      next.curves = curves;
+      return next;
+    });
+  };
 
   const { lineChartData, lineSeries } = useMemo(() => {
     if (!data?.curves) return { lineChartData: [], lineSeries: [] };
@@ -285,32 +430,15 @@ export default function KrCurvePlot({ plotData }) {
     };
   }, [data]);
 
-  if (!data?.curves) {
-    return null;
-  }
+  // Log-scale flags + the domain memos below are hooks, so they must run on
+  // every render — they cannot sit behind the `!data?.curves` early return.
+  // Each memo guards the null case internally (its value is unused when we bail).
+  const xLog      = !!data?.xAxisLog;
+  const yLog      = !!data?.yAxisLog;
+  const yRightLog = !!data?.yAxisRightLog;
 
-  const meta        = data.metadata || {};
-  const validation  = meta.validation  || {};
-  const fit_params  = meta.fit_params  || {};
-  const endpoints   = meta.endpoints   || {};
-  const archie      = meta.archie      || null;
-  const jfunction   = meta.jfunction   || null;
-  const crossover   = validation.crossover || {};
-  const wettConfig  = WETTABILITY_CONFIG[validation.wettability] || WETTABILITY_CONFIG['indeterminate'];
-
-  // Log-scale flags
-  const xLog      = !!data.xAxisLog;
-  const yLog      = !!data.yAxisLog;
-  const yRightLog = !!data.yAxisRightLog;
-
-  const xTickFmt = xLog ? logTickFmt : linTickFmt;
-  const yTickFmt = yLog ? logTickFmt : linTickFmt;
-  const yRTickFmt = yRightLog ? logTickFmt : linTickFmt;
-
-  const xLabel = data.xAxis?.label || 'x';
-
-  // Dynamic log scale bounds clamps
   const computedXDomain = useMemo(() => {
+    if (!data?.curves) return [0, 'auto'];
     const d = data.xAxis?.domain;
     if (d) {
       if (!xLog) return d;
@@ -321,7 +449,7 @@ export default function KrCurvePlot({ plotData }) {
       }
     }
     if (!xLog) return [0, 'auto'];
-    
+
     let minVal = Infinity;
     let maxVal = -Infinity;
     data.curves.forEach(curve => {
@@ -340,6 +468,7 @@ export default function KrCurvePlot({ plotData }) {
   }, [data, xLog]);
 
   const computedYDomain = useMemo(() => {
+    if (!data?.curves) return [0, 'auto'];
     const d = data.yAxis?.domain;
     if (d) {
       if (!yLog) return d;
@@ -369,6 +498,7 @@ export default function KrCurvePlot({ plotData }) {
   }, [data, yLog]);
 
   const computedY2Domain = useMemo(() => {
+    if (!data?.curves) return [0, 'auto'];
     const d = data.yAxis2?.domain;
     if (d) {
       if (!yRightLog) return d;
@@ -396,6 +526,25 @@ export default function KrCurvePlot({ plotData }) {
     if (minVal === Infinity || maxVal === -Infinity) return [0.001, 100];
     return [minVal * 0.9, maxVal * 1.1];
   }, [data, yRightLog]);
+
+  if (!data?.curves) {
+    return null;
+  }
+
+  const meta        = data.metadata || {};
+  const validation  = meta.validation  || {};
+  const fit_params  = meta.fit_params  || {};
+  const endpoints   = meta.endpoints   || {};
+  const archie      = meta.archie      || null;
+  const jfunction   = meta.jfunction   || null;
+  const crossover   = validation.crossover || {};
+  const wettConfig  = WETTABILITY_CONFIG[validation.wettability] || WETTABILITY_CONFIG['indeterminate'];
+
+  const xTickFmt = xLog ? logTickFmt : linTickFmt;
+  const yTickFmt = yLog ? logTickFmt : linTickFmt;
+  const yRTickFmt = yRightLog ? logTickFmt : linTickFmt;
+
+  const xLabel = data.xAxis?.label || 'x';
 
   const toggleCurve = name => {
     setHiddenCurves(prev => {
@@ -526,6 +675,13 @@ export default function KrCurvePlot({ plotData }) {
                   stroke="#04040a"
                   strokeWidth={1}
                   r={curve.data && curve.data.length > 20 ? 3 : 4}
+                  shape={(props) => (
+                    <InteractivePoint
+                      {...props}
+                      curveIdx={idx}
+                      onPointDrag={handlePointDrag}
+                    />
+                  )}
                 />
               );
             })}

@@ -1,6 +1,3 @@
-import pytest
-import json
-import numpy as np
 from hermes_skills_library.petroleum.scalskills.scripts.petrophysics import PetrophysicsSkills
 
 def test_klinkenberg_single_point():

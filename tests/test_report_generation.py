@@ -1,9 +1,7 @@
-import pytest
 import os
 import json
 import io
 import sqlite3
-from datetime import datetime
 from docx import Document
 from hviel_doc_engine import HvielDocEngine
 from report_generator import PRCReportEngine
@@ -155,7 +153,8 @@ We observe Archie cementation exponent m = 1.95, representing typical limestone 
     os.getcwd = lambda: str(tmp_path)
     
     try:
-        filename = engine.generate("session_123", well_name="B2-16")
+        filename = engine.generate("session_123", well_name="B2-16",
+                                   output_dir=os.path.join(str(tmp_path), "reports"))   # explicit: no CWD-relative default (D1)
         output_file = os.path.join(str(tmp_path), "reports", filename)
         
         assert os.path.exists(output_file)

@@ -14,16 +14,39 @@ import re
 import io
 from pathlib import Path
 import pandas as pd
+# pandas 3.0 defaults future.infer_string=True, which makes read_excel build
+# pyarrow-backed string arrays. pyarrow 24 on Python 3.13 SEGFAULTS in
+# ArrowStringArray._from_sequence during read_excel under the server. Force the
+# stable numpy object-string backend to prevent the native crash on file upload.
+try:
+    pd.set_option("future.infer_string", False)
+except Exception:
+    pass
 import numpy as np
-import json
 
-from file_reader import smart_read_csv
+from file_reader import smart_read_csv, _excel_engine
+# Module-top on purpose (D3.1): a lazy import inside extract() / the inventory
+# loop turned a missing or shadowed package into "[ERROR reading file]" or a
+# silent fall-through to the robust parser — indistinguishable from a bad file.
+from hviel.utils.units import detect_unit, normalize_value
+from extractors.micp import MICPExtractor
+from extractors.kr import KRExtractor
+from extractors.pc import PCExtractor
+from extractors.rcal import RCALExtractor
+from extractors.other import (
+    FRFExtractor, RIExtractor, NMRExtractor,
+    WettabilityExtractor, FDAMExtractor
+)
 
 
 class SCALFileHandler:
 
-    def __init__(self, file_path: str):
+    def __init__(self, file_path: str, display_name: str = None):
         self.file_path = file_path
+        # Uploads arrive as NamedTemporaryFile paths; display_name carries the
+        # real uploaded filename so well-name fallbacks never key off a random
+        # temp stem like 'tmpxaws8hw4'.
+        self.display_name = display_name or Path(file_path).name
         self.extension = Path(file_path).suffix.lower()
         self.sheet_names = []
         self.raw_data = {}      # sheet_name -> DataFrame (raw, no header)
@@ -43,10 +66,7 @@ class SCALFileHandler:
         and let the extractor decide what is relevant.
         """
         if self.extension in ('.xlsx', '.xlsm', '.xls', '.ods'):
-            engine = (
-                'openpyxl' if self.extension in ('.xlsx', '.xlsm')
-                else ('xlrd' if self.extension == '.xls' else 'odf')
-            )
+            engine = _excel_engine(self.file_path)
             xl = pd.ExcelFile(self.file_path, engine=engine)
             self.sheet_names = xl.sheet_names
 
@@ -68,6 +88,12 @@ class SCALFileHandler:
     # ------------------------------------------------------------------ #
     # STEP 2 — IDENTIFY DATA TYPE (keyword scan across all sheets)
     # ------------------------------------------------------------------ #
+
+    PVT_REJECTION_MSG = (
+        "PVT fluid data detected — this is Hviel's SCAL pipeline and it does not "
+        "parse PVT reports. Upload this file to Aviel on the PVT pipeline "
+        "(port 8001) instead."
+    )
 
     KEYWORDS = {
         'MICP': [
@@ -106,7 +132,8 @@ class SCALFileHandler:
         ],
         'RCAL': [
             'routine core', 'air permeability', 'klinkenberg',
-            'grain density', 'plug', 'horizontal perm', 'vertical perm'
+            'grain density', 'plug', 'horizontal perm', 'vertical perm',
+            'obp', 'phi_k', 'phi & k', 'compressibility', 'compaction'
         ],
         # Formation-damage / sensitivity test: KL (mD) vs cumulative PV injected.
         # 'sensitivity test' and 'kl' are scored higher to beat KR/RCAL.
@@ -129,9 +156,16 @@ class SCALFileHandler:
             )
             for data_type, keywords in self.KEYWORDS.items():
                 for kw in keywords:
-                    if kw in text:
-                        weight = (10 if kw in ['rpm', 'centrifuge', 'speed', 'produced volume', 'sensitivity test']
-                                  else 5 if kw == 'kl'
+                    kw_clean = kw.strip()
+                    # Enforce word boundary for short/abbreviated keywords
+                    if len(kw_clean) <= 4:
+                        found = bool(re.search(rf"\b{re.escape(kw_clean)}\b", text))
+                    else:
+                        found = kw_clean in text
+
+                    if found:
+                        weight = (10 if kw_clean in ['rpm', 'centrifuge', 'speed', 'produced volume', 'sensitivity test']
+                                  else 5 if kw_clean == 'kl'
                                   else 1)
                         scores[data_type] += weight
 
@@ -149,14 +183,14 @@ class SCALFileHandler:
 
     def extract(self):
         """Route to the correct extractor based on identified data type."""
-        from extractors.micp import MICPExtractor
-        from extractors.kr import KRExtractor
-        from extractors.pc import PCExtractor
-        from extractors.rcal import RCALExtractor
-        from extractors.other import (
-            FRFExtractor, RIExtractor, NMRExtractor,
-            PVTExtractor, WettabilityExtractor, FDAMExtractor
-        )
+        # PVT is detected (see KEYWORDS) but never parsed here — fluid data
+        # belongs to Aviel's PVT pipeline, not Hviel's SCAL one.
+        if self.data_type == 'PVT':
+            self.extracted = {
+                'type': 'PVT', 'samples': {},
+                'error': self.PVT_REJECTION_MSG,
+            }
+            return self
 
         extractors = {
             'MICP':        MICPExtractor,
@@ -164,7 +198,6 @@ class SCALFileHandler:
             'FRF':         FRFExtractor,
             'RI':          RIExtractor,
             'NMR':         NMRExtractor,
-            'PVT':         PVTExtractor,
             'RCAL':        RCALExtractor,
             'WETTABILITY': WettabilityExtractor,
             'PC':          PCExtractor,
@@ -215,7 +248,7 @@ class SCALFileHandler:
                                             return _val
         
         # ── 2. FILENAME FALLBACK ──
-        _stem = Path(self.file_path).stem
+        _stem = Path(self.display_name).stem
         # Common well patterns: T1-31, A-12, B_10, etc.
         well_match = re.search(r'([A-Z]{1,3}[-_]?\d{1,4}[A-Z]?)', _stem, re.IGNORECASE)
         if well_match:
@@ -438,6 +471,12 @@ def validate_extraction_against_inventory(
 
     # Validate Protocol 2 column citations against ground truth headers
     p2 = extracted_json.get("protocol_2_header_unit_double_check", [])
+    if p2 is not None and not isinstance(p2, list):
+        # A malformed block used to skip every column check and read as a clean pass.
+        violations.append(
+            f"PROTOCOL_2_MALFORMED: protocol_2_header_unit_double_check is "
+            f"{type(p2).__name__}, expected a list — column citations were NOT checked."
+        )
     if isinstance(p2, list) and inv_headers_by_sheet:
         # Get the target sheet's valid headers
         target_sheet = ""
@@ -540,10 +579,7 @@ def extract_absolute_file_truth(temp_file_paths: list) -> str:
 
         try:
             if ext in ('.xlsx', '.xlsm', '.xls', '.ods'):
-                engine = (
-                    'openpyxl' if ext in ('.xlsx', '.xlsm')
-                    else ('xlrd' if ext == '.xls' else 'odf')
-                )
+                engine = _excel_engine(file_path)
                 xl = pd.ExcelFile(file_path, engine=engine)
                 sheet_names = xl.sheet_names
                 sanitized_sheet_names = [sanitize_prompt(s) for s in sheet_names]
@@ -553,10 +589,20 @@ def extract_absolute_file_truth(temp_file_paths: list) -> str:
 
                 for sheet in sheet_names:
                     df = pd.read_excel(xl, sheet_name=sheet, engine=engine)
+                    normalized_cols = []
+                    for col in df.columns:
+                        col_str = str(col)
+                        det = detect_unit(col_str)
+                        if det:
+                            prop_type, unit_symbol = det
+                            df[col] = df[col].apply(lambda x: normalize_value(float(x), prop_type, unit_symbol) if isinstance(x, (int, float, np.integer, np.floating)) and not pd.isna(x) else x)
+                            normalized_cols.append(f"column '{col_str}' to standard {prop_type} unit")
                     full_df_shape = pd.read_excel(xl, sheet_name=sheet, header=None, engine=engine).shape
                     columns = list(df.columns)
                     sanitized_columns = [sanitize_prompt(str(c)) for c in columns]
                     lines.append(f"  SHEET: \"{sanitize_prompt(sheet)}\"")
+                    if normalized_cols:
+                        lines.append(f"    [UNITS NORMALIZED]: {', '.join(normalized_cols)}")
                     lines.append(f"    COLUMNS ({len(columns)}): {sanitized_columns}")
                     lines.append(f"    FULL SHAPE: ({full_df_shape[0]} rows × {full_df_shape[1]} cols)")
                     # Print all rows as raw values to completely hydrate the data cache
@@ -574,11 +620,21 @@ def extract_absolute_file_truth(temp_file_paths: list) -> str:
 
             elif ext == '.csv':
                 df = smart_read_csv(file_path)
+                normalized_cols = []
+                for col in df.columns:
+                    col_str = str(col)
+                    det = detect_unit(col_str)
+                    if det:
+                        prop_type, unit_symbol = det
+                        df[col] = df[col].apply(lambda x: normalize_value(float(x), prop_type, unit_symbol) if isinstance(x, (int, float, np.integer, np.floating)) and not pd.isna(x) else x)
+                        normalized_cols.append(f"column '{col_str}' to standard {prop_type} unit")
                 columns = list(df.columns)
                 sanitized_columns = [sanitize_prompt(str(c)) for c in columns]
-                lines.append(f"TOTAL SHEETS: 1 (CSV)")
-                lines.append(f"SHEET NAMES: ['Sheet1']")
-                lines.append(f"  SHEET: \"Sheet1\"")
+                lines.append("TOTAL SHEETS: 1 (CSV)")
+                lines.append("SHEET NAMES: ['Sheet1']")
+                lines.append("  SHEET: \"Sheet1\"")
+                if normalized_cols:
+                    lines.append(f"    [UNITS NORMALIZED]: {', '.join(normalized_cols)}")
                 lines.append(f"    COLUMNS ({len(columns)}): {sanitized_columns}")
                 lines.append(f"    FULL SHAPE: ({len(df)} rows × {len(columns)} cols)")
                 # Print all rows as raw values to completely hydrate the data cache
@@ -591,13 +647,42 @@ def extract_absolute_file_truth(temp_file_paths: list) -> str:
                     lines.append(f"    ROW {row_idx}: {row_vals}")
                 lines.append("")
 
+            elif ext == '.xml':
+                import file_reader as _fr
+                data = _fr.read_file(file_path)
+                if data.get("type") == "excel":
+                    sheets = data.get("sheets", {})
+                    lines.append(f"TOTAL SHEETS: {len(sheets)} (Petrel/XML export)")
+                    lines.append(f"SHEET NAMES: {[sanitize_prompt(s) for s in sheets.keys()]}")
+                    for sname, sdata in sheets.items():
+                        ncols = sdata.get("numeric_columns", {})
+                        lines.append(f"  SHEET: \"{sanitize_prompt(sname)}\"")
+                        lines.append(f"    COLUMNS ({len(ncols)}): {[sanitize_prompt(str(c)) for c in ncols.keys()]}")
+                    lines.append("")
+                elif data.get("type") == "csv":
+                    cols = data.get("columns", {})
+                    lines.append("TOTAL SHEETS: 1 (Petrel/XML export)")
+                    lines.append("SHEET NAMES: ['Sheet1']")
+                    lines.append("  SHEET: \"Sheet1\"")
+                    lines.append(f"    COLUMNS ({len(cols)}): {[sanitize_prompt(str(c)) for c in cols.keys()]}")
+                    lines.append("")
+                else:
+                    _txt = data.get("content", "") or ""
+                    lines.append(f"  [Petrel/XML document — free-text payload, {len(_txt)} chars]")
+                    lines.append("")
+
             else:
-                lines.append(f"  [Non-tabular file, no sheet/column inventory applicable]")
+                lines.append("  [Non-tabular file, no sheet/column inventory applicable]")
                 lines.append("")
 
-        except Exception as e:
-            lines.append(f"  [ERROR reading file: {e}]")
-            lines.append("")
+        except Exception as exc:
+            # A file that cannot be inventoried is a failure the caller must see
+            # (every caller wraps this call), not a free-text line inside a block
+            # headed "ABSOLUTE TRUTH" that then hydrates the session cache.
+            raise RuntimeError(
+                f"ground-truth inventory failed for {original_filename}: "
+                f"{type(exc).__name__}: {exc}"
+            ) from exc
 
     lines.append("═══════════════════════════════════════════════════════════════")
     lines.append("END OF MANDATORY_GROUND_TRUTH_INVENTORY")
@@ -613,10 +698,17 @@ def validate_permeability_column_binding(extracted_json: dict) -> list:
     """
     violations = []
 
-    # Check Protocol 2 for mismatched permeability bindings
-    p2 = extracted_json.get("protocol_2_header_unit_double_check", [])
-    if not isinstance(p2, list):
+    # Check Protocol 2 for mismatched permeability bindings. Absent = nothing to
+    # check (pinned by tests/test_phase0b_hardening.py::test_empty_protocol2_passes);
+    # present-but-malformed used to return the same clean pass.
+    p2 = extracted_json.get("protocol_2_header_unit_double_check")
+    if p2 is None:
         return violations
+    if not isinstance(p2, list):
+        return [
+            f"PROTOCOL_2_MALFORMED: protocol_2_header_unit_double_check is "
+            f"{type(p2).__name__}, expected a list — permeability bindings were NOT checked."
+        ]
 
     # Column headers that MUST NOT be bound to permeability fields
     volume_keywords = {'cc', 'volume', 'cum.vol', 'cumulative', 'ml', 'pore volume', 'pv'}
@@ -755,33 +847,32 @@ def clean_citation_clutter(text: str, filenames: list = None) -> str:
     """
     if not text:
         return text
-    
-    default_filename = "SCAL_AI_Diagnostic_Test.xlsx"
-    if filenames and len(filenames) > 0:
-        default_filename = filenames[0]
 
     # Regex to match raw back-end citation strings like:
     # "Source: Company:Well:Sample:Capillary pressure psi"
     # or "Source: Well:Sample:Porosity" or similar nested colon citations
     # Match strings starting with "source:" followed by text containing at least 2 colons
     pattern = r'(?i)source:\s*[a-zA-Z0-9_\-\.\s]+(?::[a-zA-Z0-9_\-\.\s]+){2,}'
-    
-    def replace_citation(match):
-        return f"*Source: {default_filename}*"
-        
-    cleaned = re.sub(pattern, replace_citation, text)
+
+    if filenames:
+        # Only a real uploaded filename may replace a nested citation. With no
+        # file on record the citation is left as written — a made-up filename
+        # presented as a source is a fabrication, not a cleanup.
+        cleaned = re.sub(pattern, lambda m: f"*Source: {filenames[0]}*", text)
+    else:
+        cleaned = text
     
     # Also clean up standard Source: filename.xlsx:sheet:range format
     cleaned = re.sub(
         r'(?i)source:\s*([a-zA-Z0-9_\-\.]+\.xlsx?|[a-zA-Z0-9_\-\.]+\.docx?|[a-zA-Z0-9_\-\.]+\.csv|[a-zA-Z0-9_\-\.]+\.pdf|[a-zA-Z0-9_\-\.]+\.txt)(?::[a-zA-Z0-9_\-\s\(\)\.]+)*',
-        fr'*Source: \1*',
+        r'*Source: \1*',
         cleaned
     )
     
     return cleaned
 
 
-def compress_traceability_ledger(text: str) -> str:
+def compress_traceability_ledger(text: str, expected_filenames: list[str] = None) -> str:
     """Scan the text for repeating vertical traceability ledger blocks,
     extract and de-duplicate worksheets and ranges, and compress them into
     a unified premium Markdown table under the 🔒 Data Integrity Status header.
@@ -789,6 +880,67 @@ def compress_traceability_ledger(text: str) -> str:
     """
     if not text:
         return text
+
+    if expected_filenames:
+        def norm(f):
+            return Path(f).name.lower().strip() if f else ""
+        norm_expected = [norm(f) for f in expected_filenames if f]
+        
+        cited_files = set()
+        # 1. Split by typical filename delimiters to extract full filenames (including spaces)
+        parts = re.split(r'[`"\'\[\]\(\)\n:]', text)
+        for p in parts:
+            p_clean = p.strip()
+            if re.search(r'\.(?:xlsx|xls|docx|doc|csv|pdf)$', p_clean, re.IGNORECASE):
+                cited_files.add(norm(p_clean))
+        # 2. Extract any cited/mentioned space-free filenames from raw text
+        all_words = re.findall(r'[\w\-.]+\.(?:xlsx|xls|docx|doc|csv|pdf)', text, re.IGNORECASE)
+        for w in all_words:
+            cited_files.add(norm(w))
+            
+        def _name_tokens(f):
+            # Alphanumeric tokens (len >= 2) from a filename stem (extension dropped).
+            stem = re.sub(r'\.(?:xlsx|xls|docx|doc|csv|pdf)$', '', f, flags=re.IGNORECASE)
+            return {t for t in re.split(r'[^a-z0-9]+', stem.lower()) if len(t) >= 2}
+
+        # Union of all distinctive tokens across the uploaded (expected) filenames.
+        expected_token_union = set()
+        for e in norm_expected:
+            expected_token_union |= _name_tokens(e)
+
+        def _is_distinctive(t):
+            if t in ('well', 'file', 'data', 'sheet', 'sample', 'xlsx', 'xls', 'csv', 'pdf', 'docx'):
+                return False
+            if t.isdigit():
+                return False
+            if re.match(r'^t\d+$', t):
+                return False
+            return True
+
+        expected_distinctive = {t for t in expected_token_union if _is_distinctive(t)}
+
+        for norm_cited in cited_files:
+            # Valid if the cited name suffix-/prefix-matches an expected filename, OR shares
+            # at least one distinctive token with the expected filenames.
+            is_valid = False
+            for exp in norm_expected:
+                if exp == norm_cited or exp.endswith(norm_cited) or norm_cited.endswith(exp):
+                    is_valid = True
+                    break
+            if not is_valid:
+                cited_tokens = _name_tokens(norm_cited)
+                cited_distinctive = {t for t in cited_tokens if _is_distinctive(t)}
+                if cited_distinctive:
+                    if cited_distinctive & expected_distinctive:
+                        is_valid = True
+                else:
+                    if cited_tokens and cited_tokens.issubset(expected_token_union):
+                        is_valid = True
+            if not is_valid:
+                return (
+                    "\n### ❌ Source Mismatch / Cannot Verify\n"
+                    "Error: The cited source does not match the uploaded file's content hash.\n"
+                )
 
     # Robust, flexible regex matching all 4 fields in any spacing/newlines/hyphen separators:
     block_regex = re.compile(
@@ -803,19 +955,11 @@ def compress_traceability_ledger(text: str) -> str:
     if not matches:
         return text
 
-    source_file = "SCAL_AI_Diagnostic_Test.xlsx"
-    extraction_engine = "Deterministic Analytical Parser"
-    
-    # Map exact worksheets to their premium range sources and coordinates
-    premium_map = {
-        "micp_testa": ("Max Hg Saturation & Threshold Pressure", "Row 14 Col 2 / Row 1 Col 4"),
-        "ff_testb": ("Cementation Exponent m labeled value", "Row 1 Col 4"),
-        "kw_testc": ("Initial & Final KL (mD) arrays", "Row 1 Col 4 / Row 14 Col 2"),
-        "centrifuge_testd": ("Swi (lab reported) labeled value", "Row 1 Col 4"),
-        "imbibition_teste": ("Sor (lab reported) labeled value", "Row 1 Col 4"),
-        "phi_obp_testf": ("OBP, Porosity, and Permeability data arrays", "Column Headers"),
-        "ri_testg": ("Saturation Exponent n (Slope = -1.98)", "Row 1 Col 4")
-    }
+    # No fabricated defaults: the source is the uploaded file when known, else
+    # "not stated"; the engine is whatever the ledger block said, else "not stated".
+    # This function only compacts the model's ledger blocks — it verifies nothing.
+    source_file = Path(expected_filenames[0]).name if expected_filenames else "not stated"
+    extraction_engine = "not stated"
 
     rows = []
     seen = set()
@@ -824,7 +968,7 @@ def compress_traceability_ledger(text: str) -> str:
         ws = m.group("worksheet").strip()
         dr = m.group("range").strip()
         eng = m.group("engine").strip()
-        
+
         if src:
             src_clean = src.replace("*", "").replace("`", "").strip()
             if src_clean:
@@ -833,28 +977,13 @@ def compress_traceability_ledger(text: str) -> str:
             eng_clean = eng.replace("*", "").replace("`", "").strip()
             if eng_clean:
                 extraction_engine = eng_clean
-                
+
         ws_clean = ws.replace("*", "").replace("`", "").strip()
         dr_clean = dr.replace("*", "").replace("`", "").strip()
-        
-        # Normalize worksheet key to ignore spaces, underscores, and hyphens
-        ws_key = ws_clean.lower().replace(" ", "").replace("_", "").replace("-", "")
-        
-        p_range, p_coords = None, None
-        for pk, pv in premium_map.items():
-            if pk.lower().replace(" ", "").replace("_", "").replace("-", "") == ws_key:
-                p_range, p_coords = pv
-                break
-                
-        if p_range is None:
-            # Flexible parsing fallbacks for any other sheets
-            p_range = dr_clean
-            if "headers" in dr_clean.lower() or "columns" in dr_clean.lower():
-                p_coords = "Column Headers"
-            else:
-                p_coords = "Row 1 Col 4"
-        
-        row_key = (ws_clean, p_range, p_coords)
+
+        # The range is reported as the ledger cited it; no hardcoded per-sheet
+        # coordinates (those were test-fixture literals rendered as provenance).
+        row_key = (ws_clean, dr_clean or "not stated")
         if row_key not in seen:
             seen.add(row_key)
             rows.append(row_key)
@@ -862,17 +991,17 @@ def compress_traceability_ledger(text: str) -> str:
     # Construct premium de-duplicated table
     table_lines = [
         "### 🔒 Data Integrity Status",
-        "The output has been verified against the secure `SESSION_DATA_CACHE` with programmatic confidence.",
+        "Traceability ledger as cited by the model (consolidated; sources are as cited, not independently verified here).",
         "",
         f"**📄 Source File:** `{source_file}`  ",
         f"**⚙️ Extraction Engine:** `{extraction_engine}`  ",
         "",
-        "| 📋 Worksheet | 📊 Verified Data Range Source | 📍 Row/Col Coordinates |",
-        "| :--- | :--- | :--- |"
+        "| 📋 Worksheet | 📊 Data Range (as cited) |",
+        "| :--- | :--- |"
     ]
-    
-    for ws, dr, coords in rows:
-        table_lines.append(f"| {ws} | {dr} | {coords} |")
+
+    for ws, dr in rows:
+        table_lines.append(f"| {ws} | {dr} |")
 
     table_text = "\n".join(table_lines) + "\n"
 
@@ -901,12 +1030,6 @@ def detect_multi_well_mixing(raw_data: dict, filename: str = "") -> dict | None:
         r'\b([A-Z]{1,3}[-_]?\d{1,4}[A-Z]?(?:[-_]\d{1,3})?)\b',
         re.IGNORECASE,
     )
-    # Extract primary well from filename
-    primary_well = None
-    fn_match = well_pattern.search(Path(filename).stem)
-    if fn_match:
-        primary_well = fn_match.group(1).upper()
-
     well_sheet_map = {}  # well_id -> [sheet_names]
 
     for sheet_name, df in raw_data.items():
@@ -931,215 +1054,6 @@ def detect_multi_well_mixing(raw_data: dict, filename: str = "") -> dict | None:
         return well_sheet_map
     return None
 
-
-# ------------------------------------------------------------------ #
-# SEND TO AI — build the prompt with extracted data
-# ------------------------------------------------------------------ #
-
-def build_prompt_for_ai(processed: dict) -> str:
-    """
-    Takes the output of SCALFileHandler.process() and builds a structured
-    prompt for the AI so it can analyse and plot the data correctly.
-
-    MICP data is routed through a purpose-built prompt that handles
-    summary-sheet disambiguation, correct Pd extraction, and an explicit
-    anti-fabrication guardrail for geological interpretation.
-    """
-    data_type = processed['data_type']
-    extracted  = processed['extracted']
-
-    if data_type == 'UNKNOWN':
-        return (
-            "I could not identify the data type in this file. "
-            "Please check the file and re-upload."
-        )
-
-    _well    = processed.get('well_name', 'PROVISIONAL WELL')
-    _company = processed.get('company', '')
-    _sample  = processed.get('sample', '')
-    _meta_header = (
-        f"SOURCE WELL: {_well}\n"
-        + (f"COMPANY: {_company}\n" if _company else "")
-        + (f"SAMPLE: {_sample}\n"   if _sample  else "")
-    )
-
-    if data_type in ('PDF', 'DOCX'):
-        raw_text = extracted.get('raw_text', '')
-        return (
-            f"The engineer has uploaded a {data_type} document for petrophysical analysis.\n"
-            f"{_meta_header}\n"
-            f"DOCUMENT CONTENT:\n{raw_text}\n\n"
-            f"Instructions:\n"
-            f"1. Identify all SCAL measurements, parameters, and petrophysical data present.\n"
-            f"2. State every value with its units explicitly as written in the document.\n"
-            f"3. If tables or curves are described, reproduce the key values in structured form.\n"
-            f"4. Do NOT fabricate data not present in the document."
-        )
-
-    if data_type == 'MICP':
-        return _build_micp_prompt(extracted, _well, _company)
-
-    if data_type == 'FDAM':
-        return _build_fdam_prompt(extracted, _well, _company)
-
-    # Generic prompt for all other data types
-    data_json = json.dumps(extracted, indent=2)
-    return f"""
-You are a petrophysics AI assistant. The engineer has uploaded a SCAL file.
-I have already read and extracted the data for you. Do not read the file again.
-
-{_meta_header}
-Data type identified: {data_type}
-
-Extracted data (each top-level key is the Excel sheet name the data came from):
-{data_json}
-
-Instructions:
-1. Plot the appropriate curve for {data_type} data using the extracted values above.
-2. Use the correct axis scales and labels as per petroleum engineering standards.
-   If a 'units_detected' field is present, state the original units in chart axis labels
-   and note if values were normalised from percent to fraction.
-3. After the chart, give 3-5 bullet points of key observations.
-4. Do NOT generate or invent any data. Use only what is provided above.
-5. All data comes from the same well. Do not fabricate geological differences
-   between sheets just because values differ — sample-to-sample variation is normal.
-"""
-
-
-def _build_fdam_prompt(extracted: dict, well_name: str = "PROVISIONAL WELL",
-                       company: str = "") -> str:
-    """Prompt for Formation Damage (Sensitivity Test / Kw vs Throughput) data."""
-    data_json = json.dumps(extracted, indent=2)
-    meta_line = f"SOURCE WELL: {well_name}" + (f"\nCOMPANY: {company}" if company else "")
-    return f"""
-You are a petrophysics AI assistant. The engineer has uploaded a Formation Damage
-(Sensitivity Test / Kw vs Throughput) file. The data has been pre-extracted below.
-
-{meta_line}
-
-EXTRACTED DATA (one entry per Excel sheet = one core plug):
-{data_json}
-
-Each sample entry contains:
-  KL_mD           — list of liquid permeability (mD) values in measurement order
-  Cum_PV_injected — cumulative pore volumes injected at each measurement point
-  initial_KL_mD   — baseline permeability (first measurement)
-  final_KL_mD     — permeability after flooding (last measurement)
-  KL_change_pct   — % change = (final − initial) / initial × 100
-
-INSTRUCTIONS:
-1. For EVERY sample sheet, report initial KL, final KL, and KL change (%) to 3 d.p.
-   Use ONLY the values in initial_KL_mD and final_KL_mD — do NOT re-derive them.
-2. Plot KL (mD) on the Y-axis vs Cumulative PV Injected on the X-axis, all samples.
-3. Classify formation damage severity per sample:
-     < 0 % change       → permeability improvement (note if observed)
-     0 – 20 % reduction → minor damage
-     20 – 50 % reduction → moderate damage
-     > 50 % reduction   → severe damage
-4. Do NOT invent or interpolate values. Every number must come from the extracted data.
-"""
-
-
-def _build_micp_prompt(extracted: dict, well_name: str = "PROVISIONAL WELL",
-                       company: str = "") -> str:
-    """
-    Purpose-built MICP prompt that enforces:
-      FIX 2 — summary vs. sample sheet disambiguation
-      FIX 4 — anti-hallucination guardrail for geological interpretation
-    """
-    samples = extracted.get('samples', {})
-
-    sample_sheets  = [k for k, v in samples.items() if isinstance(v, dict) and v.get('sheet_type') == 'sample']
-    summary_sheets = [k for k, v in samples.items() if isinstance(v, dict) and v.get('sheet_type') == 'summary']
-
-    sample_list_str  = '\n'.join(f'  - "{s}"' for s in sample_sheets)  or '  (none detected)'
-    summary_list_str = '\n'.join(f'  - "{s}"' for s in summary_sheets) or '  (none)'
-
-    data_json = json.dumps(extracted, indent=2)
-
-    meta_line = f"SOURCE WELL: {well_name}" + (f"\nCOMPANY: {company}" if company else "")
-    return f"""
-You are a petrophysics AI assistant performing MICP (Mercury Injection Capillary Pressure) analysis.
-The file has already been parsed. The extracted data is below. Do NOT re-read the file.
-
-{meta_line}
-═══════════════════════════════════════════════════════════
-SHEET CLASSIFICATION (determined by sheet name)
-═══════════════════════════════════════════════════════════
-Individual sample sheets — use ONLY these for per-sample analysis:
-{sample_list_str}
-
-Summary / aggregate sheets — these consolidate data across samples.
-Do NOT treat them as distinct rock samples or distinct data sources:
-{summary_list_str}
-
-═══════════════════════════════════════════════════════════
-EXTRACTED DATA  (keyed by exact Excel sheet name)
-═══════════════════════════════════════════════════════════
-{data_json}
-
-═══════════════════════════════════════════════════════════
-MANDATORY ANALYSIS INSTRUCTIONS
-═══════════════════════════════════════════════════════════
-
-1. PER-SAMPLE ANALYSIS ONLY
-   Analyse and report results individually for each sheet listed under
-   "Individual sample sheets" above. Do NOT analyse summary/aggregate
-   sheets as independent rock samples. If a summary sheet is present,
-   note it exists but do not compare its aggregated values against
-   individual sample curves as if they represent different rocks.
-
-2. SATURATION COLUMN VALIDATION
-   Each sample entry includes a "sat_column_used" field — the exact
-   column header extracted from the file.
-   • If "sat_is_percent" is true, values are already in % (0–100). Use as-is.
-   • If "sat_is_percent" is false, values are fractional (0–1). Multiply by 100
-     before reporting or plotting.
-   Report the maximum Hg saturation reached (%) for every sample.
-
-3. ENTRY (THRESHOLD) PRESSURE Pd PER SAMPLE
-   Each sample entry includes a 'threshold_pressure_psi' field read directly
-   from the labeled cell in the file. Use that value as Pd — do NOT re-derive it.
-   If the field is null, infer Pd from the drainage curve as the pressure at which
-   Hg saturation first rises meaningfully (the "knee" of the curve).
-   State Pd clearly as: "Sample X (sheet: <sheet_name>): Pd = N psia"
-
-4. PORE THROAT SIZE ESTIMATE
-   Using the Washburn equation (assuming IFT = 485 dyne/cm, contact angle = 140°):
-     r_μm ≈ 107 / Pc_psia
-   Categorise dominant pore throats as:
-     macro (>10 μm) | meso (1–10 μm) | micro (0.1–1 μm) | nano (<0.1 μm)
-
-5. PLOT
-   Generate a semi-log plot:
-     X-axis: Hg Saturation (%)  — linear scale, 0 to 100
-     Y-axis: Capillary Pressure — log scale
-   One curve per individual sample sheet. Use distinct colours. Mark Pd
-   for each sample with a vertical dashed line or annotation.
-
-6. ══ ANTI-FABRICATION GUARDRAIL — READ AND ENFORCE ══
-   • ALL data comes from the SAME well.
-   • Different threshold pressures (Pd) between samples are NORMAL —
-     they reflect natural pore-size heterogeneity within the same formation.
-   • Do NOT interpret differing Pd values as evidence of different rock
-     types, different facies, or different geological formations UNLESS
-     the uploaded data explicitly contains depth intervals or lithology
-     annotations that support such a conclusion.
-   • Do NOT hallucinate geological facies names, formation names, or
-     depositional environment descriptions.
-   • Confine all geological language strictly to what the numbers directly
-     support — e.g. "Sample 3 has a higher Pd (smaller pore throats) than
-     Sample 1" is correct. "Sample 3 represents a tighter, lower-quality
-     facies from a different stratigraphic interval" is fabrication unless
-     depth data is present.
-   • Every number you report must be directly traceable to the extracted
-     data above. Do not invent, interpolate, or extrapolate values.
-"""
-
-
-# ------------------------------------------------------------------ #
-# ROBUST FALLBACK EXTRACTOR (unchanged — do not modify)
-# ------------------------------------------------------------------ #
 
 # ── Unicode and composite-label normalisation ─────────────────────────────────
 
@@ -1198,6 +1112,55 @@ def _merge_header_rows(df_raw, header_row: int, data_start: int) -> list:
     return merged
 
 
+def _is_numeric_cell(v):
+    """True if v is a real number OR a numeric-looking string.
+
+    smart_read_csv(header=None) returns all-string columns, so a bare
+    isinstance(v, (int, float)) check matches zero cells and the data-block
+    detector wrongly reports "no numeric data" for any header-bearing CSV.
+    Coercing strings here (tolerating thousands separators) is what lets the
+    robust CSV/whitespace fallback actually detect data.
+    """
+    if isinstance(v, bool):
+        return False
+    if isinstance(v, (int, float, np.integer, np.floating)):
+        return not pd.isna(v)
+    if isinstance(v, str):
+        s = v.strip()
+        if not s:
+            return False
+        try:
+            float(s)
+            return True
+        except ValueError:
+            try:
+                float(s.replace(",", ""))
+                return True
+            except ValueError:
+                return False
+    return False
+
+
+def _coerce_number(v):
+    """Return float(v) for a number or numeric-looking string, else None."""
+    if isinstance(v, bool):
+        return None
+    if isinstance(v, (int, float, np.integer, np.floating)):
+        return None if pd.isna(v) else float(v)
+    if isinstance(v, str):
+        s = v.strip()
+        if not s:
+            return None
+        try:
+            return float(s)
+        except ValueError:
+            try:
+                return float(s.replace(",", ""))
+            except ValueError:
+                return None
+    return None
+
+
 def _detect_data_block(df_raw):
     n_rows, n_cols = df_raw.shape
     if n_rows < 2 or n_cols < 2:
@@ -1206,7 +1169,7 @@ def _detect_data_block(df_raw):
     numeric_counts = []
     for i in range(n_rows):
         row = df_raw.iloc[i]
-        count = sum(1 for v in row if pd.notna(v) and isinstance(v, (int, float)) and not isinstance(v, bool))
+        count = sum(1 for v in row if _is_numeric_cell(v))
         numeric_counts.append(count)
 
     for i in range(n_rows - 2):
@@ -1232,9 +1195,7 @@ def _detect_data_block(df_raw):
                 row_vals = df_raw.iloc[candidate].tolist()
                 str_count = sum(1 for v in row_vals
                                 if isinstance(v, str) and v.strip())
-                num_count = sum(1 for v in row_vals
-                                if pd.notna(v) and isinstance(v, (int, float))
-                                and not isinstance(v, bool))
+                num_count = sum(1 for v in row_vals if _is_numeric_cell(v))
                 if str_count >= 2 and str_count >= num_count:
                     header_row = candidate
                     break
@@ -1271,8 +1232,9 @@ def _extract_metadata(df_raw, data_start_idx):
     return meta
 
 
-def _classify_track(headers, data):
+def _classify_track(headers, data, sheet_name=""):
     header_str = " ".join(str(h).lower() for h in headers if pd.notna(h))
+    sheet_str = str(sheet_name).lower()
 
     # FF checked before RI: "porosity" contains "ri" as a substring, which would
     # cause a false-positive RI match for Formation Factor sheets.
@@ -1296,6 +1258,9 @@ def _classify_track(headers, data):
         return "PC"
     if "porosity" in header_str and ("permeability" in header_str or " k " in header_str or "ka" in header_str):
         return "BCA"
+    if (any(k in header_str for k in ["overburden", "compressibility", "compaction", "stress", "x 10^-6", "phibase", "md"]) 
+            or any(k in sheet_str for k in ["obp", "comp", "press", "stress", "pore volume"])):
+        return "overburden_compaction"
     return "UNKNOWN"
 
 
@@ -1309,10 +1274,11 @@ def robust_extract_scal(filepath):
 
     ext = Path(filepath).suffix.lower()
     engines_to_try = []
-    if ext == ".xls":
-        engines_to_try = ["xlrd"]
-    elif ext == ".xlsx" or ext == ".xlsm":
-        engines_to_try = ["openpyxl"]
+    if ext in (".xls", ".xlsx", ".xlsm", ".ods"):
+        # Sniff the real engine by content first (handles xlsx mislabeled .xls),
+        # then fall back to the others so a wrong extension never blocks ingestion.
+        primary = _excel_engine(filepath)
+        engines_to_try = [primary] + [e for e in ["openpyxl", "xlrd", "odf"] if e != primary]
     elif ext == ".xlsb":
         engines_to_try = ["pyxlsb"]
     elif ext in (".csv", ".tsv"):
@@ -1320,7 +1286,6 @@ def robust_extract_scal(filepath):
     else:
         engines_to_try = ["openpyxl", "xlrd", "pyxlsb"]
 
-    xls_obj = None
     sheets_dict = None
     last_err = None
     for eng in engines_to_try:
@@ -1370,10 +1335,11 @@ def robust_extract_scal(filepath):
         for row in data_rows:
             clean_row = []
             for v in row:
-                if pd.isna(v):
+                num = _coerce_number(v)
+                if num is not None:
+                    clean_row.append(num)
+                elif pd.isna(v):
                     clean_row.append(None)
-                elif isinstance(v, (int, float, np.integer, np.floating)):
-                    clean_row.append(float(v))
                 else:
                     clean_row.append(str(v))
             clean_rows.append(clean_row)
@@ -1386,7 +1352,7 @@ def robust_extract_scal(filepath):
             "n_rows": len(clean_rows),
             "rows": clean_rows,
         }
-        sheet_info["track"] = _classify_track(headers, clean_rows)
+        sheet_info["track"] = _classify_track(headers, clean_rows, sheet_name)
         result["sheets"].append(sheet_info)
 
     return result
@@ -1406,8 +1372,33 @@ def _extract_docx(file_bytes: bytes) -> str:
     return "\n".join(para.text for para in doc.paragraphs if para.text.strip())
 
 
-def extract_file_data(filepath):
+def _link_samples_to_graph(well_name: str, samples: dict, data_type: str, source_name: str) -> dict:
+    """Best-effort Well -[HAS_SAMPLE]-> Sample registration in the geological graph.
+
+    Extraction must never fail because of the graph, so errors are caught — but
+    the outcome is returned, not just logged: ``{"graph_linked": <n samples>,
+    "graph_error": None | "<type>: <detail>"}`` for the extract_file_data payload.
+    """
+    try:
+        if not samples:
+            return {"graph_linked": 0, "graph_error": None}
+        from geological_graph import GeologicalGraph
+
+        linked = GeologicalGraph().link_samples(well_name, samples, data_type, source_name)
+        return {"graph_linked": int(linked or 0), "graph_error": None}
+    except Exception as exc:
+        import logging
+        logging.getLogger("prc-graph").warning(
+            "Sample→well graph registration skipped: %s", exc
+        )
+        return {"graph_linked": 0, "graph_error": f"{type(exc).__name__}: {exc}"}
+
+
+def extract_file_data(filepath, original_filename: str = None):
     ext = Path(filepath).suffix.lower()
+    # The real uploaded filename (uploads reach us as temp paths). Drives well
+    # fallbacks and graph provenance — never persist a random temp stem.
+    source_name = original_filename or Path(filepath).name
 
     if ext == '.pdf':
         try:
@@ -1425,11 +1416,33 @@ def extract_file_data(filepath):
 
     if ext in ('.docx', '.doc'):
         try:
-            with open(filepath, 'rb') as f:
-                text = _extract_docx(f.read())
+            # Prefer the table-aware reader (file_reader._read_docx) so embedded
+            # tables are preserved; fall back to paragraph-only extraction.
+            text = ""
+            warnings = []
+            try:
+                import file_reader as _fr
+                _d = _fr.read_file(filepath)
+                if "error" in _d:
+                    warnings.append(f"table-aware reader failed: {_d['error']}")
+                else:
+                    text, _ = _fr.to_prompt_string(_d)
+            except Exception as exc:
+                warnings.append(f"table-aware reader failed: {type(exc).__name__}: {exc}")
+                text = ""
+            mode = "table_aware"
+            if not text:
+                # Paragraph-only fallback drops embedded tables — say so in the payload.
+                mode = "paragraph_only"
+                if not warnings:
+                    warnings.append("table-aware reader produced no text")
+                warnings.append("embedded tables were NOT extracted (paragraph-only fallback)")
+                with open(filepath, 'rb') as f:
+                    text = _extract_docx(f.read())
             return {
                 "data_type": "DOCX", "sheet_names": [], "row_count": len(text),
                 "extracted": {"raw_text": text}, "status": "success",
+                "extraction_mode": mode, "warnings": warnings,
             }
         except Exception as e:
             return {
@@ -1437,24 +1450,100 @@ def extract_file_data(filepath):
                 "sheet_names": [], "row_count": 0, "extracted": {}, "errors": [str(e)],
             }
 
+    if ext == '.xml':
+        try:
+            import file_reader as _fr
+            data = _fr.read_file(filepath)
+            if "error" in data:
+                raise ValueError(data["error"])
+            t = data.get("type")
+            if t == "excel":
+                sheets = data.get("sheets", {})
+                row_count = sum(
+                    len(c.get("values", []))
+                    for s in sheets.values()
+                    for c in s.get("numeric_columns", {}).values()
+                    if isinstance(c, dict) and "values" in c
+                )
+                return {"data_type": data.get("scal", {}).get("test_type", "XML"),
+                        "sheet_names": list(sheets.keys()), "row_count": row_count,
+                        "extracted": data, "status": "success"}
+            if t == "csv":
+                cols = data.get("columns", {})
+                row_count = max((c.get("count", 0) for c in cols.values()
+                                 if isinstance(c, dict)), default=0)
+                return {"data_type": "XML", "sheet_names": ["Sheet1"], "row_count": row_count,
+                        "extracted": data, "status": "success"}
+            _txt = data.get("content", "") or ""
+            return {"data_type": "XML", "sheet_names": [], "row_count": len(_txt),
+                    "extracted": {"raw_text": _txt}, "status": "success"}
+        except Exception as e:
+            return {
+                "status": "parsing_failed", "data_type": "UNKNOWN",
+                "sheet_names": [], "row_count": 0, "extracted": {}, "errors": [str(e)],
+            }
+
+    well_hint = ""
+    handler_error = None
     try:
-        handler = SCALFileHandler(filepath)
+        handler = SCALFileHandler(filepath, display_name=source_name)
         result = handler.process()
+        well_hint = result.get("well_name", "")
+        # PVT files are rejected outright — do NOT fall through to the robust
+        # extractor, which would misparse fluid data under a SCAL track.
+        if result and result.get("data_type") == "PVT":
+            return {
+                "status": "rejected_wrong_dataset", "data_type": "PVT",
+                "sheet_names": result.get("sheet_names", []), "row_count": 0,
+                "extracted": {},
+                "errors": [SCALFileHandler.PVT_REJECTION_MSG],
+            }
         if result and result.get("row_count", 0) > 0:
+            result["extractor"] = "scal_file_handler"
+            result.update(_link_samples_to_graph(
+                well_hint,
+                (result.get("extracted") or {}).get("samples") or {},
+                result.get("data_type", "UNKNOWN"),
+                source_name,
+            ))
             return result
-    except Exception as e:
-        pass
+    except Exception as exc:
+        # The primary extractor crashed. The robust parser may still succeed,
+        # but the caller must see that it is a different extractor's reading.
+        handler_error = f"{type(exc).__name__}: {exc}"
+        import logging
+        logging.getLogger("prc-extract").warning(
+            "SCALFileHandler failed on %s (%s); falling back to robust_extract_scal",
+            source_name, handler_error,
+        )
 
     robust_result = robust_extract_scal(filepath)
     if any(s.get("data_block") for s in robust_result["sheets"]):
         data_types = [s["track"] for s in robust_result["sheets"] if s.get("data_block") and s["track"] != "UNKNOWN"]
         dt = data_types[0] if data_types else "UNKNOWN"
+        if not well_hint:
+            # Handler never produced a well (e.g. .xlsb/.tsv raise in read());
+            # the robust parser still captures 'Well: X' header labels.
+            well_hint = next(
+                (s.get("metadata", {}).get("well")
+                 for s in robust_result["sheets"] if s.get("metadata", {}).get("well")),
+                "",
+            )
+        graph = _link_samples_to_graph(
+            well_hint,
+            {s["name"]: s["data_block"] for s in robust_result["sheets"] if s.get("data_block")},
+            dt,
+            source_name,
+        )
         return {
             "data_type": dt,
             "sheet_names": [s["name"] for s in robust_result["sheets"]],
             "row_count": sum(s["data_block"]["n_rows"] for s in robust_result["sheets"] if s.get("data_block")),
             "extracted": robust_result,
-            "status": "success"
+            "status": "success",
+            "extractor": "robust_fallback",
+            "handler_error": handler_error,
+            **graph,
         }
     return {
         "status": "parsing_failed",
@@ -1464,5 +1553,6 @@ def extract_file_data(filepath):
         "extracted": robust_result,
         "filename": robust_result["filename"],
         "engines_tried": [e.split(":")[0] for e in robust_result["errors"]],
-        "errors": robust_result["errors"],
+        "errors": robust_result["errors"] + ([handler_error] if handler_error else []),
+        "handler_error": handler_error,
     }

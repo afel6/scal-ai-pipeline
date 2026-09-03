@@ -2,7 +2,7 @@ import pytest
 import re
 import os
 from fastapi.testclient import TestClient
-from app import app, init_db
+from app import app
 
 
 def _resolve_key():
@@ -20,15 +20,16 @@ def _resolve_key():
     return ""
 
 
-_KEY = _resolve_key()
+# D0: a live call is an explicit opt-in (ALLOW_EGRESS=1 disarms the socket
+# guard); a key merely being present never triggers one.
+_KEY = _resolve_key() if os.environ.get("ALLOW_EGRESS") == "1" else ""
 
-# Both tests exercise the live /api/chat LLM pipeline (real Gemini responses),
-# so they are integration tests: skipped on CI (no secret) and run only when a
-# real key is present locally. This lets the file be collected by `pytest tests/`
-# without a dedicated --ignore entry.
+# Both tests exercise the live /api/chat LLM pipeline (real model responses),
+# so they are integration tests: skipped unless explicitly opted in. This lets
+# the file be collected by `pytest tests/` without a dedicated --ignore entry.
 pytestmark = [
     pytest.mark.integration,
-    pytest.mark.skipif(not _KEY, reason="No usable GEMINI_API_KEY available (live API test)"),
+    pytest.mark.skipif(not _KEY, reason="Live API test: needs ALLOW_EGRESS=1 and a usable GEMINI_API_KEY"),
 ]
 
 
@@ -48,15 +49,15 @@ def send_chat(client, message: str, user_email: str = "test@prc.local", file_pat
         "user_email": user_email
     }
     
-    files = {}
+    # Endpoint signature is `files: list[UploadFile] = File(default=[])`, so the
+    # multipart field name must be "files" — a mismatched name is silently dropped.
+    files = []
     if file_path and os.path.exists(file_path):
-        files["file"] = open(file_path, "rb")
-        
-    response = client.post(url, data=data, files=files if files else None)
-    
-    if "file" in files:
-        files["file"].close()
-        
+        with open(file_path, "rb") as fh:
+            files.append(("files", (os.path.basename(file_path), fh.read(), "application/vnd.ms-excel")))
+
+    response = client.post(url, data=data, files=files or None)
+
     response.raise_for_status()
     return response.json()["reply"]
 

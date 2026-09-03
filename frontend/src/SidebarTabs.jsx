@@ -1,6 +1,6 @@
 /* eslint-disable no-empty, no-unused-vars */
 import React, { useState, useEffect } from 'react';
-import { MessageSquare, Trash2, BookOpen, Upload, CheckCircle, Loader, FileText, Camera, Database, Activity } from 'lucide-react';
+import { MessageSquare, Trash2, BookOpen, Upload, CheckCircle, Loader, FileText, Camera, Database, Activity, BarChart3 } from 'lucide-react';
 import axios from 'axios';
 
 const API_URL = import.meta.env.VITE_API_URL || '';
@@ -93,24 +93,31 @@ export default function SidebarTabs({ sessionId, sessions, handleLoadSession, ha
       <div className="flex border-b border-slate-800/60 shrink-0">
         <button
           onClick={() => setTab('chats')}
-          className={`sidebar-tab flex-1 py-2.5 text-[11px] font-bold tracking-widest uppercase flex items-center justify-center gap-1.5
+          className={`sidebar-tab flex-1 py-3 text-[10px] font-bold tracking-wider uppercase flex items-center justify-center gap-1 flex-nowrap whitespace-nowrap
             ${tab === 'chats' ? 'text-yellow-400 active' : 'text-slate-500 hover:text-slate-300'}`}
         >
-          <MessageSquare className="w-3.5 h-3.5" /> Chats
+          <MessageSquare className="w-3.5 h-3.5 shrink-0" /> <span className="shrink-0">Chats</span>
+        </button>
+        <button
+          onClick={() => setTab('studio')}
+          className={`sidebar-tab flex-1 py-3 text-[10px] font-bold tracking-wider uppercase flex items-center justify-center gap-1 flex-nowrap whitespace-nowrap
+            ${tab === 'studio' ? 'text-yellow-400 active' : 'text-slate-500 hover:text-slate-300'}`}
+        >
+          <BarChart3 className="w-3.5 h-3.5 shrink-0" /> <span className="shrink-0">Studio</span>
         </button>
         <button
           onClick={() => setTab('library')}
-          className={`sidebar-tab flex-1 py-2.5 text-[11px] font-bold tracking-widest uppercase flex items-center justify-center gap-1.5
+          className={`sidebar-tab flex-1 py-3 text-[10px] font-bold tracking-wider uppercase flex items-center justify-center gap-1 flex-nowrap whitespace-nowrap
             ${tab === 'library' ? 'text-yellow-400 active' : 'text-slate-500 hover:text-slate-300'}`}
         >
-          <Database className="w-3.5 h-3.5" /> Library
+          <Database className="w-3.5 h-3.5 shrink-0" /> <span className="shrink-0">Library</span>
         </button>
         <button
           onClick={() => setTab('audit')}
-          className={`sidebar-tab flex-1 py-2.5 text-[11px] font-bold tracking-widest uppercase flex items-center justify-center gap-1.5
+          className={`sidebar-tab flex-1 py-3 text-[10px] font-bold tracking-wider uppercase flex items-center justify-center gap-1 flex-nowrap whitespace-nowrap
             ${tab === 'audit' ? 'text-yellow-400 active' : 'text-slate-500 hover:text-slate-300'}`}
         >
-          <Camera className="w-3.5 h-3.5" /> Auditor
+          <Camera className="w-3.5 h-3.5 shrink-0" /> <span className="shrink-0">Auditor</span>
         </button>
       </div>
 

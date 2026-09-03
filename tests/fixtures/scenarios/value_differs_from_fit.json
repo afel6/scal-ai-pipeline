@@ -1,0 +1,9 @@
+{
+  "name": "value_differs_from_fit",
+  "description": "C2 gate finding (A2 protocol on gemini-2.5-flash): the cache-path RI fit SUCCEEDS and returns n = 1.850, yet the model restates n = 1.999 in prose and 1.871 in the table cell (4 of 5 live runs). The old gate passed them because it only checked that a successful call to the allowed tool existed — existence of a successful call is not evidence for a number. The value-bound gate must strip 1.999 and 1.871 while the correct restatements 1.850 and 1.85 survive.",
+  "on_exhausted": "error",
+  "steps": [
+    {"assistant": {"text": "", "tool_calls": [{"name": "fit_petrophysical_curve", "args": {"model": "ri", "sample_name": "D2-1"}}]}},
+    {"assistant": {"text": "## Executive Summary\nThe fitted Archie saturation exponent n = 1.850 for Sample D2-1 [fit_petrophysical_curve, model=ri] indicates a water-wet system. A prior pass quoted the exponent n = 1.999 for the same core; rounded, the fitted exponent n is 1.85.\n\n| Parameter | Value | Source |\n|---|---|---|\n| Archie Saturation Exponent n | 1.871 | fit_petrophysical_curve |\n"}}
+  ]
+}

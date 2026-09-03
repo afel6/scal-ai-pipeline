@@ -1,13 +1,13 @@
 import os
 import sqlite3
 import json
-import re
+import logging
 from datetime import datetime
 from docx import Document
 from docx.shared import Inches, Pt, Cm, RGBColor
-from docx.enum.text import WD_ALIGN_PARAGRAPH, WD_LINE_SPACING
-from docx.enum.table import WD_TABLE_ALIGNMENT, WD_ALIGN_VERTICAL
-from docx.oxml.ns import qn, nsdecls
+from docx.enum.text import WD_ALIGN_PARAGRAPH
+from docx.enum.table import WD_TABLE_ALIGNMENT
+from docx.oxml.ns import nsdecls
 from docx.oxml import parse_xml
 import matplotlib.pyplot as plt
 import numpy as np
@@ -16,8 +16,14 @@ import io
 # ──────────────────────────────────────────────
 # BRAND CONSTANTS (Sync with CLAUDE.md)
 # ──────────────────────────────────────────────
+_logger = logging.getLogger("prc-report")
+
 NAVY = "1B3A5C"
 BLUE = "2E75B6"
+
+# Transcript messages carrying this marker are rendered into the report's
+# Parameter Provenance subsection (prc_physics.provenance_notice).
+PROVENANCE_MARKER = "BROOKS-COREY PARAMETER PROVENANCE:"
 LIGHT_BLUE = "D5E8F0"
 ZEBRA = "F2F2F2"
 DARK_GRAY = "333333"
@@ -32,25 +38,18 @@ RED_RGB = RGBColor(0xC0, 0x39, 0x2B)
 LIGHT_GRAY_RGB = RGBColor(0x99, 0x99, 0x99)
 
 class PRCReportEngine:
-    def __init__(self, db_path="chat_history.db"):
+    def __init__(self, db_path=None):
+        # Explicit path, or the store the app writes (DB_DIR/chat_history.db) —
+        # never a CWD-relative file (D1: two databases depending on the launch dir).
+        if db_path is None:
+            from config import settings
+            db_path = os.path.join(settings.DB_DIR, "chat_history.db")
         self.db_path = db_path
 
     # --- STYLE HELPERS ---
     def _set_cell_shading(self, cell, color_hex):
         shading_elm = parse_xml(f'<w:shd {nsdecls("w")} w:fill="{color_hex}" w:val="clear"/>')
         cell._element.get_or_add_tcPr().append(shading_elm)
-
-    def _set_cell_border(self, cell, **kwargs):
-        tc = cell._element
-        tcPr = tc.get_or_add_tcPr()
-        tcBorders = parse_xml(f'<w:tcBorders {nsdecls("w")}></w:tcBorders>')
-        for edge, attrs in kwargs.items():
-            element = parse_xml(
-                f'<w:{edge} {nsdecls("w")} w:val="{attrs.get("val", "single")}" '
-                f'w:sz="{attrs.get("sz", "4")}" w:space="0" w:color="{attrs.get("color", "CCCCCC")}"/>'
-            )
-            tcBorders.append(element)
-        tcPr.append(tcBorders)
 
     def _add_heading(self, doc, text, level=1):
         heading = doc.add_heading(level=level)
@@ -83,7 +82,7 @@ class PRCReportEngine:
         run.italic = italic
         return p
 
-    def generate(self, session_id, well_name="Unknown Well"):
+    def generate(self, session_id, well_name="Unknown Well", output_dir=None):
         doc = Document()
         
         # --- COVER PAGE ---
@@ -114,7 +113,13 @@ class PRCReportEngine:
         self._add_footer(doc, well_name)
 
         filename = f"PRC_SCAL_Report_{well_name}_{session_id[:6]}.docx"
-        output_path = os.path.join(os.getcwd(), "reports", filename)
+        # Destination precedence: explicit output_dir (the app passes the shared
+        # PRC vault) -> PRC_AI_VAULT env -> the original local reports/ folder.
+        if output_dir is None:
+            from config import settings
+            output_dir = settings.PRC_AI_VAULT
+        base = output_dir
+        output_path = os.path.join(base, filename)
         os.makedirs(os.path.dirname(output_path), exist_ok=True)
         doc.save(output_path)
         return filename
@@ -168,7 +173,28 @@ class PRCReportEngine:
             c1.paragraphs[0].add_run(value)
 
     def _build_audit_section(self, doc, messages):
-        self._add_body(doc, "All data processed during this session has passed the PRC Physics Watchtower gates.")
+        # Parse first, then say what the rows show: the "passed the gates" sentence
+        # is a claim about the audit rows, not about reaching this line (D3.1).
+        rows = []
+        for role, text, url in messages:
+            if "PHYSICS HEALTH AUDIT:" in text:
+                try:
+                    score = text.split("PHYSICS HEALTH AUDIT:")[1].split("|")[0].strip()
+                    status = text.split("STATUS:")[1].split("\n")[0].strip()
+                    rows.append((score, status))
+                except (IndexError, ValueError) as exc:
+                    _logger.warning("Unparseable physics audit line %r: %s", text[:120], exc)
+                    rows.append(("?", "UNPARSEABLE AUDIT LINE"))
+
+        failed = [status for _, status in rows if not status.upper().startswith("PASS")]
+        if not rows:
+            self._add_body(doc, "No physics audit was recorded for this session: the data has NOT been "
+                                "verified against the PRC Physics Watchtower gates.", bold=True)
+        elif failed:
+            self._add_body(doc, "Data processed during this session did NOT pass the PRC Physics Watchtower "
+                                f"gates ({len(failed)} of {len(rows)} audit(s): {', '.join(failed)}).", bold=True)
+        else:
+            self._add_body(doc, "All data processed during this session has passed the PRC Physics Watchtower gates.")
         table = doc.add_table(rows=1, cols=3)
         table.style = 'Table Grid'
         hdr_cells = table.rows[0].cells
@@ -178,16 +204,21 @@ class PRCReportEngine:
             run = hdr_cells[i].paragraphs[0].runs[0]
             run.font.color.rgb = WHITE_RGB; run.bold = True
 
+        for score, status in rows:
+            row = table.add_row().cells
+            row[0].text = "SCAL Study"
+            row[1].text = score
+            row[2].text = status
+
+        # Parameter provenance. A substituted endpoint must be visible to the
+        # reader of the document, not only present in the JSON payload.
         for role, text, url in messages:
-            if "PHYSICS HEALTH AUDIT:" in text:
-                try:
-                    score = text.split("PHYSICS HEALTH AUDIT:")[1].split("|")[0].strip()
-                    status = text.split("STATUS:")[1].split("\n")[0].strip()
-                    row = table.add_row().cells
-                    row[0].text = "SCAL Study"
-                    row[1].text = score
-                    row[2].text = status
-                except: pass
+            if PROVENANCE_MARKER in text:
+                self._add_heading(doc, "2.1 Parameter Provenance", 2)
+                for line in text.splitlines():
+                    if line.strip():
+                        self._add_body(doc, line.strip(),
+                                       bold="WARNING:" in line)
 
     def _extract_json_payload(self, text: str) -> tuple[dict, str]:
         """
@@ -198,7 +229,6 @@ class PRCReportEngine:
             return {}, text
             
         parts = text.split('__PRC_PLOT__', 1)
-        leading_text = parts[0].strip()
         rest = parts[1].strip()
         
         # Clean potential markdown block prefix
@@ -244,7 +274,8 @@ class PRCReportEngine:
         if end_idx == -1:
             try:
                 return json.loads(rest), ""
-            except Exception:
+            except ValueError as exc:
+                _logger.warning("__PRC_PLOT__ payload unbalanced and not JSON: %s", exc)
                 return {}, text
                 
         json_str = rest[start_idx:end_idx+1]
@@ -256,12 +287,19 @@ class PRCReportEngine:
         try:
             plot_data = json.loads(json_str)
             return plot_data, trailing_text
-        except Exception:
+        except ValueError as exc:
+            _logger.warning("__PRC_PLOT__ payload is not JSON: %s", exc)
             return {}, text
 
-    def _draw_chart_for_doc(self, data: dict) -> io.BytesIO | None:
-        """Creates a premium, physics-aware chart image buffer suitable for injection into DOCX."""
-        import numpy as np
+    def _draw_chart_for_doc(self, data: dict) -> io.BytesIO:
+        """Creates a premium, physics-aware chart image buffer suitable for injection into DOCX.
+
+        Raises ValueError when the payload has nothing plottable (no recognised
+        curve shape, or every point filtered out); any other failure propagates.
+        The caller writes the omission into the document - a heading with no
+        figure and no note is not an outcome anyone can see (D3.1).
+        """
+        fig = None
         try:
             title  = data.get('title', 'PRC Analysis')
             xAxis_cfg = data.get('xAxis') or {}
@@ -342,7 +380,7 @@ class PRCReportEngine:
                 })
 
             if not curves:
-                return None
+                raise ValueError("payload has no recognised curve shape (curves / samples / x+y)")
 
             # Filter out invalid and non-positive points for log scales
             all_left_x, all_left_y = [], []
@@ -378,6 +416,9 @@ class PRCReportEngine:
                 else:
                     all_left_x.extend(filtered_x)
                     all_left_y.extend(filtered_y)
+
+            if not any(c['x_filtered'] for c in curves):
+                raise ValueError("every point was filtered out (non-numeric, or non-positive on a log axis)")
 
             # Plot setup
             fig, ax1 = plt.subplots(figsize=(7, 4.5), dpi=150)
@@ -568,40 +609,52 @@ class PRCReportEngine:
             
             buf = io.BytesIO()
             plt.savefig(buf, format='png', dpi=150, bbox_inches='tight')
-            plt.close()
             buf.seek(0)
             return buf
-        except Exception as e:
-            print(f"Error drawing chart: {e}")
-            return None
+        finally:
+            if fig is not None:
+                plt.close(fig)
 
     def _build_analysis_section(self, doc, messages):
         for i, (role, text, url) in enumerate(messages):
             if role == "model" and "__PRC_PLOT__" in text:
+                # A plot that cannot be rendered is written into the document as an
+                # omission note - never silently absent (D3.1). The message's own
+                # interpretation text is kept either way.
                 try:
                     plot_data, trailing_text = self._extract_json_payload(text)
-                    if plot_data:
-                        # Dynamic title based on chart title
-                        title = plot_data.get('title', 'Petrophysical Curve Analysis')
-                        self._add_heading(doc, title, 2)
-                        
+                    if not plot_data:
+                        self._add_body(doc, "[Figure omitted: the __PRC_PLOT__ payload in this message "
+                                            "could not be parsed]", bold=True)
+                        continue
+                    # Dynamic title based on chart title
+                    title = plot_data.get('title', 'Petrophysical Curve Analysis')
+                    self._add_heading(doc, title, 2)
+
+                    try:
                         buf = self._draw_chart_for_doc(plot_data)
-                        if buf:
-                            p = doc.add_paragraph()
-                            p.alignment = WD_ALIGN_PARAGRAPH.CENTER
-                            p.add_run().add_picture(buf, width=Inches(5.5))
-                            
-                            # Caption
-                            cp = doc.add_paragraph()
-                            cp.alignment = WD_ALIGN_PARAGRAPH.CENTER
-                            cr = cp.add_run(f"Figure: {title}")
-                            cr.italic = True; cr.font.size = Pt(9); cr.font.color.rgb = LIGHT_GRAY_RGB
-                        
-                        # Add trailing interpretation text underneath the figure
-                        if trailing_text:
-                            self._add_body(doc, trailing_text, italic=True)
+                    except Exception as e:
+                        _logger.exception("Chart '%s' could not be rendered", title)
+                        self._add_body(doc, f"[Figure omitted: '{title}' could not be rendered - "
+                                            f"{type(e).__name__}: {e}]", bold=True)
+                    else:
+                        p = doc.add_paragraph()
+                        p.alignment = WD_ALIGN_PARAGRAPH.CENTER
+                        p.add_run().add_picture(buf, width=Inches(5.5))
+
+                        # Caption
+                        cp = doc.add_paragraph()
+                        cp.alignment = WD_ALIGN_PARAGRAPH.CENTER
+                        cr = cp.add_run(f"Figure: {title}")
+                        cr.italic = True; cr.font.size = Pt(9); cr.font.color.rgb = LIGHT_GRAY_RGB
+
+                    # Add trailing interpretation text underneath the figure
+                    if trailing_text:
+                        self._add_body(doc, trailing_text, italic=True)
                 except Exception as e:
-                    print(f"Skipping plot injection in report: {e}")
+                    _logger.exception("Plot section skipped in report")
+                    self._add_body(doc, f"[Section omitted: plot could not be added to the report - "
+                                        f"{type(e).__name__}: {e}]", bold=True)
 
     def _add_footer(self, doc, well_name):
         section = doc.sections[0]

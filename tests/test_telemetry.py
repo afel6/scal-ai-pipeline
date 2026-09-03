@@ -1,8 +1,4 @@
-import pytest
 from fastapi.testclient import TestClient
-from app import app
-import os
-import time
 
 # Mock ADMIN_PIN to bypass the empty string issue if env wasn't set.
 # The route logic uses `hmac.compare_digest(input_pin, ADMIN_PIN)`.

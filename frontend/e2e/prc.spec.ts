@@ -64,6 +64,11 @@ async function mockApi(page: Page, sessions: typeof MOCK_SESSION[] = []) {
   await page.route('**/api/auth',     (r) => r.fulfill({ status: 200, body: '' }));
   await page.route('**/api/register', (r) => r.fulfill({ status: 200, body: '' }));
 
+  // New Study clears server-side files before resetting local state. Without a
+  // mock the awaited POST falls through the vite proxy to a dead backend, so the
+  // localStorage reset only runs after a slow rejection — racing the assertions.
+  await page.route('**/api/clear-user-files', (r) => r.fulfill({ status: 200, body: '' }));
+
   // Chat SSE stream — returns all events in a single body; the browser's
   // EventSource parser fires individual onmessage events from the concatenated stream.
   await page.route('**/api/chat/stream*', (r) =>
@@ -214,8 +219,11 @@ test.describe('New Study flow', () => {
     // Chat input still visible, session cleared
     await expect(page.getByPlaceholder(/Query Hviel|Establishing/i)).toBeVisible();
 
-    const storedSid = await page.evaluate(() => localStorage.getItem('prc_session_id'));
-    expect(storedSid).toBe('');
+    // handleNewChat awaits the clear-user-files POST before resetting local
+    // state, so poll rather than reading once (avoids a click-vs-async race).
+    await expect
+      .poll(() => page.evaluate(() => localStorage.getItem('prc_session_id')))
+      .toBe('');
   });
 });
 
@@ -296,9 +304,13 @@ test.describe('Chat flow (mocked SSE)', () => {
     await textarea.fill('Test network failure');
     await textarea.press('Enter');
 
-    await expect(
-      page.locator('text=/Connection error|Unable to reach/i')
-    ).toBeVisible({ timeout: 6000 });
+    // A failed *initial* SSE connect leaves EventSource in CONNECTING (the
+    // browser auto-reconnects), so App.jsx's es.onerror takes the early-return
+    // branch: it flips the status badge to "Offline" without injecting a chat
+    // message (message injection is reserved for the terminal/CLOSED path to
+    // avoid flapping on transient end-of-stream drops). The Offline badge is the
+    // connection-failure surface the user actually sees here.
+    await expect(page.locator('text=Offline').first()).toBeVisible({ timeout: 6000 });
 
     // App must not crash — input still functional
     await expect(textarea).toBeVisible();

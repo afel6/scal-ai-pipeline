@@ -1,7 +1,5 @@
 import os
 import json
-import pytest
-import shutil
 from data_validator import validate_scal_data
 from visualizer import generate_plots
 

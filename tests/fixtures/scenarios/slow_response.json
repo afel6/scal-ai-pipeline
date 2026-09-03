@@ -1,0 +1,8 @@
+{
+  "name": "slow_response",
+  "description": "A slow but complete model response (45 s scripted delay, recorded not waited): latency alone must not trigger any fallback or substitution — the answer is delivered intact through assembly (tokens resolved, gate applied).",
+  "on_exhausted": "error",
+  "steps": [
+    {"slow": {"delay": 45.0, "text": "Slow but complete: the Amott water index Iw = {{val:Wettability.Amott_Water_Index_Iw}} for sample D2-1; no Archie fit was requested."}}
+  ]
+}

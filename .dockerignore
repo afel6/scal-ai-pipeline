@@ -1,0 +1,52 @@
+# Git
+.git
+.gitignore
+
+# Virtual environments
+.venv/
+venv/
+__pycache__/
+*.pyc
+*.pyo
+
+# IDE
+.vscode/
+.idea/
+
+# Tests
+tests/
+.pytest_cache/
+htmlcov/
+.coverage
+
+# Build artifacts
+*.bak
+*.bundle
+*.log
+stdout.log
+stderr.log
+startup_stdout.txt
+startup_stderr.txt
+dummy_test.csv
+
+# Frontend build sources (we only need dist/)
+frontend/node_modules/
+frontend/e2e/
+frontend/.vite/
+frontend/playwright-report/
+
+# Development files
+*.md
+!README.md
+!RUNBOOK.md
+.env
+.env.*
+!.env.example
+
+# Large binaries
+*.exe
+*.zip
+
+# Docker
+Dockerfile
+docker-compose.yml

@@ -1,5 +1,71 @@
 @import "tailwindcss";
 
+/* ══════════════════════════════════════════════════════════════════════════
+   INDUSTRIAL GLASS-BRUTALIST DESIGN SYSTEM
+   New tokens + utilities for the Petrophysical Studio. Layered on top of the
+   existing PRC tokens/animations below (both kept — nothing removed).
+   ══════════════════════════════════════════════════════════════════════════ */
+@theme {
+  --color-bg-base: #030303;
+  --color-bg-surface: #07070d;
+  --color-bg-panel: #0d0d16;
+
+  --color-brand-amber: #d97706;
+  --color-brand-gold: #ffd700;
+  --color-data-sky: #38bdf8;
+  --color-border-brutal: #1f2937;
+
+  --font-mono: "JetBrains Mono", "Fira Code", "Courier New", monospace;
+}
+
+/* Custom Utilities for Glass-Brutalist Pipeline UI */
+@layer utilities {
+  .glass-brutal {
+    background: linear-gradient(135deg, rgba(7, 7, 13, 0.8) 0%, rgba(13, 13, 22, 0.9) 100%);
+    backdrop-filter: blur(8px);
+    border: 1px solid var(--color-border-brutal);
+    box-shadow: 0 4px 30px rgba(0, 0, 0, 0.8);
+  }
+
+  .glass-brutal-active {
+    border-color: var(--color-brand-amber);
+    box-shadow: 0 0 12px rgba(217, 119, 6, 0.2);
+  }
+
+  /* Monospace Micro Scrollbar */
+  .custom-scrollbar::-webkit-scrollbar {
+    width: 4px;
+    height: 4px;
+  }
+
+  .custom-scrollbar::-webkit-scrollbar-track {
+    background: #030303;
+  }
+
+  .custom-scrollbar::-webkit-scrollbar-thumb {
+    background: #1f2937;
+    border-radius: 2px;
+  }
+
+  .custom-scrollbar::-webkit-scrollbar-thumb:hover {
+    background: #d97706;
+  }
+
+  /* Scanline terminal overlay effect */
+  .terminal-scanlines {
+    background: linear-gradient(
+      rgba(18, 16, 16, 0) 50%,
+      rgba(0, 0, 0, 0.25) 50%
+    ), linear-gradient(
+      90deg,
+      rgba(255, 0, 0, 0.06),
+      rgba(0, 255, 0, 0.02),
+      rgba(0, 0, 255, 0.06)
+    );
+    background-size: 100% 4px, 6px 100%;
+  }
+}
+
 /* ── Design Tokens ──────────────────────────────────────────────────────── */
 :root {
   --prc-gold:       #fbbf24;
@@ -308,7 +374,186 @@ body {
 
 .prc-markdown table {
   max-width: 100% !important;
-  overflow-x: auto !important;
-  display: block !important;
+}
+
+
+/* ══════════════════════════════════════════════════════════════════════════
+   AVIEL GLASS-BRUTALIST PORT (synced from pvt-ai-pipeline/frontend/src/index.css)
+   PRC AI Hub synchronization — shared Industrial Glass-Brutalist language with
+   the PVT/Aviel dashboard: glowing amber, sky-blue data, scanline terminal
+   overlay, 1px brutalist borders, typewriter cursor. Layered ON TOP of the PRC
+   tokens above — nothing removed. Global body/html/scrollbar resets from PVT are
+   intentionally NOT copied so SCAL keeps its Outfit prose font and scroll model.
+   ══════════════════════════════════════════════════════════════════════════ */
+@theme {
+  --color-void: #030303;
+  --color-abyss: #07070d;
+  --color-amber-glow: #d97706;
+  --color-amber-bright: #f59e0b;
+  --color-sky: #38bdf8;
+}
+
+:root {
+  --void: #030303;
+  --abyss: #07070d;
+  --panel: rgba(13, 13, 22, 0.72);
+  --glass: rgba(217, 119, 6, 0.04);
+  --amber: #d97706;
+  --amber-bright: #f59e0b;
+  --sky: #38bdf8;
+  --sky-dim: #0ea5e9;
+  --edge: #1c1c28;
+  --edge-amber: rgba(217, 119, 6, 0.45);
+}
+
+/* ---- Glass-Brutalist surfaces -------------------------------------- */
+.glass {
+  background: var(--panel);
+  border: 1px solid var(--edge);
+  backdrop-filter: blur(10px);
+}
+.glass-amber {
+  border: 1px solid var(--edge-amber);
+  box-shadow: 0 0 0 1px rgba(217, 119, 6, 0.08),
+    0 0 28px -12px rgba(217, 119, 6, 0.55) inset;
+}
+.brutal-border {
+  border: 1px solid var(--edge);
+}
+.hot-border {
+  border: 1px solid var(--amber);
+  box-shadow: 0 0 18px -6px rgba(217, 119, 6, 0.7);
+}
+
+.glow-amber {
+  color: var(--amber-bright);
+  text-shadow: 0 0 14px rgba(217, 119, 6, 0.55);
+}
+.glow-sky {
+  color: var(--sky);
+  text-shadow: 0 0 12px rgba(56, 189, 248, 0.5);
+}
+.label-mono {
+  font-size: 10px;
+  letter-spacing: 0.22em;
+  text-transform: uppercase;
+  color: rgba(138, 138, 153, 0.9);
+  font-family: 'JetBrains Mono', 'Fira Code', monospace;
+}
+
+/* ---- Scanline terminal overlay ------------------------------------- */
+.scanlines {
+  position: relative;
+  overflow: hidden;
+}
+.scanlines::before {
+  content: '';
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  background: repeating-linear-gradient(
+    0deg,
+    rgba(56, 189, 248, 0.04) 0px,
+    rgba(56, 189, 248, 0.04) 1px,
+    transparent 1px,
+    transparent 3px
+  );
+  z-index: 4;
+}
+.scanlines::after {
+  content: '';
+  position: absolute;
+  left: 0;
+  right: 0;
+  height: 80px;
+  pointer-events: none;
+  background: linear-gradient(
+    180deg,
+    transparent,
+    rgba(56, 189, 248, 0.07),
+    transparent
+  );
+  animation: sweep 6s linear infinite;
+  z-index: 5;
+}
+@keyframes sweep {
+  0%   { top: -80px; }
+  100% { top: 100%; }
+}
+
+/* ---- Typewriter terminal cursor ------------------------------------ */
+.cursor-blink::after {
+  content: '▋';
+  color: var(--amber-bright);
+  animation: blink 1s step-end infinite;
+}
+@keyframes blink {
+  50% { opacity: 0; }
+}
+
+.pulse-dot {
+  animation: pulse 1.6s ease-in-out infinite;
+}
+@keyframes pulse {
+  0%, 100% { opacity: 1; }
+  50%      { opacity: 0.35; }
+}
+
+/* ---- Industrial range sliders -------------------------------------- */
+.brutal-range {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 100%;
+  height: 4px;
+  background: linear-gradient(
+    90deg,
+    var(--amber) var(--fill, 50%),
+    #15151f var(--fill, 50%)
+  );
+  border: 1px solid var(--edge);
+  outline: none;
+}
+.brutal-range::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 14px;
+  height: 18px;
+  background: var(--amber-bright);
+  border: 1px solid #000;
+  box-shadow: 0 0 12px rgba(217, 119, 6, 0.8);
+  cursor: pointer;
+}
+.brutal-range::-moz-range-thumb {
+  width: 14px;
+  height: 18px;
+  background: var(--amber-bright);
+  border: 1px solid #000;
+  cursor: pointer;
+}
+
+/* ---- Industrial progress bars -------------------------------------- */
+.bar-track {
+  height: 4px;
+  background: #15151f;
+  border: 1px solid var(--edge);
+  overflow: hidden;
+}
+.bar-fill {
+  height: 100%;
+  background: linear-gradient(90deg, var(--amber), var(--amber-bright));
+  box-shadow: 0 0 10px rgba(217, 119, 6, 0.7);
+  transition: width 0.25s ease;
+}
+.bar-fill-sky {
+  background: linear-gradient(90deg, var(--sky-dim), var(--sky));
+  box-shadow: 0 0 10px rgba(56, 189, 248, 0.7);
+}
+
+.fade-up {
+  animation: fadeUp 0.25s ease both;
+}
+@keyframes fadeUp {
+  from { opacity: 0; transform: translateY(6px); }
+  to   { opacity: 1; transform: translateY(0); }
 }
 

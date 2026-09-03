@@ -5,7 +5,11 @@ This module provides deterministic, unit-safe petrophysical calculations to prev
 """
 
 import math
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Optional, Tuple
+
+# Module-top (D3.1): a lazy `except ImportError: pass` skipped the Cp physics
+# audit silently whenever the validator could not be imported.
+from physics_validator import PhysicsGuard
 
 def calculate_pore_compressibility(initial_porosity: float, final_porosity: float, pressure_delta: float) -> float:
     """
@@ -101,9 +105,14 @@ def calculate_compressibility_sweep(json_data: List[Dict[str, Any]]) -> List[Dic
             try:
                 cp = calculate_pore_compressibility(phi0, phi_val, dp)
                 row["Pore_Volume_Compressibility_psi_inv"] = round(cp, 10)
-            except Exception:
-                cp = 0.0
+            except ValueError as exc:
+                # Non-physical sweep row (porosity rose under stress, >100 %, ...):
+                # keep the reason, and do not deduce a lithology from cp=0 as if
+                # this were a baseline row.
                 row["Pore_Volume_Compressibility_psi_inv"] = None
+                row["Cp_error"] = str(exc)
+                row["Deduced_Lithology"] = "Unknown Matrix"
+                continue
 
         # 2. Lithology Heuristic Deduction
         # Heuristics correlate compressibility (Cp), porosity, and permeability:
@@ -143,24 +152,20 @@ def calculate_compressibility_sweep(json_data: List[Dict[str, Any]]) -> List[Dic
         row["Deduced_Lithology"] = lith
 
     # ── Physics Guard: validate all computed Cp values ────────────────────
-    try:
-        from physics_validator import PhysicsGuard
-        cp_values = [
-            row.get("Pore_Volume_Compressibility_psi_inv")
-            for row in json_data
-            if row.get("Pore_Volume_Compressibility_psi_inv") is not None
-        ]
-        if cp_values:
-            audit = PhysicsGuard().validate_compressibility(cp_values).generate_health_score()
-            if audit["violations"]:
-                import logging
-                _logger = logging.getLogger("PRC-Hub")
-                for v in audit["violations"]:
-                    _logger.warning(f"[PhysicsGuard/Cp] {v['severity']}: {v['detail']}")
-                # Attach audit to the last row for downstream visibility
-                json_data[-1]["_cp_physics_audit"] = audit
-    except ImportError:
-        pass  # PhysicsGuard not available — skip validation
+    cp_values = [
+        row.get("Pore_Volume_Compressibility_psi_inv")
+        for row in json_data
+        if row.get("Pore_Volume_Compressibility_psi_inv") is not None
+    ]
+    if cp_values:
+        audit = PhysicsGuard().validate_compressibility(cp_values).generate_health_score()
+        if audit["violations"]:
+            import logging
+            _logger = logging.getLogger("PRC-Hub")
+            for v in audit["violations"]:
+                _logger.warning(f"[PhysicsGuard/Cp] {v['severity']}: {v['detail']}")
+            # Attach audit to the last row for downstream visibility
+            json_data[-1]["_cp_physics_audit"] = audit
 
     return json_data
 
@@ -177,37 +182,88 @@ def calculate_washburn_radius(pressure_psia: float, contact_angle_deg: float = 1
     Returns:
         float: Pore throat radius in microns, rounded to 4 decimal places.
     """
-    if pressure_psia < 0:
-        raise ValueError("Capillary pressure cannot be negative.")
+    if pressure_psia <= 0:
+        raise ValueError("Capillary pressure must be positive: the Washburn radius is undefined at Pc <= 0.")
     if contact_angle_deg < 0 or contact_angle_deg > 180:
         raise ValueError("Contact angle must be between 0 and 180 degrees.")
     if interfacial_tension <= 0:
         raise ValueError("Interfacial tension must be strictly greater than zero.")
-    
-    # Avoid division by zero
-    safe_pressure = max(pressure_psia, 1e-9)
-    
-    # Constants
+
     # 1 psi = 68947.6 dynes/cm2
-    conversion_factor = 68947.6
-    pc_dynes = safe_pressure * conversion_factor
-    
+    pc_dynes = pressure_psia * 68947.6
     theta_rad = math.radians(contact_angle_deg)
-    
-    # Washburn
-    # r is in cm
+    # Washburn: r in cm, then cm -> microns
     radius_cm = (2.0 * interfacial_tension * abs(math.cos(theta_rad))) / pc_dynes
+    return round(radius_cm * 10000.0, 4)
     
-    # Convert cm to microns (1 cm = 10,000 microns)
-    radius_microns = radius_cm * 10000.0
-    
-    return round(radius_microns, 4)
+
+
+class EndpointProvenanceError(ValueError):
+    """A Brooks-Corey endpoint had to be substituted on a path that forbids it.
+
+    Raised by the report path so a substituted Swi/Sor can never reach a .docx
+    or an LLM prompt disguised as a laboratory measurement.
+    """
+
+
+# Placeholders used ONLY when an endpoint cannot be measured or derived. They are
+# always reported with source "substituted"; they are never returned bare.
+_SUBSTITUTED_SWI = 0.1
+_SUBSTITUTED_SOR = 0.1
+
+
+def provenance_notice(fit: dict) -> str:
+    """Human-readable provenance line for a fit, for prompts and documents.
+
+    Returned text is embedded verbatim in the session transcript, so it reaches
+    the LLM context and the generated .docx rather than sitting in a field a
+    reader can miss.
+    """
+    parameters = fit.get("parameters") or {}
+    if not parameters:
+        return "BROOKS-COREY PROVENANCE: no fit was produced."
+    substituted = fit.get("substituted") or []
+    defaulted = fit.get("defaulted") or []
+    clamped = fit.get("clamped") or []
+    warnings = fit.get("warnings") or []
+    lines = ["BROOKS-COREY PARAMETER PROVENANCE:"]
+    for name, entry in parameters.items():
+        lines.append(f"  - {name} = {entry['value']} [{entry['source']}]")
+    for w in warnings:
+        lines.append("  WARNING: " + w)
+    if clamped:
+        lines.append(
+            "  NOTE: " + ", ".join(clamped) + " were CLAMPED to the physical floor — the "
+            "regression slope was non-physical, so these are bounds, not fitted values."
+        )
+    if substituted:
+        lines.append(
+            "  WARNING: " + ", ".join(substituted) + " were SUBSTITUTED, not measured "
+            "or fitted. Normalised saturation Se is built from Swi and Sor, so every "
+            "parameter above inherits any substituted endpoint. Treat the recovery "
+            "implications as unverified until the laboratory endpoints are supplied."
+        )
+    if defaulted:
+        lines.append(
+            "  NOTE: " + ", ".join(defaulted) + " fell back to textbook defaults "
+            "because this dataset had fewer than two usable fit points."
+        )
+    return "\n".join(lines)
 
 
 def fit_brooks_corey(json_data: list[dict]) -> dict:
     """
     Fits Brooks-Corey optimization parameters for Pc and Kr data from extracted json data.
     Ensures 100% thread safety by using purely local variables.
+
+    Returns a provenance-carrying structure, never bare floats:
+        {"parameters": {name: {"value": float, "source": str}},
+         "endpoints_used": {"Swi": float, "Sor": float},
+         "substituted": [...], "defaulted": [...], "clamped": [...],
+         "warnings": [...]}
+    where source is one of measured / fitted / substituted / default / clamped.
+    ``warnings`` names lab endpoints that were present but unparsable (a fitted
+    stand-in shadows a laboratory value there — the report path refuses them).
     
     Pc = Pd * (Se) ^ (-1/lambda)
     Krw = Krw_max * (Se) ^ nw
@@ -215,7 +271,6 @@ def fit_brooks_corey(json_data: list[dict]) -> dict:
     
     where Se = (Sw - Swi) / (1 - Swi - Sor)
     """
-    import numpy as np
     
     # 1. Filter rows with valid Sw, Pc, or Kr
     valid_rows = []
@@ -242,51 +297,58 @@ def fit_brooks_corey(json_data: list[dict]) -> dict:
     # Check for explicit overrides from Protocol 3
     explicit_swi = None
     explicit_sor = None
+    warnings: list[str] = []
     for r in valid_rows:
         if r.get("explicit_Swi") is not None:
             try:
                 explicit_swi = float(r["explicit_Swi"])
-            except ValueError:
-                pass
+            except (TypeError, ValueError):
+                warnings.append(f"explicit_Swi present but unparsable ({r['explicit_Swi']!r}); "
+                                "Swi falls back to the dataset minimum (fitted)")
         if r.get("explicit_Sor") is not None:
             try:
                 explicit_sor = float(r["explicit_Sor"])
-            except ValueError:
-                pass
+            except (TypeError, ValueError):
+                warnings.append(f"explicit_Sor present but unparsable ({r['explicit_Sor']!r}); "
+                                "Sor falls back to the dataset maximum (fitted)")
+    warnings = list(dict.fromkeys(warnings))
 
-    # Estimate endpoint Swi and Sor (prioritizing explicit laboratory values)
+    # Endpoint Swi and Sor, each tagged with where the number came from:
+    #   measured    - reported explicitly by the laboratory (Protocol 3 override)
+    #   fitted      - derived from this dataset's own saturation range
+    #   substituted - neither was possible; a placeholder stands in and MUST be
+    #                 declared, because Se and every fitted parameter inherit it
+    sw_vals = [r["Sw"] for r in valid_rows]
+
     if explicit_swi is not None:
-        swi = explicit_swi
+        swi, swi_source = explicit_swi, "measured"
     else:
-        sw_vals = [r["Sw"] for r in valid_rows]
-        swi = min(sw_vals)
-        
-    # Ensure Swi is strictly less than 1.0
-    if swi >= 1.0:
-        swi = 0.1
-        
-    # Estimate Sor (residual oil saturation or non-wetting residual)
+        swi, swi_source = min(sw_vals), "fitted"
+    if not 0.0 <= swi < 1.0:
+        swi, swi_source = _SUBSTITUTED_SWI, "substituted"
+
     if explicit_sor is not None:
-        sor = explicit_sor
+        sor, sor_source = explicit_sor, "measured"
     else:
-        sw_vals = [r["Sw"] for r in valid_rows]
         # Sw_max is usually 1 - Sor
-        sor = max(0.0, 1.0 - max(sw_vals))
-        
+        sor, sor_source = max(0.0, 1.0 - max(sw_vals)), "fitted"
     if swi + sor >= 1.0:
-        sor = 0.1
-        
+        sor, sor_source = _SUBSTITUTED_SOR, "substituted"
+    if swi + sor >= 1.0:
+        # Even the placeholder Sor leaves no mobile range: the Swi itself is the
+        # non-physical endpoint. It is substituted too (and declared), instead of
+        # a silent Se denominator of 0.8 under a "measured" label.
+        swi, swi_source = _SUBSTITUTED_SWI, "substituted"
+    denom = 1.0 - swi - sor          # > 0 by construction (0.8 when both substituted)
+
     # Brooks-Corey Fitting
     pc_points = []
     krw_points = []
     krnw_points = []
-    
+
     for r in valid_rows:
         sw = r["Sw"]
         # Effective saturation Se
-        denom = 1.0 - swi - sor
-        if denom <= 0:
-            denom = 0.8
         se = (sw - swi) / denom
         se = max(1e-5, min(0.99999, se))
         
@@ -302,86 +364,130 @@ def fit_brooks_corey(json_data: list[dict]) -> dict:
         if r["Krnw"] is not None and float(r["Krnw"]) > 0:
             krnw_points.append((1 - se, float(r["Krnw"])))
             
-    # Perform Least-Squares fits
-    def least_squares_fit(x_arr, y_arr):
+    # Perform Least-Squares fits. Returns None when no line can be fitted (fewer
+    # than two points, or all x identical) — the caller then labels the
+    # parameter "default", never "fitted".
+    def least_squares_fit(x_arr, y_arr) -> Optional[Tuple[float, float]]:
         n = len(x_arr)
         if n < 2:
-            return 1.0, 0.0
+            return None
         sum_x = sum(x_arr)
         sum_y = sum(y_arr)
         sum_xx = sum(xi * xi for xi in x_arr)
         sum_xy = sum(xi * yi for xi, yi in zip(x_arr, y_arr))
         denom = n * sum_xx - sum_x * sum_x
         if abs(denom) < 1e-9:
-            return 1.0, 0.0
+            return None
         slope = (n * sum_xy - sum_x * sum_y) / denom
         intercept = (sum_y - slope * sum_x) / n
         return slope, intercept
 
     # 1. Capillary Pressure Fit: ln(Pc) = ln(Pd) - (1/lambda) * ln(Se)
     # y = ln(Pc), x = ln(Se)
-    if len(pc_points) >= 2:
-        x_pc = [math.log(p[0]) for p in pc_points]
-        y_pc = [math.log(p[1]) for p in pc_points]
-        # slope = -1/lambda, intercept = ln(Pd)
-        slope, intercept = least_squares_fit(x_pc, y_pc)
-        lambda_val = -1.0 / slope if slope < 0 else 2.0
-        pd_psi = math.exp(intercept)
+    pc_fit = least_squares_fit([math.log(p[0]) for p in pc_points],
+                               [math.log(p[1]) for p in pc_points])
+    if pc_fit is not None:
+        slope, intercept = pc_fit
+        pd_psi, pd_source = math.exp(intercept), "fitted"
+        if slope < 0:
+            lambda_val, lambda_source = -1.0 / slope, "fitted"
+        else:
+            # A non-negative slope is not a Brooks-Corey drainage curve: lambda is
+            # a textbook default here, not a fit, and must say so.
+            lambda_val, lambda_source = 2.0, "default"
+            warnings.append(f"Pc regression slope {slope:.4f} >= 0 is non-physical; "
+                            "lambda defaulted to 2.0")
     else:
-        lambda_val = 2.0
-        pd_psi = 1.0
-        
+        lambda_val, pd_psi = 2.0, 1.0
+        lambda_source = pd_source = "default"
+
     # 2. Wetting Phase relative perm fit: ln(Krw) = ln(Krw_max) + nw * ln(Se)
-    if len(krw_points) >= 2:
-        x_krw = [math.log(p[0]) for p in krw_points]
-        y_krw = [math.log(p[1]) for p in krw_points]
-        nw, intercept = least_squares_fit(x_krw, y_krw)
+    krw_fit = least_squares_fit([math.log(p[0]) for p in krw_points],
+                                [math.log(p[1]) for p in krw_points])
+    if krw_fit is not None:
+        nw, intercept = krw_fit
         krw_max = math.exp(intercept)
-        nw = max(0.5, nw)
+        krw_source = "fitted"
+        if nw < 0.5:
+            nw, krw_source = 0.5, "clamped"
     else:
         nw = 3.0
         krw_max = 1.0
-        
+        krw_source = "default"
+
     # 3. Non-wetting Phase relative perm fit: ln(Krnw) = ln(Krnw_max) + no * ln(1 - Se)
-    if len(krnw_points) >= 2:
-        x_krnw = [math.log(p[0]) for p in krnw_points]
-        y_krnw = [math.log(p[1]) for p in krnw_points]
-        no, intercept = least_squares_fit(x_krnw, y_krnw)
+    krnw_fit = least_squares_fit([math.log(p[0]) for p in krnw_points],
+                                 [math.log(p[1]) for p in krnw_points])
+    if krnw_fit is not None:
+        no, intercept = krnw_fit
         krnw_max = math.exp(intercept)
-        no = max(0.5, no)
+        krnw_source = "fitted"
+        if no < 0.5:
+            no, krnw_source = 0.5, "clamped"
     else:
         no = 3.0
         krnw_max = 1.0
-        
+        krnw_source = "default"
+
+    parameters = {
+        "Swi":      {"value": round(swi, 4),        "source": swi_source},
+        "Sor":      {"value": round(sor, 4),        "source": sor_source},
+        "Pd_psi":   {"value": round(pd_psi, 4),     "source": pd_source},
+        "lambda":   {"value": round(lambda_val, 4), "source": lambda_source},
+        "nw":       {"value": round(nw, 4),         "source": krw_source},
+        # krw_max/krnw_max come from the same regression's intercept: when the
+        # exponent had to be clamped that intercept is not a fit either.
+        "krw_max":  {"value": round(krw_max, 4),    "source": krw_source},
+        "no":       {"value": round(no, 4),         "source": krnw_source},
+        "krnw_max": {"value": round(krnw_max, 4),   "source": krnw_source},
+    }
     return {
-        "Swi": round(swi, 4),
-        "Sor": round(sor, 4),
-        "Pd_psi": round(pd_psi, 4),
-        "lambda": round(lambda_val, 4),
-        "nw": round(nw, 4),
-        "no": round(no, 4),
-        "krw_max": round(krw_max, 4),
-        "krnw_max": round(krnw_max, 4)
+        "parameters": parameters,
+        # The endpoints Se was actually built from — every other parameter above
+        # is downstream of these two numbers.
+        "endpoints_used": {"Swi": round(swi, 4), "Sor": round(sor, 4)},
+        "substituted": sorted(n for n, p in parameters.items()
+                              if p["source"] == "substituted"),
+        "defaulted": sorted(n for n, p in parameters.items()
+                            if p["source"] == "default"),
+        "clamped": sorted(n for n, p in parameters.items()
+                          if p["source"] == "clamped"),
+        "warnings": warnings,
     }
 
-def enrich_json_with_brooks_corey(json_data: list[dict]) -> list[dict]:
+def enrich_json_with_brooks_corey(json_data: list[dict],
+                                  allow_substitution: bool = False) -> list[dict]:
     """
-    Enriches the extracted SCAL JSON list with Brooks-Corey fitted exponents and fits.
+    Enriches the extracted SCAL JSON list with Brooks-Corey fits and their provenance.
+
+    This is the report path (POST /api/v1/analyze-scal -> sync_document_generation_task).
+    It REFUSES by default when an endpoint had to be substituted, because the result
+    would otherwise reach a .docx and an LLM prompt indistinguishable from a
+    laboratory measurement. Pass allow_substitution=True only where the caller
+    surfaces the notice to the reader.
     """
     fit = fit_brooks_corey(json_data)
     if not fit:
         return json_data
-        
-    # Attach to every row for downstream petrophysical consumption
+
+    substituted = fit.get("substituted") or []
+    unparsable = [w for w in (fit.get("warnings") or []) if "unparsable" in w]
+    if (substituted or unparsable) and not allow_substitution:
+        what = ", ".join(substituted) if substituted else "explicit laboratory endpoints"
+        raise EndpointProvenanceError(
+            "refusing to enrich: " + what + " could not be measured "
+            "or fitted from this dataset and would have to be substituted"
+            + (" (a lab endpoint was present but unparsable)" if unparsable else "") + ". "
+            "Supply explicit laboratory Swi/Sor, or call with allow_substitution=True "
+            "and surface the provenance notice to the reader.\n" + provenance_notice(fit)
+        )
+
+    notice = provenance_notice(fit)
     for row in json_data:
-        row["brooks_corey_Swi"] = fit["Swi"]
-        row["brooks_corey_Sor"] = fit["Sor"]
-        row["brooks_corey_Pd_psi"] = fit["Pd_psi"]
-        row["brooks_corey_lambda"] = fit["lambda"]
-        row["brooks_corey_nw"] = fit["nw"]
-        row["brooks_corey_no"] = fit["no"]
-        row["brooks_corey_krw_max"] = fit["krw_max"]
-        row["brooks_corey_krnw_max"] = fit["krnw_max"]
-        
+        for name, entry in fit["parameters"].items():
+            row[f"brooks_corey_{name}"] = entry["value"]
+            row[f"brooks_corey_{name}_source"] = entry["source"]
+        row["brooks_corey_provenance_notice"] = notice
+
     return json_data
 

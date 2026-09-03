@@ -10,7 +10,6 @@ Coverage targets:
   - Archie math: RI normalization, FF monotonicity, exponent range compliance
 """
 
-import math
 import os
 import sys
 import pytest
@@ -239,7 +238,7 @@ class TestPhysicsGuardMicp:
         pc, hg = self._valid_micp()
         g = PhysicsGuard()
         g.validate_micp(pc, hg)
-        assert g.generate_health_score()["rules_checked"] == 5
+        assert g.generate_health_score()["rules_checked"] == 6
 
     def test_negative_pc_flagged(self):
         pc  = np.array([-5.0, 10.0, 50.0, 200.0])
@@ -541,7 +540,7 @@ class TestPhysicsGuardDeductionMath:
         g.validate_kr(sw, krw, kro)
         g.validate_micp(pc, hg)
         r = g.generate_health_score()
-        assert r["rules_checked"] == 7 + 5  # 7 Kr + 5 MICP
+        assert r["rules_checked"] == 7 + 6  # 7 Kr + 6 MICP
 
     def test_fresh_guard_starts_empty(self):
         g = PhysicsGuard()
@@ -768,7 +767,11 @@ class TestPhysicsValidator:
 class TestSkillsEngine:
 
     def test_missing_skill_returns_error_dict(self):
-        result = SkillsEngine.run_skill("nonexistent_category", "nonexistent_skill", "script.py")
+        # Use an allowlisted script name so the not-found fall-through is reached:
+        # the B1/B2 allowlist rejects unknown script names *before* the existence
+        # check (see test_skills_allowlist.py), so a bogus name would return
+        # "not permitted" instead. A bogus category/skill still yields "not found".
+        result = SkillsEngine.run_skill("nonexistent_category", "nonexistent_skill", "petrophysics.py")
         assert "error" in result
         assert "not found" in result["error"].lower()
 
