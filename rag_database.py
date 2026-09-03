@@ -1,9 +1,54 @@
-import os
+import hashlib
 import logging
-import chromadb
+import os
+import re
 import uuid
 
+import chromadb
+from chromadb.api.types import EmbeddingFunction
+
 _logger = logging.getLogger("prc-rag")
+
+
+class LocalHashEmbedding(EmbeddingFunction):
+    """Deterministic local embedding — no model download, no network.
+
+    chromadb's DefaultEmbeddingFunction fetches an ONNX MiniLM model from S3 on
+    first use; CI's egress guard caught that download on a fresh runner (locally
+    the cached model hid it). Until the embedding migration picks a real local
+    model on the Ollama machine, the store embeds with a hashed bag-of-words
+    (the same construction as the hub's LocalEmbedder fallback). Cosine
+    similarity is meaningful, if crude; every vector is reproducible.
+    """
+    DIM = 256
+
+    def __call__(self, input):
+        return [self._vec(t) for t in input]
+
+    def _vec(self, text):
+        v = [0.0] * self.DIM
+        for tok in re.findall(r"[a-z0-9\+\.]+", str(text).lower()):
+            v[int(hashlib.md5(tok.encode()).hexdigest(), 16) % self.DIM] += 1.0
+        norm = sum(x * x for x in v) ** 0.5 or 1.0
+        return [x / norm for x in v]
+
+    def name(self):
+        return "prc-local-hash-256"
+
+    def get_config(self):
+        return {}
+
+    @classmethod
+    def build_from_config(cls, config):
+        return cls()
+
+    @staticmethod
+    def validate_config(config):
+        return None
+
+    def default_space(self):
+        return "cosine"
+
 
 def default_persist_dir() -> str:
     """The vector store the app owns.
@@ -21,7 +66,7 @@ class RAGDatabase:
     """
     Local Vector Database (ChromaDB) for Storing and Retrieving Historical Well Data.
     """
-    def __init__(self, persist_directory: str = None):
+    def __init__(self, persist_directory: str = None, embedding_function=None):
         # When no explicit path is given, land the store on Render's persistent
         # disk (DB_DIR=/data) so vectors survive deploys/restarts. The source dir
         # on Render is ephemeral, so the old "./chroma_db" default was wiped on
@@ -29,10 +74,12 @@ class RAGDatabase:
         if persist_directory is None:
             persist_directory = default_persist_dir()
         self.client = chromadb.PersistentClient(path=persist_directory)
-        
+        # Explicit, local embedder: never chromadb's downloading default.
+        self.embedding_function = embedding_function or LocalHashEmbedding()
         self.collection = self.client.get_or_create_collection(
             name="historical_scal_data",
-            metadata={"hnsw:space": "cosine"} 
+            metadata={"hnsw:space": "cosine"},
+            embedding_function=self.embedding_function,
         )
 
     def ingest_report(self, well_id: str, scal_data: dict, report_text: str):
@@ -61,22 +108,18 @@ class RAGDatabase:
             ]
         }
         
-        try:
-            results = self.collection.query(
-                query_texts=[query_text],
-                n_results=n_results,
-                where=where_filter
-            )
-        except Exception as e:
-            _logger.error(f"Metadata filtered query failed: {e}. Falling back to semantic search.")
-            try:
-                # Fallback in case metadata fields are missing in legacy DB
-                results = self.collection.query(
-                    query_texts=[f"Porosity near {current_porosity} and Permeability near {current_perm} mD"],
-                    n_results=n_results
-                )
-            except Exception:
-                return []
+        # A failed filtered query raises to the caller (hybrid_search marks the
+        # result ``vector_unavailable``). It used to fall back to an UNFILTERED
+        # semantic query and return those hits in the same "analog well" shape —
+        # a well outside the +/-20%/50% window labelled as physically similar —
+        # and, when that failed too, returned [] as if nothing matched (D3.1).
+        # (Missing metadata fields do not raise in chromadb: they simply do not
+        # match, so the legacy-DB rationale for the fallback never applied.)
+        results = self.collection.query(
+            query_texts=[query_text],
+            n_results=n_results,
+            where=where_filter
+        )
         
         analog_wells = []
         if results and results.get('documents') and len(results['documents']) > 0:

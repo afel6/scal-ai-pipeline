@@ -1,4 +1,8 @@
+import logging
+
 import numpy as np
+
+_logger = logging.getLogger("prc-physics-guard")
 
 
 class PhysicsEngineError(Exception):
@@ -23,10 +27,42 @@ class PhysicsGuard:
 
     _HIGH_DEDUCTION   = 15
     _MEDIUM_DEDUCTION = 5
+    # "Nothing was validated" is not a deduction on a scale — it zeroes the score.
+    _CRITICAL_DEDUCTION = 100
+
+    # Hardcoded Archie windows. The single source for the sandbox corrector and
+    # the validator: both resolve bounds through archie_bounds() so a "corrected"
+    # fit can never be clamped to one window and judged against another.
+    ARCHIE_BOUNDS_DEFAULT = {
+        "a": (0.5, 1.5), "m": (1.3, 2.5), "b": (0.5, 1.5), "n": (1.5, 2.5),
+    }
 
     def __init__(self):
         self._violations: list[dict]  = []
         self._rules_checked: int      = 0
+        self._bounds_source: str | None = None
+
+    @classmethod
+    def archie_bounds(cls, basin_name: str = "Default") -> tuple[dict, str]:
+        """Resolve Archie parameter windows: basin_physics_rules from the app DB
+        when reachable, else the hardcoded defaults. Returns ``(bounds, source)``
+        where source names what actually applied — the caller records it."""
+        bounds = dict(cls.ARCHIE_BOUNDS_DEFAULT)
+        basin = basin_name or "Default"
+        try:
+            from app import db
+            rows = db("SELECT rule_key, min_limit, max_limit FROM basin_physics_rules WHERE basin_name=?", (basin,))
+            if not rows and basin != "Default":
+                rows = db("SELECT rule_key, min_limit, max_limit FROM basin_physics_rules WHERE basin_name='Default'")
+                basin = "Default"
+            for r_key, r_min, r_max in rows or []:
+                if r_key in bounds:
+                    bounds[r_key] = (float(r_min), float(r_max))
+            return bounds, (f"db:basin_physics_rules[{basin}]" if rows else "hardcoded (no basin rules in db)")
+        except Exception as exc:
+            _logger.warning("[PhysicsGuard] basin rule fetch failed, hardcoded bounds apply: %s: %s",
+                            type(exc).__name__, exc)
+            return bounds, f"hardcoded (db unavailable: {type(exc).__name__})"
 
     # ── internal helpers ──────────────────────────────────────────────────────
 
@@ -226,12 +262,15 @@ class PhysicsGuard:
         """
         x_a = np.asarray(x, dtype=float)
         y_a = np.asarray(y, dtype=float)
+        mt  = (model_type or "RI").upper()
         if x_a.size == 0 or y_a.size == 0:
+            self._check(False, f"{mt}_NO_DATA",
+                        f"{mt} dataset is empty — no rule was evaluated; this is not a pass.",
+                        severity="CRITICAL")
             return self
 
         idx = np.argsort(x_a)
         y_s = y_a[idx]
-        mt  = (model_type or "RI").upper()
 
         if mt == "FF":
             n_viol = int(np.sum(np.diff(y_s) > 1e-4))
@@ -282,6 +321,9 @@ class PhysicsGuard:
         sw_a = np.asarray(sw, dtype=float)
         pc_a = np.asarray(pc, dtype=float)
         if sw_a.size == 0 or pc_a.size == 0:
+            self._check(False, "PC_NO_DATA",
+                        "Capillary pressure dataset is empty — no rule was evaluated; this is not a pass.",
+                        severity="CRITICAL")
             return self
 
         idx  = np.argsort(sw_a)
@@ -304,7 +346,9 @@ class PhysicsGuard:
             )
         return self
 
-    def validate_archie_parameters(self, a: float, m: float, b: float, n: float, basin_name: str = "Default") -> "PhysicsGuard":
+    def validate_archie_parameters(self, a=None, m=None, b=None, n=None,
+                                   basin_name: str = "Default",
+                                   bounds: dict | None = None) -> "PhysicsGuard":
         """
         Validate fitted Archie equation scalar parameters against physical bounds.
 
@@ -318,55 +362,57 @@ class PhysicsGuard:
           b ∈ [0.5, 1.5]  — saturation coefficient (standard form: b ≈ 1.0)
           n ∈ [1.5, 2.5]  — saturation exponent
 
-        All four checks are HIGH severity: out-of-range parameters are
-        impossible fits, not soft warnings.
+        Only the parameters actually passed are checked (``None`` = not fitted,
+        not counted): a pair the caller never fitted must not add vacuous passes
+        to rules_checked. All checks are HIGH severity: out-of-range parameters
+        are impossible fits, not soft warnings. ``bounds`` injects the windows
+        (the sandbox passes the ones it clamped to); otherwise they resolve via
+        archie_bounds(). The window that applied is reported as
+        ``bounds_source`` in the health block.
         """
-        a_min, a_max = 0.5, 1.5
-        m_min, m_max = 1.3, 2.5
-        b_min, b_max = 0.5, 1.5
-        n_min, n_max = 1.5, 2.5
+        if bounds is None:
+            bounds, self._bounds_source = self.archie_bounds(basin_name)
+        else:
+            self._bounds_source = "injected"
+        if all(v is None for v in (a, m, b, n)):
+            self._check(False, "ARCHIE_NO_PARAMETERS",
+                        "No Archie parameter was supplied — nothing was validated.",
+                        severity="CRITICAL")
+            return self
 
-        try:
-            from app import db
-            rows = db("SELECT rule_key, min_limit, max_limit FROM basin_physics_rules WHERE basin_name=?", (basin_name or "Default",))
-            if not rows and basin_name != "Default":
-                rows = db("SELECT rule_key, min_limit, max_limit FROM basin_physics_rules WHERE basin_name='Default'")
-            for r_key, r_min, r_max in rows:
-                if r_key == 'a':
-                    a_min, a_max = float(r_min), float(r_max)
-                elif r_key == 'm':
-                    m_min, m_max = float(r_min), float(r_max)
-                elif r_key == 'b':
-                    b_min, b_max = float(r_min), float(r_max)
-                elif r_key == 'n':
-                    n_min, n_max = float(r_min), float(r_max)
-        except Exception as e:
-            print(f"[PhysicsGuard] Database rule fetch error: {e}")
+        a_min, a_max = bounds["a"]
+        m_min, m_max = bounds["m"]
+        b_min, b_max = bounds["b"]
+        n_min, n_max = bounds["n"]
 
-        self._check(
-            a_min <= float(a) <= a_max,
-            "ARCHIE_A_RANGE",
-            f"Tortuosity factor a = {a:.4f} outside physical bounds [{a_min}, {a_max}]. "
-            "Values far from 1.0 suggest a poor fit or non-standard rock fabric.",
-        )
-        self._check(
-            m_min <= float(m) <= m_max,
-            "ARCHIE_M_RANGE",
-            f"Cementation exponent m = {m:.4f} outside physical bounds [{m_min}, {m_max}]. "
-            "m < 1.3 is sub-physical; m > 2.5 requires independent lithological justification.",
-        )
-        self._check(
-            b_min <= float(b) <= b_max,
-            "ARCHIE_B_RANGE",
-            f"Saturation coefficient b = {b:.4f} outside physical bounds [{b_min}, {b_max}]. "
-            "Standard Archie has b = 1.0; large deviation indicates fit instability.",
-        )
-        self._check(
-            n_min <= float(n) <= n_max,
-            "ARCHIE_N_RANGE",
-            f"Saturation exponent n = {n:.4f} outside physical bounds [{n_min}, {n_max}]. "
-            "n < 1.5 is below observed rock range; n > 2.5 may indicate wettability alteration.",
-        )
+        if a is not None:
+            self._check(
+                a_min <= float(a) <= a_max,
+                "ARCHIE_A_RANGE",
+                f"Tortuosity factor a = {a:.4f} outside physical bounds [{a_min}, {a_max}]. "
+                "Values far from 1.0 suggest a poor fit or non-standard rock fabric.",
+            )
+        if m is not None:
+            self._check(
+                m_min <= float(m) <= m_max,
+                "ARCHIE_M_RANGE",
+                f"Cementation exponent m = {m:.4f} outside physical bounds [{m_min}, {m_max}]. "
+                "m < 1.3 is sub-physical; m > 2.5 requires independent lithological justification.",
+            )
+        if b is not None:
+            self._check(
+                b_min <= float(b) <= b_max,
+                "ARCHIE_B_RANGE",
+                f"Saturation coefficient b = {b:.4f} outside physical bounds [{b_min}, {b_max}]. "
+                "Standard Archie has b = 1.0; large deviation indicates fit instability.",
+            )
+        if n is not None:
+            self._check(
+                n_min <= float(n) <= n_max,
+                "ARCHIE_N_RANGE",
+                f"Saturation exponent n = {n:.4f} outside physical bounds [{n_min}, {n_max}]. "
+                "n < 1.5 is below observed rock range; n > 2.5 may indicate wettability alteration.",
+            )
         return self
 
     def validate_j_function(self, j_arr, sw_arr=None, ift_cos_theta: float = 26.5,
@@ -447,6 +493,10 @@ class PhysicsGuard:
         cp_valid = cp_a[np.isfinite(cp_a) & (cp_a != 0.0)]
 
         if len(cp_valid) == 0:
+            self._check(False, "CP_NO_DATA",
+                        f"No finite non-zero Cp value among {cp_a.size} input(s) — no rule was "
+                        "evaluated; this is not a pass.",
+                        severity="CRITICAL")
             return self
 
         # 1 — Cp must be non-negative
@@ -537,13 +587,20 @@ class PhysicsGuard:
           footer         – formatted footer string for the UI
         """
         deduction = sum(
+            self._CRITICAL_DEDUCTION if v["severity"] == "CRITICAL" else
             self._HIGH_DEDUCTION   if v["severity"] == "HIGH"   else
             self._MEDIUM_DEDUCTION if v["severity"] == "MEDIUM" else 0
             for v in self._violations
         )
         score = max(0, 100 - deduction)
 
-        if score >= 95:
+        if self._rules_checked == 0:
+            # No rule ran: an A here would be a signal that cannot be false. The
+            # numeric score stays undeducted (pinned by test_fresh_guard_starts_empty);
+            # grade / summary / footer carry the verdict.
+            grade, icon = "N/A", "❔"
+            summary = "No physics rule was evaluated — nothing has been validated."
+        elif score >= 95:
             grade, icon = "A", "✅"
             summary = "All curves follow standard reservoir engineering monotonicity requirements."
         elif score >= 80:
@@ -568,6 +625,7 @@ class PhysicsGuard:
             "icon":          icon,
             "violations":    self._violations,
             "rules_checked": self._rules_checked,
+            "bounds_source": self._bounds_source,
             "summary":       summary,
             "footer":        f"{icon} Physics Health Score: {score}%  |  Audit Result: {summary}",
         }
@@ -586,9 +644,16 @@ class PhysicsValidator:
 
     @staticmethod
     def validate_core_physics(data: dict) -> dict:
-        swi = PhysicsValidator.format_precision(data.get('Swi', 0.0))
-        sor = PhysicsValidator.format_precision(data.get('Sor', 0.0))
-        porosity = PhysicsValidator.format_precision(data.get('Porosity', 0.0))
+        missing = [k for k in ('Swi', 'Sor', 'Porosity') if data.get(k) is None]
+        if missing:
+            # A defaulted 0.0 endpoint passes the mass check for a value nobody supplied.
+            raise PhysicsEngineError(
+                f"PHYSICS VALIDATION IMPOSSIBLE: missing {', '.join(missing)} — "
+                "endpoints cannot be defaulted to 0.0 and then declared consistent."
+            )
+        swi = PhysicsValidator.format_precision(data['Swi'])
+        sor = PhysicsValidator.format_precision(data['Sor'])
+        porosity = PhysicsValidator.format_precision(data['Porosity'])
         
         if swi + sor > 1.0:
             raise PhysicsEngineError(

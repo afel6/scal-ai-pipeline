@@ -451,14 +451,19 @@ class GeologicalGraph:
         retriever:
             Object exposing ``query_analog_wells(current_porosity, current_perm,
             n_results)`` — typically a :class:`rag_database.RAGDatabase`. Injected
-            for testability; when ``None`` the vector half is skipped gracefully.
+            for testability; when ``None`` the vector half is skipped and the
+            result says so (``vector_unavailable``).
         depth_limit:
             Hop depth for the graph component.
 
         Returns
         -------
         dict
-            ``{"query", "graph": {...}, "vector": [...]}``.
+            ``{"query", "graph": {...}, "vector": [...]}``. When the vector half
+            did not run — no retriever, no porosity+permeability window, or the
+            retriever raised — ``vector`` is ``[]`` AND ``vector_unavailable``
+            carries the reason: an empty list alone would read as "no analog
+            wells matched", which is a different fact (D3.1).
         """
         graph_hits = self._match_nodes(query_text)
         graph_payload = [
@@ -467,24 +472,33 @@ class GeologicalGraph:
         ]
 
         vector_payload: List[Dict[str, Any]] = []
-        if retriever is not None and (porous_range or perm_range):
-            porosity = _midpoint(porous_range)
-            perm = _midpoint(perm_range)
-            if porosity is not None and perm is not None:
-                try:
-                    vector_payload = retriever.query_analog_wells(
-                        current_porosity=porosity,
-                        current_perm=perm,
-                        n_results=n_results,
-                    )
-                except Exception as exc:  # pragma: no cover - defensive
-                    _logger.error("Vector retrieval failed in hybrid_search: %s", exc)
+        vector_unavailable: Optional[str] = None
+        porosity = _midpoint(porous_range)
+        perm = _midpoint(perm_range)
+        if retriever is None:
+            vector_unavailable = "no vector retriever supplied - vector half skipped"
+        elif porosity is None or perm is None:
+            vector_unavailable = ("no petrophysical window (porosity AND permeability ranges "
+                                  "are required) - vector half skipped")
+        else:
+            try:
+                vector_payload = retriever.query_analog_wells(
+                    current_porosity=porosity,
+                    current_perm=perm,
+                    n_results=n_results,
+                )
+            except Exception as exc:
+                _logger.error("Vector retrieval failed in hybrid_search: %s", exc)
+                vector_unavailable = f"{type(exc).__name__}: {exc}"
 
-        return {
+        result = {
             "query": query_text,
             "graph": {"matched_nodes": graph_hits, "subgraphs": graph_payload},
             "vector": vector_payload,
         }
+        if vector_unavailable:
+            result["vector_unavailable"] = vector_unavailable
+        return result
 
     # ── small SQL helpers ─────────────────────────────────────────────────────
 

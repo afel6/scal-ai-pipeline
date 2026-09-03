@@ -94,6 +94,10 @@ class WorkerResponse(BaseModel):
     error: Optional[str] = None
     citations: List[str] = Field(default_factory=list)
     latency_s: Optional[float] = None
+    # Fallbacks the worker took while answering (its own "degradations" list:
+    # KB search failed, chat provider fell back, ...). ok=True with a
+    # non-empty list is a degraded answer and is surfaced as such.
+    degradations: List[str] = Field(default_factory=list)
 
     @model_validator(mode="after")
     def _no_failure_laundering(self) -> "WorkerResponse":
@@ -190,7 +194,13 @@ def build_synthesis_prompt(query: str, responses: List[WorkerResponse]) -> str:
     the gap with invented content."""
     blocks = []
     for r in responses:
-        if r.ok:
+        if r.ok and r.degradations:
+            blocks.append(
+                f"[{r.agent.value.upper()} — OK but DEGRADED: {'; '.join(r.degradations)}]\n"
+                f"{r.answer}\n"
+                "This worker fell back on the items above; treat the affected parts as unverified."
+            )
+        elif r.ok:
             blocks.append(f"[{r.agent.value.upper()} — OK]\n{r.answer}")
         else:
             blocks.append(

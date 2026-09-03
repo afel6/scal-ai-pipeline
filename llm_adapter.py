@@ -41,6 +41,12 @@ Contract
   an error message (only its first 6 characters, for operators).
 * `on_success` / `on_failure` fire once per call and feed the provider-neutral
   liveness signal that /health reads (alerting.record_llm_success/failure).
+  on_success is derived from the outcome: it fires only once the provider has
+  delivered a message (`choices` in the body / in at least one stream chunk).
+  A body that is not JSON or carries no choices, an in-stream `error` event, a
+  malformed chunk, or a mid-stream transport error fires on_failure and raises.
+  A garbled tool call (unparseable arguments) raises rather than running the
+  tool with `{}`; `ChatResult.finish_reason` says whether a reply was cut short.
 
 Embeddings are NOT routed here — that migration is a data migration (C3).
 """
@@ -107,6 +113,7 @@ class ChatResult:
     usage: Tuple[int, int]          # (prompt_tokens, completion_tokens)
     model: str                      # the model actually sent on the wire
     raw: Dict[str, object]
+    finish_reason: str = ""         # choices[0].finish_reason as sent ("length" = cut at max_tokens)
 
 
 # -- scripted mock scenarios (D2) ----------------------------------------------------
@@ -231,7 +238,8 @@ def load_config(env: Optional[Mapping[str, str]] = None, *, prefix: str = "LLM",
     try:
         timeout = float(raw_timeout) if raw_timeout else _DEFAULT_TIMEOUT_S
     except ValueError:
-        timeout = _DEFAULT_TIMEOUT_S
+        var = f"{prefix}_HTTP_TIMEOUT" if e.get(f"{prefix}_HTTP_TIMEOUT") else "NVIDIA_HTTP_TIMEOUT"
+        raise ChatAdapterError(f"{var}={raw_timeout!r} is not a number of seconds")
     return ChatConfig(provider=provider, model=model, base_url=base_url,
                       api_keys=tuple(keys), timeout=timeout)
 
@@ -325,8 +333,11 @@ class ChatAdapter:
             body.update(extra)
         return body
 
-    def _request(self, body: Dict[str, object]):
-        """Try the key pool in order; return the open response of the first success."""
+    def _request(self, body: Dict[str, object], timeout: Optional[float] = None):
+        """Try the key pool in order; return the open response of the first success.
+        `timeout` (seconds) overrides the configured one — the caller's retry budget
+        caps an attempt to the wall clock it has left (D3.3)."""
+        per_attempt = float(timeout) if timeout else self.config.timeout
         if not self.config.api_keys:
             raise ChatAdapterError(
                 f"no API key configured for provider '{self.config.provider}' "
@@ -337,7 +348,7 @@ class ChatAdapter:
             headers = {"accept": "application/json", "content-type": "application/json",
                        "authorization": f"Bearer {key}"}
             try:
-                return self._open(self.config.base_url, headers, data, self.config.timeout)
+                return self._open(self.config.base_url, headers, data, per_attempt)
             except Exception as exc:                        # noqa: BLE001
                 detail = str(exc)
                 if isinstance(exc, urllib.error.HTTPError) or hasattr(exc, "read"):
@@ -400,7 +411,8 @@ class ChatAdapter:
     def complete(self, messages: Sequence[Mapping[str, object]], *, tools=None,
                  temperature: float = 0.2, max_tokens: int = 4096,
                  response_format: Optional[Mapping[str, object]] = None,
-                 extra: Optional[Mapping[str, object]] = None) -> ChatResult:
+                 extra: Optional[Mapping[str, object]] = None,
+                 timeout: Optional[float] = None) -> ChatResult:
         if self.config.provider == "mock":
             return self._mock_result(messages, tools)
         body = self._payload(messages, temperature=temperature, max_tokens=max_tokens,
@@ -408,53 +420,104 @@ class ChatAdapter:
                              stream=False, extra=extra)
         logger.info("[LLM %s] generate -> model=%s tools=%s msgs=%d",
                     self.config.provider, self.config.model, bool(tools), len(body["messages"]))
-        with self._request(body) as r:
-            data = json.loads(r.read().decode("utf-8"))
-        msg = (data.get("choices") or [{}])[0].get("message") or {}
+        with self._request(body, timeout) as r:
+            raw = r.read()
+        try:
+            data = json.loads(raw.decode("utf-8"))
+        except (UnicodeDecodeError, ValueError) as exc:
+            self._fail(f"response is not JSON ({exc}): {raw[:300]!r}")
+        # An HTTP-200 body without a message (provider error JSON, quota or
+        # moderation reply, wrong endpoint) is a failed call, not an empty answer.
+        choices = data.get("choices") if isinstance(data, dict) else None
+        if not choices:
+            self._fail(f"no choices in response: {json.dumps(data)[:300]}")
+        choice = choices[0] or {}
+        msg = choice.get("message") or {}
+        finish_reason = str(choice.get("finish_reason") or "")
+        if self._on_success:            # a message envelope arrived: the provider is alive
+            self._on_success()
+        if finish_reason == "content_filter":
+            raise ChatAdapterError("reply blocked by the provider (finish_reason=content_filter)")
         calls: List[ToolCall] = []
         for tc in msg.get("tool_calls") or []:
             fn = tc.get("function") or {}
+            name = str(fn.get("name", ""))
+            arguments = fn.get("arguments") or "{}"
             try:
-                args = json.loads(fn.get("arguments") or "{}")
-            except json.JSONDecodeError:
-                args = {}
-            calls.append(ToolCall(str(fn.get("name", "")), args if isinstance(args, dict) else {}))
+                args = json.loads(arguments)
+            except (TypeError, ValueError) as exc:
+                raise ChatAdapterError(
+                    f"tool call '{name}' carried unparseable arguments ({exc}): {str(arguments)[:200]!r}")
+            if not isinstance(args, dict):
+                raise ChatAdapterError(
+                    f"tool call '{name}' arguments are not a JSON object: {str(arguments)[:200]!r}")
+            calls.append(ToolCall(name, args))
         # Never surface `reasoning_content`: raw chain-of-thought must not reach a
-        # user. An empty reply is an empty reply; callers decide what that means.
+        # user. An empty reply is an empty reply; callers decide what that means
+        # (finish_reason tells them whether it was cut short).
         text = msg.get("content") or ""
         usage = data.get("usage") or {}
-        if self._on_success:
-            self._on_success()
         return ChatResult(text=text, tool_calls=calls,
                           usage=(int(usage.get("prompt_tokens", 0) or 0),
                                  int(usage.get("completion_tokens", 0) or 0)),
-                          model=self.config.model, raw=data)
+                          model=self.config.model, raw=data, finish_reason=finish_reason)
 
     def stream(self, messages: Sequence[Mapping[str, object]], *, temperature: float = 0.2,
                max_tokens: int = 4096,
-               extra: Optional[Mapping[str, object]] = None) -> Iterator[str]:
+               extra: Optional[Mapping[str, object]] = None,
+               timeout: Optional[float] = None) -> Iterator[str]:
         """Yield text deltas from an SSE chat/completions stream."""
         if self.config.provider == "mock":
-            text = self._mock_result(messages, None).text
-            if text:
-                yield text
+            res = self._mock_result(messages, None)
+            if res.tool_calls:
+                # A tool-bearing turn cannot travel a text-only stream; dropping
+                # the calls would present a tool request as a plain answer.
+                names = ", ".join(c.name for c in res.tool_calls)
+                raise ChatAdapterError(
+                    f"stream() carries text only, but the model requested tool call(s): {names} "
+                    f"- tool-bearing turns go through complete()")
+            if res.text:
+                yield res.text
             return
         body = self._payload(messages, temperature=temperature, max_tokens=max_tokens,
                              tools=None, response_format=None, stream=True, extra=extra)
-        with self._request(body) as r:
-            for raw in r:
-                line = raw.decode("utf-8", "replace").strip() if isinstance(raw, bytes) else str(raw).strip()
-                if not line.startswith("data:"):
-                    continue
-                chunk = line[5:].strip()
-                if chunk == "[DONE]":
-                    break
-                try:
-                    obj = json.loads(chunk)
-                except json.JSONDecodeError:
-                    continue
-                delta = ((obj.get("choices") or [{}])[0].get("delta") or {}).get("content")
-                if delta:
-                    yield delta
+        r = self._request(body, timeout)            # fires on_failure itself when every key fails
+        delivered = False                           # at least one chunk carried choices
+        try:
+            with r:
+                for raw in r:
+                    line = raw.decode("utf-8", "replace").strip() if isinstance(raw, bytes) else str(raw).strip()
+                    if not line.startswith("data:"):
+                        continue
+                    chunk = line[5:].strip()
+                    if chunk == "[DONE]":
+                        break
+                    try:
+                        obj = json.loads(chunk)
+                    except ValueError as exc:
+                        raise ChatAdapterError(f"malformed SSE chunk ({exc}): {chunk[:200]!r}")
+                    if not isinstance(obj, dict):
+                        raise ChatAdapterError(f"malformed SSE chunk (not an object): {chunk[:200]!r}")
+                    if obj.get("error"):
+                        raise ChatAdapterError(
+                            f"provider error in stream: {json.dumps(obj['error'])[:300]}")
+                    choices = obj.get("choices") or []
+                    if choices:
+                        delivered = True
+                    delta = ((choices or [{}])[0].get("delta") or {}).get("content")
+                    if delta:
+                        yield delta
+        except Exception as exc:                    # noqa: BLE001 — the hook, then the caller
+            if self._on_failure:
+                self._on_failure(f"stream failed: {exc}"[:500])
+            raise
+        if not delivered:
+            self._fail("stream ended without any message (no choices delivered)")
         if self._on_success:
             self._on_success()
+
+    def _fail(self, msg: str) -> None:
+        """Record a failed call on the liveness signal, then raise it to the caller."""
+        if self._on_failure:
+            self._on_failure(msg)
+        raise ChatAdapterError(msg)

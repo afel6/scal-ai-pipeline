@@ -129,6 +129,7 @@ class MICPExtractor(BaseExtractor):
 
                 drainage    = {'pressure': [], 'sat_pv': [], 'calculated_pore_radius_microns': []}
                 imbibition  = {'pressure': [], 'sat_pv': [], 'calculated_pore_radius_microns': []}
+                rows_left_out = []   # Pc <= 0 rows: no Washburn radius exists, the curve says so
 
                 for _, r in data.iterrows():
                     p = pd.to_numeric(r[press_col], errors='coerce')
@@ -137,6 +138,9 @@ class MICPExtractor(BaseExtractor):
                         continue
 
                     p_val = float(p)
+                    if p_val <= 0:
+                        rows_left_out.append(f"Pc <= 0 ({p_val:g} psia, sat {float(s):g}): pore radius undefined (Washburn)")
+                        continue
                     r_val = calculate_washburn_radius(p_val)
 
                     cycle = str(r[cycle_col]).strip().upper() if cycle_col is not None else 'D'
@@ -189,6 +193,7 @@ class MICPExtractor(BaseExtractor):
                     'threshold_pressure_psi':  threshold_p,
                     'drainage':                drainage,
                     'imbibition':              imbibition,
+                    'rows_left_out':           rows_left_out,
                 }
                 break  # found the data block in this sheet; move to next sheet
 

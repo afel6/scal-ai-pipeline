@@ -7,6 +7,7 @@ from email.mime.text import MIMEText
 import threading
 from typing import Optional
 from config import settings
+import retry_budget
 
 logger = logging.getLogger("Alerting")
 
@@ -16,7 +17,9 @@ _llm_lock = threading.Lock()
 # Consecutive provider failures that mark the chat LLM degraded for /health.
 # Matches the alert threshold: a single chat turn against an unreachable
 # provider retries ~5×, so this trips on the first fully-failed turn.
-_LLM_UNHEALTHY_AFTER = 3
+# One exhausted retry budget (D3.3: LLM_MAX_ATTEMPTS consecutive failures) is
+# the signal that the provider is down for this box, not a magic number.
+_LLM_UNHEALTHY_AFTER = retry_budget.RetryBudget.from_env().max_attempts
 _last_llm_success_ts: Optional[float] = None
 _last_llm_error: str = ""
 
@@ -52,11 +55,10 @@ def send_alert(subject: str, message: str):
             else:
                 server = smtplib.SMTP(settings.ALERT_SMTP_HOST, settings.ALERT_SMTP_PORT, timeout=5)
                 server.ehlo()
-                try:
-                    server.starttls()
-                    server.ehlo()
-                except Exception:
-                    pass
+                # A STARTTLS failure aborts the send (outer handler logs it): the
+                # credentials are never sent in the clear (D3.1).
+                server.starttls()
+                server.ehlo()
             if settings.ALERT_SMTP_USER and settings.ALERT_SMTP_PASSWORD:
                 server.login(settings.ALERT_SMTP_USER, settings.ALERT_SMTP_PASSWORD)
             server.send_message(msg)
@@ -77,7 +79,7 @@ def track_llm_call(success: bool, error_msg: str = ""):
             _consecutive_llm_failures += 1
             count = _consecutive_llm_failures
             _last_llm_error = error_msg or _last_llm_error
-            if _consecutive_llm_failures >= 3:
+            if _consecutive_llm_failures >= _LLM_UNHEALTHY_AFTER:
                 trigger_alert = True
 
     if trigger_alert:

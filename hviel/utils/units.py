@@ -26,16 +26,33 @@ VISCOSITY_FACTORS = {
     "mpa.s": 1.0,
 }
 
+# Temperature: target is F
+TEMPERATURE_UNITS = frozenset({"c", "celsius", "k", "kelvin", "f", "fahrenheit"})
+
+# Units each property kind can actually convert. An unknown unit is an error,
+# never a silent 1.0 factor: the caller labels converted columns
+# "[UNITS NORMALIZED]" in the ground-truth the model reads.
+KNOWN_UNITS = {
+    "pressure": frozenset(PRESSURE_FACTORS),
+    "temperature": TEMPERATURE_UNITS,
+    "permeability": frozenset(PERM_FACTORS),
+    "viscosity": frozenset(VISCOSITY_FACTORS),
+}
+
 def clean_unit_name(name: str) -> str:
     # Normalize unit name: lowercase, strip symbols/spaces
     u = name.lower().strip()
     u = u.replace("°", "").replace("deg", "")
-    return u
+    return u.strip()
+
+def _factor(table: dict, from_unit: str, prop: str) -> float:
+    u = clean_unit_name(from_unit)
+    if u not in table:
+        raise ValueError(f"unknown {prop} unit {from_unit!r} (known: {sorted(table)})")
+    return table[u]
 
 def convert_pressure(val: float, from_unit: str) -> float:
-    u = clean_unit_name(from_unit)
-    factor = PRESSURE_FACTORS.get(u, 1.0)
-    return val * factor
+    return val * _factor(PRESSURE_FACTORS, from_unit, "pressure")
 
 def convert_temperature(val: float, from_unit: str) -> float:
     u = clean_unit_name(from_unit)
@@ -43,17 +60,15 @@ def convert_temperature(val: float, from_unit: str) -> float:
         return val * 9.0 / 5.0 + 32.0
     elif u in ("k", "kelvin"):
         return (val - 273.15) * 9.0 / 5.0 + 32.0
-    return val
+    elif u in ("f", "fahrenheit"):
+        return val
+    raise ValueError(f"unknown temperature unit {from_unit!r} (known: {sorted(TEMPERATURE_UNITS)})")
 
 def convert_permeability(val: float, from_unit: str) -> float:
-    u = clean_unit_name(from_unit)
-    factor = PERM_FACTORS.get(u, 1.0)
-    return val * factor
+    return val * _factor(PERM_FACTORS, from_unit, "permeability")
 
 def convert_viscosity(val: float, from_unit: str) -> float:
-    u = clean_unit_name(from_unit)
-    factor = VISCOSITY_FACTORS.get(u, 1.0)
-    return val * factor
+    return val * _factor(VISCOSITY_FACTORS, from_unit, "viscosity")
 
 def detect_unit(header: str) -> Optional[Tuple[str, str]]:
     """
@@ -69,17 +84,22 @@ def detect_unit(header: str) -> Optional[Tuple[str, str]]:
     if m:
         prop = m.group(1).lower()
         unit = m.group(2).strip()
-        
+
         # Classify property kind
         if prop in ("p", "pressure"):
-            return "pressure", unit
+            kind = "pressure"
         elif prop in ("t", "temp", "temperature"):
-            return "temperature", unit
+            kind = "temperature"
         elif prop in ("k", "perm", "permeability"):
-            return "permeability", unit
-        elif prop in ("viscosity",):
-            return "viscosity", unit
-            
+            kind = "permeability"
+        else:
+            kind = "viscosity"
+        # Only a unit we can convert is a detection: the single-letter p/t/k
+        # pattern also matches 't (min)' / 'k (fraction)' / 'p (index)', and an
+        # unconvertible unit ('psig', 'm2', 'poise') must not be reported as one.
+        if clean_unit_name(unit) in KNOWN_UNITS[kind]:
+            return kind, unit
+
     return None
 
 def normalize_value(val: float, prop_type: str, unit: str) -> float:

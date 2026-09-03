@@ -1,7 +1,8 @@
 from pydantic_settings import BaseSettings
-from pydantic import Field, field_validator
+from pydantic import Field, field_validator, ValidationInfo
 from pathlib import Path
 from typing import List, Optional
+import logging
 import secrets
 import os
 
@@ -9,6 +10,10 @@ import os
 # GRAPH_DB_PATH used to mean "wherever you launched from" — two databases
 # depending on the shell you started in (D1).
 REPO_ROOT = Path(__file__).resolve().parent
+# The .env is the repo's, never the CWD's: a run from another directory used to
+# silently drop the whole file (mock provider, random ADMIN_PIN, DATABASE_URL '').
+ENV_FILE = REPO_ROOT / ".env"
+ENV_FILE_LOADED = ENV_FILE.is_file()
 
 class Settings(BaseSettings):
     GEMINI_API_KEY: Optional[str] = Field(None, description="Comma-separated API keys")
@@ -44,15 +49,18 @@ class Settings(BaseSettings):
     ALERT_WEBHOOK_URL: Optional[str] = Field(None, description="Webhook URL for alerting")
 
     class Config:
-        env_file = ".env"
+        env_file = str(ENV_FILE)
         env_file_encoding = "utf-8"
         extra = "ignore"
 
     @field_validator("DB_DIR", "CHROMA_DIR", "GRAPH_DB_PATH", "PRC_AI_VAULT", mode="after")
     @classmethod
-    def _anchor_to_repo(cls, v):
+    def _anchor_to_repo(cls, v, info: ValidationInfo):
         if v is None or v == "":
-            return v
+            # An explicit '' used to pass through and make the store CWD-relative
+            # again (DB_DIR='' -> 'chat_history.db' in the launch dir). A directory
+            # setting falls back to the repo root; the optional file path stays unset.
+            return None if info.field_name == "GRAPH_DB_PATH" else str(REPO_ROOT)
         return v if os.path.isabs(v) else str((REPO_ROOT / v).resolve())
 
     @property
@@ -85,3 +93,7 @@ class Settings(BaseSettings):
         return os.path.join(self.DB_DIR or str(REPO_ROOT), "geological_graph.sqlite")
 
 settings = Settings()
+if not ENV_FILE_LOADED:
+    logging.getLogger("prc-config").warning(
+        "No .env at %s: running on built-in defaults (provider/keys unset, random ADMIN_PIN "
+        "and KB_INGEST_SECRET, DATABASE_URL empty).", ENV_FILE)

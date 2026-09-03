@@ -93,8 +93,15 @@ def test_without_the_plot_regex_the_fabrication_reaches_the_user(rendered, monke
     """The defect, reproduced through the real loop: with `_PLOT_BLOCK_RE`
     unable to find a payload, the ledger reads no fitted value from the tool's
     render, the gate has nothing to compare 1.999 against, and the wrong
-    number rides the successful call straight to the user."""
+    number rides the successful call straight to the user.
+
+    Since D3.1 the ledger also derives WHICH parameters a call backs from its
+    render (a success that rendered nothing backs nothing), and that second,
+    independent guard strips the number on its own; the counterpart therefore
+    also restores the pre-D3 "backed by tool name" binding so the defect it
+    documents is the one reproduced."""
     monkeypatch.setattr(app, "_PLOT_BLOCK_RE", NEVER)
+    monkeypatch.setattr(app, "_rendered_parameters", lambda formatted: ["n"])
     run = run_scenario("plot_payload_survives", sid=SID, question=QUESTION, n=1.85)
     fit = run.calls("fit_petrophysical_curve")[-1]
     assert fit["status"] == "success" and fit["values"] == {}

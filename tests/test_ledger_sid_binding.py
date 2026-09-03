@@ -60,7 +60,7 @@ class _Capture:
     def __init__(self):
         self.seen = []
 
-    def __call__(self, messages_data, system_instruction, temperature, want_tools, max_tokens=4096):
+    def __call__(self, messages_data, system_instruction, temperature, want_tools, max_tokens=4096, timeout=None):
         self.seen.append(getattr(scal_app._tls, "current_session_id", None))
         return scal_app._ChatResponse([scal_app._ChatPart(text="ok — no fit reported")], None)
 

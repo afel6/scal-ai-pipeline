@@ -7,6 +7,8 @@ running worker services over HTTP:
           (multipart/form contract; reply JSON carries "reply").
 - aviel → Aviel PVT pipeline:  POST {AVIEL_BASE_URL}/api/chat
           (JSON contract {message, session_id, stream}; reply carries "text").
+Either reply may carry "status": "error" (in-band failure -> ok=False) and a
+"degradations" list (fallbacks the worker took -> copied onto the envelope).
 
 Every execution — success, HTTP error, timeout, connection refusal, or an
 empty reply — is wrapped in a WorkerResponse envelope. The envelope's own
@@ -82,14 +84,23 @@ def dispatch(request: DelegationRequest, *,
             answer = str(payload.get("text") or "").strip()
 
         latency = round(time.monotonic() - t0, 3)
+        # Both workers answer HTTP 200 with {"status": "error", ...} for an
+        # in-band failure (Hviel: "Processing error: ..."); the reply text is
+        # then the error, never an answer.
+        if str(payload.get("status") or "").lower() == "error":
+            return WorkerResponse(
+                task_id=request.task_id, agent=request.agent, ok=False,
+                error=answer or "worker reported status=error", latency_s=latency,
+            )
         if not answer:
             return WorkerResponse(
                 task_id=request.task_id, agent=request.agent, ok=False,
                 error="worker returned an empty answer", latency_s=latency,
             )
+        degradations = [str(d) for d in (payload.get("degradations") or [])]
         return WorkerResponse(
             task_id=request.task_id, agent=request.agent, ok=True,
-            answer=answer, latency_s=latency,
+            answer=answer, latency_s=latency, degradations=degradations,
         )
     except Exception as exc:
         return WorkerResponse(

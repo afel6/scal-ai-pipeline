@@ -37,6 +37,7 @@ from typing import Any, Dict, List, Optional, Sequence, Tuple
 import numpy as np
 from scipy.optimize import curve_fit
 
+from config import settings
 from petrophysical_curves import Endpoints, KrCurveFitter, bc_krw, bc_kro
 from physics_validator import PhysicsGuard
 
@@ -136,11 +137,6 @@ def waxman_smits_conductivity(
 class PhysicsSandbox:
     """Fit-validate-correct engine for core petrophysical relations."""
 
-    # Physical bounds mirrored from PhysicsGuard.validate_archie_parameters so the
-    # corrector and the validator agree on what "in range" means.
-    _ARCHIE_BOUNDS = {
-        "a": (0.5, 1.5), "m": (1.3, 2.5), "b": (0.5, 1.5), "n": (1.5, 2.5),
-    }
     _PASSING_GRADES = {"A", "B"}
 
     def __init__(
@@ -148,21 +144,20 @@ class PhysicsSandbox:
         max_iterations: Optional[int] = None,
         sw_tolerance: Optional[float] = None,
     ) -> None:
-        # Pull operational thresholds from config, with explicit-arg override.
-        try:
-            from config import settings
-
-            self._max_iter = (
-                max_iterations if max_iterations is not None
-                else settings.SANDBOX_MAX_ITERATIONS
-            )
-            self._sw_tol = (
-                sw_tolerance if sw_tolerance is not None
-                else settings.SANDBOX_SW_TOLERANCE
-            )
-        except Exception:  # pragma: no cover - config absent in minimal envs
-            self._max_iter = max_iterations if max_iterations is not None else 12
-            self._sw_tol = sw_tolerance if sw_tolerance is not None else 1e-6
+        # Operational thresholds from config (module-top import: a config that
+        # fails to load is a misconfiguration that must raise, not be replaced by
+        # 12 / 1e-6 behind the operator's back), with explicit-arg override.
+        self._max_iter = (
+            max_iterations if max_iterations is not None
+            else settings.SANDBOX_MAX_ITERATIONS
+        )
+        self._sw_tol = (
+            sw_tolerance if sw_tolerance is not None
+            else settings.SANDBOX_SW_TOLERANCE
+        )
+        # One window for the corrector AND the validator (resolved by the guard:
+        # basin rules from the DB when reachable, else its hardcoded defaults).
+        self._archie_bounds, self._archie_bounds_source = PhysicsGuard.archie_bounds()
 
     # ── input guards ──────────────────────────────────────────────────────────
 
@@ -211,22 +206,36 @@ class PhysicsSandbox:
         notes: List[str] = []
         iterations = 0
         corrected = False
+        params = {
+            "nw": result.nw, "no": result.no,
+            "Swi": endpoints.Swi, "Sor": endpoints.Sor,
+            "Krw_max": endpoints.Krw_max, "Kro_max": endpoints.Kro_max,
+            "r2_krw": result.r2_krw, "r2_kro": result.r2_kro,
+            "parameters_source": "free_fit",
+        }
 
         if health["grade"] not in self._PASSING_GRADES:
             corrected = True
-            grid, health, iterations, fix_notes = self._auto_correct_kr(
+            grid, health, iterations, fix_notes, fixed = self._auto_correct_kr(
                 fitter, endpoints, sw_a, krw_a, kro_a, result,
             )
             notes.extend(fix_notes)
+            # The parameters describe the curve that is plotted — the corrected
+            # one — not the seed free fit the corrector rejected. r2 is the
+            # corrected curve against the lab points.
+            ep = Endpoints(Swi=endpoints.Swi, Sor=endpoints.Sor,
+                           Krw_max=fixed["Krw_max"], Kro_max=fixed["Kro_max"])
+            params = {
+                **fixed,
+                "Swi": endpoints.Swi, "Sor": endpoints.Sor,
+                "r2_krw": self._r2(krw_a, bc_krw(sw_a, ep, fixed["nw"])),
+                "r2_kro": self._r2(kro_a, bc_kro(sw_a, ep, fixed["no"])),
+                "parameters_source": "corrected",
+            }
 
         outcome = FitOutcome(
             model="brooks_corey",
-            parameters={
-                "nw": result.nw, "no": result.no,
-                "Swi": endpoints.Swi, "Sor": endpoints.Sor,
-                "Krw_max": endpoints.Krw_max, "Kro_max": endpoints.Kro_max,
-                "r2_krw": result.r2_krw, "r2_kro": result.r2_kro,
-            },
+            parameters=params,
             health=health,
             coordinates=self._kr_coordinates(grid),
             corrected=corrected,
@@ -243,16 +252,20 @@ class PhysicsSandbox:
         krw: np.ndarray,
         kro: np.ndarray,
         seed_result,
-    ) -> Tuple[Dict[str, List[float]], Dict[str, Any], int, List[str]]:
+    ) -> Tuple[Dict[str, List[float]], Dict[str, Any], int, List[str], Dict[str, float]]:
         """Iteratively recover a physical Kr curve from an anomalous first fit.
 
         Strategy: sweep a small ladder of monotonic Brooks-Corey exponents (which
         are physical by construction) and keep the curve whose health score is
         highest; escalate to simulated annealing if none reach a passing grade.
+        Returns the grid, its health, the iteration count, notes, and the
+        parameters (nw, no, Krw_max, Kro_max) of the grid actually returned.
         """
         notes: List[str] = []
         best_grid = fitter.generate_grid("brooks_corey", seed_result)
         best_health = self._score_kr(best_grid)
+        best_params = {"nw": float(seed_result.nw), "no": float(seed_result.no),
+                       "Krw_max": endpoints.Krw_max, "Kro_max": endpoints.Kro_max}
         iterations = 0
 
         exponent_ladder = [1.5, 2.0, 2.5, 3.0, 4.0]
@@ -269,23 +282,25 @@ class PhysicsSandbox:
                 health = self._score_kr(grid)
                 if health["score"] > best_health["score"]:
                     best_grid, best_health = grid, health
+                    best_params = {"nw": nw, "no": no,
+                                   "Krw_max": endpoints.Krw_max, "Kro_max": endpoints.Kro_max}
                     notes.append(f"Refit nw={nw}, no={no} → score {health['score']}")
                 if health["grade"] in self._PASSING_GRADES:
-                    return best_grid, best_health, iterations, notes
+                    return best_grid, best_health, iterations, notes, best_params
 
         # Last resort: global search via simulated annealing on the lab data.
         if best_health["grade"] not in self._PASSING_GRADES:
-            sa_grid, sa_health, sa_used = self._anneal_kr(endpoints, sw, krw, kro)
+            sa_grid, sa_health, sa_used, sa_params = self._anneal_kr(endpoints, sw, krw, kro)
             iterations += sa_used
             if sa_health["score"] >= best_health["score"]:
-                best_grid, best_health = sa_grid, sa_health
+                best_grid, best_health, best_params = sa_grid, sa_health, sa_params
                 notes.append("Escalated to simulated annealing for global optimum.")
 
-        return best_grid, best_health, iterations, notes
+        return best_grid, best_health, iterations, notes, best_params
 
     def _anneal_kr(
         self, endpoints: Endpoints, sw: np.ndarray, krw: np.ndarray, kro: np.ndarray,
-    ) -> Tuple[Dict[str, List[float]], Dict[str, Any], int]:
+    ) -> Tuple[Dict[str, List[float]], Dict[str, Any], int, Dict[str, float]]:
         """Brooks-Corey global fit via the project's simulated-annealing engine."""
         from prc_simulated_annealing import PRCSimulatedAnnealing
 
@@ -300,7 +315,9 @@ class PhysicsSandbox:
             "Krw": [round(float(v), 6) for v in bc_krw(grid_sw, ep, nw)],
             "Kro": [round(float(v), 6) for v in bc_kro(grid_sw, ep, no)],
         }
-        return grid, self._score_kr(grid), len(history)
+        params = {"nw": float(nw), "no": float(no),
+                  "Krw_max": float(krw_max), "Kro_max": float(kro_max)}
+        return grid, self._score_kr(grid), len(history), params
 
     @staticmethod
     def _score_kr(grid: Dict[str, List[float]]) -> Dict[str, Any]:
@@ -347,6 +364,10 @@ class PhysicsSandbox:
         corrected = False
 
         coeff_key, exp_key = ("a", "m") if mt == "FF" else ("b", "n")
+        # Health is scored on the FREE fit — what the data actually supports.
+        # Scoring the clamped values would grade A a fit that failed physics
+        # (the bounded re-solve cannot leave the window by construction).
+        health = self._score_archie(mt, {coeff_key: coeff, exp_key: exponent})
         if not self._archie_in_bounds(coeff, coeff_key) or \
                 not self._archie_in_bounds(exponent, exp_key):
             corrected = True
@@ -355,7 +376,6 @@ class PhysicsSandbox:
             )
 
         params = {coeff_key: round(float(coeff), 4), exp_key: round(float(exponent), 4)}
-        health = self._score_archie(mt, params)
         forward = archie_formation_factor if mt == "FF" else archie_resistivity_index
         y_fit = forward(x_a, coeff, exponent)
 
@@ -385,8 +405,12 @@ class PhysicsSandbox:
         """
         mask = (x > 1e-9) & (y > 1e-9)
         if np.sum(mask) < 2:
-            # Degenerate input: fall back to textbook clean-sand values.
-            return (1.0, 2.0)
+            # Textbook (1.0, 2.0) is in-bounds, so it used to come back as an
+            # uncorrected grade-A "fit". Nothing was fitted: refuse.
+            raise PhysicalValidationError(
+                f"Archie {model_type} fit needs at least 2 points with x > 0 and y > 0 "
+                f"(got {int(np.sum(mask))}); no parameters were fitted."
+            )
         log_x = np.log10(x[mask])
         log_y = np.log10(y[mask])
         slope, intercept = np.polyfit(log_x, log_y, 1)
@@ -400,8 +424,8 @@ class PhysicsSandbox:
     ) -> Tuple[float, float, int, List[str]]:
         """Bounded re-fit forcing Archie parameters into their physical window."""
         coeff_key, exp_key = ("a", "m") if model_type == "FF" else ("b", "n")
-        c_lo, c_hi = self._ARCHIE_BOUNDS[coeff_key]
-        e_lo, e_hi = self._ARCHIE_BOUNDS[exp_key]
+        c_lo, c_hi = self._archie_bounds[coeff_key]
+        e_lo, e_hi = self._archie_bounds[exp_key]
         forward = archie_formation_factor if model_type == "FF" else archie_resistivity_index
 
         p0 = [
@@ -425,19 +449,21 @@ class PhysicsSandbox:
             return p0[0], p0[1], 1, notes
 
     def _archie_in_bounds(self, value: float, key: str) -> bool:
-        lo, hi = self._ARCHIE_BOUNDS[key]
+        lo, hi = self._archie_bounds[key]
         return lo <= float(value) <= hi
 
-    @staticmethod
-    def _score_archie(model_type: str, params: Dict[str, float]) -> Dict[str, Any]:
-        """Health block for fitted Archie parameters (fills the other pair as ideal)."""
+    def _score_archie(self, model_type: str, params: Dict[str, float]) -> Dict[str, Any]:
+        """Health block for the fitted Archie pair only — the un-fitted pair is
+        not filled with textbook ideals (two vacuous passes inflated
+        rules_checked). Validated against the same window the corrector clamps to."""
         guard = PhysicsGuard()
-        a = params.get("a", 1.0)
-        m = params.get("m", 2.0)
-        b = params.get("b", 1.0)
-        n = params.get("n", 2.0)
-        guard.validate_archie_parameters(a=a, m=m, b=b, n=n)
-        return guard.generate_health_score()
+        guard.validate_archie_parameters(
+            a=params.get("a"), m=params.get("m"), b=params.get("b"), n=params.get("n"),
+            bounds=self._archie_bounds,
+        )
+        health = guard.generate_health_score()
+        health["bounds_source"] = self._archie_bounds_source
+        return health
 
     # ── Archie-Waxman-Smits ───────────────────────────────────────────────────
 
@@ -460,7 +486,7 @@ class PhysicsSandbox:
         sw_a = np.asarray(sw, dtype=float)
         ct_a = np.asarray(ct, dtype=float)
         self._assert_saturation_domain(sw_a)
-        n_lo, n_hi = self._ARCHIE_BOUNDS["n"]
+        n_lo, n_hi = self._archie_bounds["n"]
 
         def _forward(s: np.ndarray, n_star: float) -> np.ndarray:
             return waxman_smits_conductivity(
@@ -469,14 +495,23 @@ class PhysicsSandbox:
 
         notes: List[str] = []
         corrected = False
+        guard = PhysicsGuard()
         try:
             popt, _ = curve_fit(_forward, sw_a, ct_a, p0=[n0],
                                 bounds=(1.0, 4.0), maxfev=10000)
             n_star = float(popt[0])
+            # Score the FREE value: a clamped n* is inside the window by construction.
+            guard.validate_archie_parameters(n=n_star, bounds=self._archie_bounds)
         except Exception as exc:
             n_star = n0
             corrected = True
             notes.append(f"Fit failed ({exc}); fell back to n*={n0}.")
+            # No fit happened — the health block must carry that, not grade the fallback.
+            guard._check(False, "WAXMAN_SMITS_FIT_FAILED",
+                         f"curve_fit did not converge ({type(exc).__name__}: {exc}); "
+                         f"n*={n0} is the seed, not a fitted value.")
+        health = guard.generate_health_score()
+        health["bounds_source"] = self._archie_bounds_source
 
         if not (n_lo <= n_star <= n_hi):
             corrected = True
@@ -485,9 +520,6 @@ class PhysicsSandbox:
             n_star = clamped
 
         ct_fit = _forward(sw_a, n_star)
-        guard = PhysicsGuard()
-        guard.validate_archie_parameters(a=1.0, m=2.0, b=1.0, n=n_star)
-        health = guard.generate_health_score()
 
         outcome = FitOutcome(
             model="archie_waxman_smits",

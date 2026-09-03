@@ -26,19 +26,17 @@ class MasterEngineerNode:
 
     def analyze_scal_data(self, validated_json: list) -> str:
         if self.llm_call is None:
-            # Offline / standard fallback message
+            # Offline: keep the two-section contract the pipeline parses, but carry
+            # NO numbers. The former canned text quoted Cp/Pd/Swir values that were
+            # placeholders unrelated to `validated_json`, "estimated from the input"
+            # — and were written to reservoir_report.md as analysis (D3.1).
             return """### Reservoir Report
-Geomechanical Analysis (Offline Mode):
-Lithological Deduction: The input petrophysical characteristics suggest a stiff limestone carbonate matrix with variable micro-fracturing.
-Derivative Physics Calculations:
-- Pore Volume Compressibility (Cp): Estimated around 3.5e-6 psi^-1 under elevated overburden pressure of 3500 psi.
-- Entry Pressure (Pd): Estimated at 15.0 psi.
-- Irreducible Water Saturation (Swir): Estimated at 18.5%.
-Reservoir Risk Profile:
-Low overall compressibility indicates a very stiff Eocene/Paleocene Carbonate formation, resulting in 'No Compaction Drive'. Production strategies should rely on early pressure maintenance via water injection.
+OFFLINE MODE: no LLM adapter was supplied, so no analysis was performed on the validated data. \
+No geomechanical deductions, derivative physics values or risk assessment are available for this run.
 
 ### Visualizer Directive
-Build a dual-plot Streamlit layout displaying Porosity vs. Pressure and Permeability vs. Pressure. Include dynamic sliders for Reservoir Interfacial Tension (IFT) and water/oil fluid densities to dynamically convert lab capillary pressure (Pc) to reservoir height curves using clean math operations."""
+OFFLINE MODE: no analysis was performed; build the standard dual-plot layout (Porosity vs. Pressure, \
+Permeability vs. Pressure) from the validated data only, without derived parameters."""
 
         system_instruction = """System Role: Senior Reservoir Geomechanics & SCAL Engineer
 Context: You are the lead petroleum engineer for the PRC AI Hub. You receive validated Special Core Analysis (SCAL) and Routine Core Analysis (RCA) JSON data.
@@ -65,7 +63,7 @@ You MUST format your response into two distinct sections with clear markdown hea
         prompt = f"Here is the validated SCAL data in JSON format:\n{json.dumps(validated_json, indent=2)}\n\nGenerate your expert geomechanical analysis and visualizer directive."
 
         # Success/failure for /health is recorded by the adapter behind llm_call.
-        try:
-            return self.llm_call(prompt, system_instruction=system_instruction, temperature=0.2)
-        except Exception as e:
-            return f"Error running Master Engineer analysis: {str(e)}"
+        # A provider failure raises: the pipeline's task handler marks the run
+        # "error". It used to return "Error running ..." as the report string,
+        # which was written to reservoir_report.md and the run reported success.
+        return self.llm_call(prompt, system_instruction=system_instruction, temperature=0.2)
